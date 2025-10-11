@@ -6,7 +6,7 @@ use tokio::process::Command;
 #[derive(Debug, Deserialize)]
 struct TerraformOutputInstances(Vec<TerraformOutputInstance>);
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct TerraformOutputInstance {
     pub private_ip: Ipv4Addr,
     pub public_dns: String,
@@ -39,5 +39,13 @@ impl Cluster {
             clients: clients.0,
             build,
         })
+    }
+}
+
+impl Instance {
+    pub fn ssh(&self) -> Command {
+        let mut cmd = Command::new("ssh");
+        cmd.arg(&self.public_dns);
+        cmd
     }
 }
