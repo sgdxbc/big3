@@ -6,5 +6,9 @@ pub type NodeIndex = u16;
 pub struct ClientConfig {
     pub num_nodes: NodeIndex,
     pub num_faulty_nodes: NodeIndex,
-    pub num_max_ongoing: usize,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct ClientWorkerConfig {
+    pub num_concurrent: usize,
 }

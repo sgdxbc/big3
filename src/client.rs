@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashMap};
 
 use crate::{
-    schema::ClientConfig,
+    schema::{ClientConfig, ClientWorkerConfig},
     types::{ClientId, ClientSeq, NodeIndex, Reply, Request},
 };
 
@@ -34,6 +34,8 @@ impl<C> Client<C> {
             ongoing: Default::default(),
         }
     }
+
+    const NUM_MAX_ONGOING: usize = 1000;
 }
 
 impl<C: ClientContext> Client<C> {
@@ -54,7 +56,7 @@ impl<C: ClientContext> Client<C> {
                 replies: Default::default(),
             },
         );
-        while self.ongoing.len() > self.config.num_max_ongoing {
+        while self.ongoing.len() > Self::NUM_MAX_ONGOING {
             self.ongoing.pop_first();
         }
 
@@ -83,18 +85,20 @@ impl<C: ClientContext> Client<C> {
 
 pub struct ClientWorker<C> {
     client: Client<C>,
-    // config
+    config: ClientWorkerConfig,
 }
 
 impl<C> ClientWorker<C> {
-    pub fn new(client: Client<C>) -> Self {
-        Self { client }
+    pub fn new(client: Client<C>, config: ClientWorkerConfig) -> Self {
+        Self { client, config }
     }
 }
 
 impl<C: ClientContext> ClientWorker<C> {
-    pub fn init(&mut self) {
-        self.client.invoke(vec![]); // TODO
+    pub fn start(&mut self) {
+        for _ in 0..self.config.num_concurrent {
+            self.client.invoke(vec![]); // TODO
+        }
     }
 
     pub fn on_finalize(&mut self, _seq: ClientSeq, _res: Vec<u8>) {
