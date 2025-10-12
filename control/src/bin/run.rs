@@ -1,7 +1,9 @@
 use std::time::Duration;
 
 use big_control::{Cluster, Instance};
+use big_schema::{Task, TaskMetrics};
 use reqwest::Client;
+use serde::de::DeserializeOwned;
 use tokio::{fs, task::JoinSet, time::sleep, try_join};
 
 #[tokio::main]
@@ -42,29 +44,68 @@ async fn run_workload(
 ) -> anyhow::Result<()> {
     let control_client = Client::new();
     sleep(Duration::from_secs(3)).await;
-    request_all(&server_instances, "load", control_client.clone()).await?;
-    request_all(&server_instances, "start", control_client.clone()).await?;
-    request_all(&client_instances, "load", control_client.clone()).await?;
-    request_all(&client_instances, "start", control_client.clone()).await?;
+    println!("load servers");
+    load_all(&server_instances, Task::Replica, control_client.clone()).await?;
+    println!("start servers");
+    start_all(&server_instances, control_client.clone()).await?;
+    println!("load clients");
+    load_all(&client_instances, Task::Replica, control_client.clone()).await?; //
+    println!("start clients");
+    start_all(&client_instances, control_client.clone()).await?;
     // TODO wait for a while
-    request_all(&client_instances, "stop", control_client.clone()).await?;
-    request_all(&server_instances, "stop", control_client.clone()).await?;
+    println!("stop clients");
+    stop_all::<TaskMetrics>(&client_instances, control_client.clone()).await?;
+    println!("stop servers");
+    stop_all::<TaskMetrics>(&server_instances, control_client.clone()).await?;
     Ok(())
 }
 
-async fn request_all(
+async fn load_all(
     instances: impl IntoIterator<Item = &Instance>,
-    path: &str,
+    task: Task,
     control_client: Client,
 ) -> anyhow::Result<()> {
     let mut tasks = JoinSet::new();
     for instance in instances {
         let client = control_client.clone();
-        let url = format!("http://{}:3000/{}", instance.public_dns, path);
+        let url = format!("http://{}:3000/load", instance.public_dns);
+        let task = task.clone();
+        tasks.spawn(async move { client.post(url).json(&task).send().await });
+    }
+    while let Some(result) = tasks.join_next().await {
+        result??.error_for_status()?;
+    }
+    Ok(())
+}
+
+async fn start_all(
+    instances: impl IntoIterator<Item = &Instance>,
+    control_client: Client,
+) -> anyhow::Result<()> {
+    let mut tasks = JoinSet::new();
+    for instance in instances {
+        let client = control_client.clone();
+        let url = format!("http://{}:3000/start", instance.public_dns);
         tasks.spawn(async move { client.post(url).send().await });
     }
     while let Some(result) = tasks.join_next().await {
         result??.error_for_status()?;
+    }
+    Ok(())
+}
+
+async fn stop_all<T: DeserializeOwned>(
+    instances: impl IntoIterator<Item = &Instance>,
+    control_client: Client,
+) -> anyhow::Result<()> {
+    let mut tasks = JoinSet::new();
+    for instance in instances {
+        let client = control_client.clone();
+        let url = format!("http://{}:3000/stop", instance.public_dns);
+        tasks.spawn(async move { client.post(url).send().await });
+    }
+    while let Some(result) = tasks.join_next().await {
+        result??.error_for_status()?.json::<T>().await?;
     }
     Ok(())
 }

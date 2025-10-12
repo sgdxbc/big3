@@ -1,5 +1,15 @@
 use serde::{Deserialize, Serialize};
 
+#[derive(Clone, Serialize, Deserialize)]
+pub enum Task {
+    Replica,
+}
+
+#[derive(Serialize, Deserialize)]
+pub enum TaskMetrics {
+    Replica,
+}
+
 pub type NodeIndex = u16;
 
 #[derive(Serialize, Deserialize)]

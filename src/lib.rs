@@ -1,4 +1,4 @@
-use big_schema as schema;
+pub use big_schema as schema;
 
 pub mod cert;
 pub mod client;
