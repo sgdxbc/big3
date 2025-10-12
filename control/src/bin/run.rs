@@ -1,9 +1,8 @@
 use std::time::Duration;
 
 use big_control::{Cluster, Instance};
-use big_schema::{Task, TaskMetrics};
+use big_schema::{Stopped, Task};
 use reqwest::Client;
-use serde::de::DeserializeOwned;
 use tokio::{fs, task::JoinSet, time::sleep, try_join};
 
 #[tokio::main]
@@ -48,15 +47,34 @@ async fn run_workload(
     load_all(&server_instances, Task::Replica, control_client.clone()).await?;
     println!("start servers");
     start_all(&server_instances, control_client.clone()).await?;
+
     println!("load clients");
-    load_all(&client_instances, Task::Replica, control_client.clone()).await?; //
+    let client_task = big_schema::ClientTask {
+        addrs: server_instances
+            .iter()
+            .map(|instance| (instance.private_ip, 5000).into())
+            .collect(),
+        config: big_schema::ClientConfig {
+            num_nodes: 1,
+            num_faulty_nodes: 0,
+        },
+        worker_config: big_schema::ClientWorkerConfig { num_concurrent: 10 },
+    };
+    load_all(
+        &client_instances,
+        Task::Client(client_task),
+        control_client.clone(),
+    )
+    .await?; //
     println!("start clients");
     start_all(&client_instances, control_client.clone()).await?;
-    // TODO wait for a while
+
+    sleep(Duration::from_secs(10)).await;
+
     println!("stop clients");
-    stop_all::<TaskMetrics>(&client_instances, control_client.clone()).await?;
+    stop_all(&client_instances, control_client.clone()).await?;
     println!("stop servers");
-    stop_all::<TaskMetrics>(&server_instances, control_client.clone()).await?;
+    stop_all(&server_instances, control_client.clone()).await?;
     Ok(())
 }
 
@@ -94,7 +112,7 @@ async fn start_all(
     Ok(())
 }
 
-async fn stop_all<T: DeserializeOwned>(
+async fn stop_all(
     instances: impl IntoIterator<Item = &Instance>,
     control_client: Client,
 ) -> anyhow::Result<()> {
@@ -105,7 +123,7 @@ async fn stop_all<T: DeserializeOwned>(
         tasks.spawn(async move { client.post(url).send().await });
     }
     while let Some(result) = tasks.join_next().await {
-        result??.error_for_status()?.json::<T>().await?;
+        result??.error_for_status()?.json::<Stopped>().await?;
     }
     Ok(())
 }

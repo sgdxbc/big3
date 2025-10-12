@@ -24,7 +24,7 @@ async fn main() -> anyhow::Result<()> {
     let download = async {
         sleep(Duration::from_secs(1)).await;
         let mut tasks = JoinSet::new();
-        for server in cluster.servers {
+        for server in cluster.servers.into_iter().chain(cluster.clients) {
             tasks.spawn(
                 server
                     .ssh()

@@ -105,8 +105,7 @@ impl NetworkIncomingTask {
             let tx_incoming_message = tx_incoming_message.clone();
             tokio::spawn(async move {
                 let bytes = recv.read_to_end(usize::MAX).await?;
-                let message: Request =
-                    bincode::decode_from_slice(&bytes, bincode::config::standard())?.0;
+                let message = bincode::decode_from_slice(&bytes, bincode::config::standard())?.0;
                 let _ = tx_incoming_message.send(message).await;
                 anyhow::Ok(())
             });
@@ -171,13 +170,13 @@ impl NetworkOutgoingTask {
     }
 }
 
-pub struct ReplicaTask {
+pub struct ReplicaNodeTask {
     network_outgoing: NetworkOutgoingTask,
     execute: ExecuteTask,
     network_incoming: NetworkIncomingTask,
 }
 
-impl ReplicaTask {
+impl ReplicaNodeTask {
     pub async fn load() -> anyhow::Result<Self> {
         let network_outgoing = NetworkOutgoingTask::new();
         let execute_context = Context {

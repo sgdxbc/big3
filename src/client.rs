@@ -84,7 +84,7 @@ impl<C: ClientContext> Client<C> {
 }
 
 pub struct ClientWorker<C> {
-    client: Client<C>,
+    pub client: Client<C>,
     config: ClientWorkerConfig,
 }
 

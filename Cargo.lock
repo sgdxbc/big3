@@ -140,6 +140,7 @@ dependencies = [
  "flexi_logger",
  "log",
  "quinn",
+ "rand",
  "tokio",
  "tokio-util",
 ]

@@ -42,7 +42,7 @@ async fn main() -> anyhow::Result<()> {
 enum Command {
     Load(schema::Task, oneshot::Sender<()>),
     Start,
-    Stop(oneshot::Sender<schema::TaskMetrics>),
+    Stop(oneshot::Sender<schema::Stopped>),
 }
 
 async fn run(mut rx_command: Receiver<Command>) -> anyhow::Result<()> {
