@@ -16,7 +16,7 @@ impl<C> Execute<C> {
 }
 
 impl<C: ExecuteContext> Execute<C> {
-    pub fn execute(&mut self, request: Request) {
+    pub fn on_request(&mut self, request: Request) {
         let reply = Reply {
             client_seq: request.client_seq,
             res: request.command, // echo
