@@ -1,4 +1,8 @@
-use std::{collections::HashMap, net::SocketAddr};
+use std::{
+    collections::HashMap,
+    net::SocketAddr,
+    sync::{Arc, Mutex},
+};
 
 use quinn::{Connection, Endpoint};
 use tokio::{
@@ -11,7 +15,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     cert::client_config,
-    client::{Client, ClientContext, ClientWorker},
+    client::{Client, ClientContext, ClientWorker, Records},
     schema::ClientTask,
     types::{ClientId, ClientSeq, NodeIndex, Reply, Request},
 };
@@ -55,6 +59,7 @@ impl ClientWorkerTask {
     }
 
     async fn run_inner(&mut self) {
+        self.client_worker.start();
         loop {
             select! {
                 Some((seq, res)) = self.channels.rx_finalize.recv() => {
@@ -192,6 +197,10 @@ impl ClientNodeTask {
             network_outgoing,
             client_worker,
         })
+    }
+
+    pub fn scrape_state(&self) -> Arc<Mutex<Records>> {
+        Arc::clone(&self.client_worker.client_worker.records)
     }
 
     pub async fn run(self, stop: CancellationToken) -> anyhow::Result<()> {

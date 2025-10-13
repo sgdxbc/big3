@@ -1,9 +1,15 @@
 use std::time::Duration;
 
 use big_control::{Cluster, Instance};
-use big_schema::{Stopped, Task};
+use big_schema::{Scrape, Stopped, Task};
+use hdrhistogram::serialization::Deserializer;
 use reqwest::Client;
-use tokio::{fs, task::JoinSet, time::sleep, try_join};
+use tokio::{
+    fs,
+    task::JoinSet,
+    time::{Instant, sleep, sleep_until},
+    try_join,
+};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -69,7 +75,13 @@ async fn run_workload(
     println!("start clients");
     start_all(&client_instances, control_client.clone()).await?;
 
-    sleep(Duration::from_secs(10)).await;
+    let mut next_scrape = Instant::now() + Duration::from_secs(1);
+    for _ in 0..10 {
+        sleep_until(next_scrape).await;
+        println!("scrape clients");
+        scrape_all(&client_instances, control_client.clone()).await?;
+        next_scrape += Duration::from_secs(1);
+    }
 
     println!("stop clients");
     stop_all(&client_instances, control_client.clone()).await?;
@@ -108,6 +120,29 @@ async fn start_all(
     }
     while let Some(result) = tasks.join_next().await {
         result??.error_for_status()?;
+    }
+    Ok(())
+}
+
+async fn scrape_all(
+    instances: impl IntoIterator<Item = &Instance>,
+    control_client: Client,
+) -> anyhow::Result<()> {
+    let mut tasks = JoinSet::new();
+    for instance in instances {
+        let client = control_client.clone();
+        let url = format!("http://{}:3000/scrape", instance.public_dns);
+        tasks.spawn(async move { client.post(url).send().await });
+    }
+    while let Some(result) = tasks.join_next().await {
+        let scrape = result??.error_for_status()?.json::<Scrape>().await?;
+        let latency_histogram =
+            Deserializer::new().deserialize::<u64, _>(&mut &*scrape.latency_histogram)?;
+        let throughput = latency_histogram.len() as f64 / scrape.interval.as_secs_f64();
+        let p50 = Duration::from_nanos(latency_histogram.value_at_quantile(0.5));
+        let p95 = Duration::from_nanos(latency_histogram.value_at_quantile(0.95));
+        let p99 = Duration::from_nanos(latency_histogram.value_at_quantile(0.99));
+        println!("throughput {throughput:.0} req/s, p50 {p50:?}, p95 {p95:?}, p99 {p99:?}");
     }
     Ok(())
 }

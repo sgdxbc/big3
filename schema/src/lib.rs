@@ -1,7 +1,8 @@
-use std::net::SocketAddr;
+use std::{net::SocketAddr, time::Duration};
 
 use serde::{Deserialize, Serialize};
 
+// payload of `/load`
 #[derive(Clone, Serialize, Deserialize)]
 pub enum Task {
     Replica,
@@ -15,12 +16,22 @@ pub struct ClientTask {
     pub worker_config: ClientWorkerConfig,
 }
 
+// response of `/scrape`
+#[derive(Serialize, Deserialize)]
+pub struct Scrape {
+    pub interval: Duration,
+    #[serde(with = "serde_bytes")]
+    pub latency_histogram: Vec<u8>,
+}
+
+// response of `/stop`
 #[derive(Serialize, Deserialize)]
 pub enum Stopped {
     Replica,
     Client,
 }
 
+// inner types
 pub type NodeIndex = u16;
 
 #[derive(Clone, Serialize, Deserialize)]

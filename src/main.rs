@@ -3,7 +3,6 @@ use std::sync::Arc;
 use axum::{Json, extract::State, response::IntoResponse, routing::post};
 use big::{schema, tasks::Task};
 use tokio::{
-    select,
     sync::{
         mpsc::{Receiver, Sender, channel},
         oneshot,
@@ -17,16 +16,17 @@ async fn main() -> anyhow::Result<()> {
     let (tx_command, rx_command) = channel(1);
     let run_task = run(rx_command);
 
-    let router = axum::Router::new()
-        .route("/load", post(load))
-        .route("/start", post(start))
-        .route("/stop", post(stop));
     let shutdown = CancellationToken::new();
     let state = AppState {
         shutdown: shutdown.clone(),
         tx_command,
     };
-    let router = router.with_state(Arc::new(state));
+    let router = axum::Router::new()
+        .route("/load", post(load))
+        .route("/start", post(start))
+        .route("/scrape", post(scrape))
+        .route("/stop", post(stop))
+        .with_state(Arc::new(state));
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await?;
     let serve = async {
         axum::serve(listener, router)
@@ -42,6 +42,7 @@ async fn main() -> anyhow::Result<()> {
 enum Command {
     Load(schema::Task, oneshot::Sender<()>),
     Start,
+    Scrape(oneshot::Sender<schema::Scrape>),
     Stop(oneshot::Sender<schema::Stopped>),
 }
 
@@ -56,17 +57,23 @@ async fn run(mut rx_command: Receiver<Command>) -> anyhow::Result<()> {
         anyhow::bail!("second command must be start");
     };
     let stop = CancellationToken::new();
-    let mut task_handle = tokio::spawn(task.run(stop.clone()));
-
-    let tx_metrics = select! {
-        Some(Command::Stop(tx)) = rx_command.recv() => tx,
-        result = &mut task_handle => {
-            result??;
-            unimplemented!()
+    let scrape_state = task.scrape_state();
+    let watch = async {
+        loop {
+            match rx_command.recv().await {
+                Some(Command::Scrape(tx_scrape)) => {
+                    let _ = tx_scrape.send(scrape_state.scrape()?);
+                }
+                Some(Command::Stop(tx_stopped)) => {
+                    stop.cancel();
+                    break Ok(tx_stopped);
+                }
+                _ => anyhow::bail!("unexpected command"),
+            }
         }
     };
-    stop.cancel();
-    let _ = tx_metrics.send(task_handle.await??);
+    let (tx_stopped, stopped) = try_join!(watch, task.run(stop.clone()))?;
+    let _ = tx_stopped.send(stopped);
     Ok(())
 }
 
@@ -87,6 +94,12 @@ async fn load(State(state): State<Arc<AppState>>, Json(task): Json<schema::Task>
 
 async fn start(State(state): State<Arc<AppState>>) {
     state.tx_command.send(Command::Start).await.unwrap();
+}
+
+async fn scrape(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let (tx, rx) = oneshot::channel();
+    state.tx_command.send(Command::Scrape(tx)).await.unwrap();
+    Json(rx.await.unwrap())
 }
 
 async fn stop(State(state): State<Arc<AppState>>) -> impl IntoResponse {

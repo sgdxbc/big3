@@ -1,4 +1,10 @@
-use std::collections::{BTreeMap, HashMap};
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::{Arc, Mutex},
+    time::Instant,
+};
+
+use hdrhistogram::Histogram;
 
 use crate::{
     schema::{ClientConfig, ClientWorkerConfig},
@@ -86,22 +92,47 @@ impl<C: ClientContext> Client<C> {
 pub struct ClientWorker<C> {
     pub client: Client<C>,
     config: ClientWorkerConfig,
+
+    ongoing: HashMap<ClientSeq, Instant>,
+    pub records: Arc<Mutex<Records>>,
+}
+
+pub struct Records {
+    pub start: Instant,
+    pub latency_histogram: Histogram<u64>,
 }
 
 impl<C> ClientWorker<C> {
     pub fn new(client: Client<C>, config: ClientWorkerConfig) -> Self {
-        Self { client, config }
+        Self {
+            client,
+            config,
+            ongoing: Default::default(),
+            records: Arc::new(Mutex::new(Records {
+                start: Instant::now(),
+                latency_histogram: Histogram::new(3).unwrap(),
+            })),
+        }
     }
 }
 
 impl<C: ClientContext> ClientWorker<C> {
     pub fn start(&mut self) {
         for _ in 0..self.config.num_concurrent {
-            self.client.invoke(vec![]); // TODO
+            self.invoke();
         }
     }
 
-    pub fn on_finalize(&mut self, _seq: ClientSeq, _res: Vec<u8>) {
-        self.client.invoke(vec![]); // TODO
+    fn invoke(&mut self) {
+        let seq = self.client.invoke(vec![]); // TODO
+        self.ongoing.insert(seq, Instant::now());
+    }
+
+    pub fn on_finalize(&mut self, seq: ClientSeq, _res: Vec<u8>) {
+        let Some(start) = self.ongoing.remove(&seq) else {
+            unimplemented!()
+        };
+        self.records.lock().unwrap().latency_histogram += start.elapsed().as_nanos() as u64;
+        self.invoke()
     }
 }
