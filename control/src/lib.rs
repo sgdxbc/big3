@@ -5,6 +5,8 @@ use reqwest::Client;
 use serde::{Deserialize, de::DeserializeOwned};
 use tokio::{fs, process::Command, task::JoinSet};
 
+pub mod configs;
+
 #[derive(Debug, Deserialize)]
 struct TerraformOutputInstances(Vec<TerraformOutputInstance>);
 
