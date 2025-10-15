@@ -50,4 +50,5 @@ pub struct ClientConfig {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ClientWorkerConfig {
     pub num_concurrent: usize,
+    pub num_keys: u64,
 }

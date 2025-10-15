@@ -5,9 +5,11 @@ use std::{
 };
 
 use hdrhistogram::Histogram;
+use rand::{Rng, RngCore as _, rng};
 use tokio::sync::oneshot;
 
 use crate::{
+    execute::{self, Op},
     schema::{ClientConfig, ClientWorkerConfig},
     types::{ClientId, ClientSeq, NodeIndex, Reply, Request},
 };
@@ -128,7 +130,16 @@ impl<C: ClientWorkerContext> ClientWorker<C> {
     }
 
     fn invoke(&mut self) {
-        let seq = self.context.invoke(vec![]); // TODO
+        let key = execute::key(rng().random_range(0..self.config.num_keys));
+        let op = if rng().random_bool(1.) {
+            Op::Get(key)
+        } else {
+            let mut value = vec![0; 100 - 32];
+            rng().fill_bytes(&mut value);
+            Op::Put(key, value)
+        };
+        let command = bincode::encode_to_vec(&op, bincode::config::standard()).unwrap();
+        let seq = self.context.invoke(command);
         self.ongoing.insert(seq, Instant::now());
     }
 

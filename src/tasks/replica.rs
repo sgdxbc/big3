@@ -1,10 +1,13 @@
 use std::collections::HashMap;
 
 use quinn::{Connection, Endpoint};
+use tempfile::{TempDir, tempdir};
 use tokio::{
+    process::Command,
     select,
-    sync::mpsc::{
-        Receiver, Sender, UnboundedReceiver, UnboundedSender, channel, unbounded_channel,
+    sync::{
+        mpsc::{Receiver, Sender, UnboundedReceiver, UnboundedSender, channel, unbounded_channel},
+        oneshot,
     },
 };
 use tokio_util::sync::CancellationToken;
@@ -12,7 +15,9 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     cert::server_config,
     consensus::{Consensus, ConsensusContext},
-    execute::{Execute, ExecuteContext},
+    execute::{Execute, ExecuteContext, FetchId},
+    storage::{Storage, StorageOp},
+    tasks::PREFILL_PATH,
     types::{ClientId, Reply, Request},
 };
 
@@ -76,19 +81,92 @@ impl ExecuteTask {
     }
 
     async fn run_inner(&mut self) {
-        while let Some(request) = self.rx_requests.recv().await {
-            self.execute.on_requests(request);
+        loop {
+            select! {
+                Some((fetch_id, value)) = self.execute.context.rx_fetch_response.recv() => {
+                    self.execute.on_fetch_response(fetch_id, value);
+                }
+                Some(request) = self.rx_requests.recv() => {
+                    self.execute.on_requests(request);
+                }
+            }
         }
     }
 }
 
 struct ExecuteTaskContext {
     tx_outgoing_message: UnboundedSender<(ClientId, Reply)>,
+    tx_storage_op: UnboundedSender<StorageOp>,
+    tx_fetch_response: Sender<(FetchId, Option<Vec<u8>>)>,
+    rx_fetch_response: Receiver<(FetchId, Option<Vec<u8>>)>,
+    fetch_id: FetchId,
+}
+
+impl ExecuteTaskContext {
+    fn new(
+        tx_outgoing_message: UnboundedSender<(ClientId, Reply)>,
+        tx_storage_op: UnboundedSender<StorageOp>,
+    ) -> Self {
+        let (tx_fetch_response, rx_fetch_response) = channel(100);
+        Self {
+            tx_outgoing_message,
+            tx_storage_op,
+            tx_fetch_response,
+            rx_fetch_response,
+            fetch_id: 0,
+        }
+    }
 }
 
 impl ExecuteContext for ExecuteTaskContext {
     fn send(&mut self, id: ClientId, reply: Reply) {
         let _ = self.tx_outgoing_message.send((id, reply));
+    }
+
+    fn fetch(&mut self, key: [u8; 32]) -> FetchId {
+        self.fetch_id += 1;
+        let fetch_id = self.fetch_id;
+        let (tx_response, rx_response) = oneshot::channel();
+        let _ = self.tx_storage_op.send(StorageOp::Fetch(key, tx_response));
+        let tx_fetch_response = self.tx_fetch_response.clone();
+        tokio::spawn(async move {
+            let _ = tx_fetch_response.send((fetch_id, rx_response.await?)).await;
+            anyhow::Ok(())
+        });
+        fetch_id
+    }
+
+    fn post(&mut self, updates: Vec<([u8; 32], Option<Vec<u8>>)>) {
+        let _ = self.tx_storage_op.send(StorageOp::Post(updates));
+    }
+}
+
+pub struct StorageTask {
+    tx_storage_op: UnboundedSender<StorageOp>,
+    rx_storage_op: UnboundedReceiver<StorageOp>,
+    storage: Storage,
+}
+
+impl StorageTask {
+    fn new(storage: Storage) -> Self {
+        let (tx_storage_op, rx_storage_op) = unbounded_channel();
+        Self {
+            tx_storage_op,
+            rx_storage_op,
+            storage,
+        }
+    }
+
+    pub async fn run(mut self, stop: CancellationToken) -> anyhow::Result<()> {
+        tokio::spawn(async move { stop.run_until_cancelled(self.run_inner()).await }).await?;
+        Ok(())
+    }
+
+    async fn run_inner(&mut self) -> anyhow::Result<()> {
+        while let Some(op) = self.rx_storage_op.recv().await {
+            self.storage.invoke(op)?;
+        }
+        Ok(())
     }
 }
 
@@ -220,16 +298,29 @@ pub struct ReplicaNodeTask {
     network_outgoing: NetworkOutgoingTask,
     consensus: ConsensusTask,
     execute: ExecuteTask,
+    storage: StorageTask,
     network_incoming: NetworkIncomingTask,
+    _temp_dir: TempDir,
 }
 
 impl ReplicaNodeTask {
     pub async fn load() -> anyhow::Result<Self> {
         let network_outgoing = NetworkOutgoingTask::new();
 
-        let execute_context = ExecuteTaskContext {
-            tx_outgoing_message: network_outgoing.tx_outgoing_message.clone(),
-        };
+        let temp_dir = tempdir()?;
+        let status = Command::new("cp")
+            .arg("-rT")
+            .arg(PREFILL_PATH)
+            .arg(temp_dir.path())
+            .status()
+            .await?;
+        anyhow::ensure!(status.success(), "failed to copy prefill data");
+        let storage = StorageTask::new(Storage::new(temp_dir.path())?);
+
+        let execute_context = ExecuteTaskContext::new(
+            network_outgoing.tx_outgoing_message.clone(),
+            storage.tx_storage_op.clone(),
+        );
         let execute = ExecuteTask::new(Execute::new(execute_context, 0));
 
         let consensus_context = ConsensusTaskContext {
@@ -246,8 +337,10 @@ impl ReplicaNodeTask {
         Ok(Self {
             network_outgoing,
             execute,
+            storage,
             consensus,
             network_incoming,
+            _temp_dir: temp_dir,
         })
     }
 
@@ -256,6 +349,7 @@ impl ReplicaNodeTask {
             self.network_outgoing.run(stop.clone()),
             self.execute.run(stop.clone()),
             self.consensus.run(stop.clone()),
+            self.storage.run(stop.clone()),
             self.network_incoming.run(stop.clone()),
         )?;
         Ok(())

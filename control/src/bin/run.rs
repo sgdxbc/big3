@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use big_control::{Cluster, Instance, load_all, run_endpoints, stop_all};
+use big_control::{Cluster, Instance, configs::NUM_KEYS, load_all, run_endpoints, stop_all};
 use big_schema::{Scrape, Task};
 use hdrhistogram::serialization::Deserializer;
 use reqwest::Client;
@@ -40,7 +40,10 @@ async fn run_workload(
             num_nodes: 1,
             num_faulty_nodes: 0,
         },
-        worker_config: big_schema::ClientWorkerConfig { num_concurrent: 80 },
+        worker_config: big_schema::ClientWorkerConfig {
+            num_concurrent: 80,
+            num_keys: NUM_KEYS,
+        },
     };
     load_all(
         &client_instances,
