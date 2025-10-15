@@ -31,8 +31,9 @@ impl ExecuteTask {
         }
     }
 
-    pub async fn run(mut self, stop: CancellationToken) {
-        stop.run_until_cancelled(self.run_inner()).await;
+    pub async fn run(mut self, stop: CancellationToken) -> anyhow::Result<()> {
+        tokio::spawn(async move { stop.run_until_cancelled(self.run_inner()).await }).await?;
+        Ok(())
     }
 
     async fn run_inner(&mut self) {
@@ -75,8 +76,11 @@ impl NetworkIncomingTask {
         }
     }
 
-    pub async fn run(mut self, stop: CancellationToken) {
-        stop.run_until_cancelled(self.run_inner()).await;
+    pub async fn run(mut self, stop: CancellationToken) -> anyhow::Result<()> {
+        tokio::spawn(async move { stop.run_until_cancelled(self.run_inner()).await })
+            .await?
+            .unwrap_or(Ok(()))?;
+        Ok(())
     }
 
     async fn run_inner(&mut self) -> anyhow::Result<()> {
@@ -136,11 +140,14 @@ impl NetworkOutgoingTask {
         }
     }
 
-    pub async fn run(mut self, stop: CancellationToken) {
-        stop.run_until_cancelled(self.run_inner()).await;
+    pub async fn run(mut self, stop: CancellationToken) -> anyhow::Result<()> {
+        tokio::spawn(async move { stop.run_until_cancelled(self.run_inner()).await })
+            .await?
+            .unwrap_or(Ok(()))?;
+        Ok(())
     }
 
-    async fn run_inner(&mut self) {
+    async fn run_inner(&mut self) -> anyhow::Result<()> {
         loop {
             select! {
                 Some((id, conn)) = self.rx_connection.recv() => {
@@ -197,11 +204,11 @@ impl ReplicaNodeTask {
     }
 
     pub async fn run(self, stop: CancellationToken) -> anyhow::Result<()> {
-        tokio::join!(
+        tokio::try_join!(
             self.network_outgoing.run(stop.clone()),
             self.execute.run(stop.clone()),
             self.network_incoming.run(stop.clone()),
-        );
+        )?;
         Ok(())
     }
 }

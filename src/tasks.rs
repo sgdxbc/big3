@@ -43,7 +43,7 @@ impl Task {
     }
 
     pub async fn run(self, stop: CancellationToken) -> anyhow::Result<Stopped> {
-        let metrics = match self {
+        let stopped = match self {
             Self::Replica(task) => {
                 task.run(stop).await?;
                 Stopped::Replica
@@ -53,7 +53,7 @@ impl Task {
                 Stopped::Client
             }
         };
-        Ok(metrics)
+        Ok(stopped)
     }
 }
 

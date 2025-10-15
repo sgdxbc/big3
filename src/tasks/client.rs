@@ -54,8 +54,9 @@ impl ClientWorkerTask {
         }
     }
 
-    pub async fn run(mut self, stop: CancellationToken) {
-        stop.run_until_cancelled(self.run_inner()).await;
+    pub async fn run(mut self, stop: CancellationToken) -> anyhow::Result<()> {
+        tokio::spawn(async move { stop.run_until_cancelled(self.run_inner()).await }).await?;
+        Ok(())
     }
 
     async fn run_inner(&mut self) {
@@ -144,8 +145,9 @@ impl NetworkOutgoingTask {
         }
     }
 
-    pub async fn run(mut self, stop: CancellationToken) {
-        stop.run_until_cancelled(self.run_inner()).await;
+    pub async fn run(mut self, stop: CancellationToken) -> anyhow::Result<()> {
+        tokio::spawn(async move { stop.run_until_cancelled(self.run_inner()).await }).await?;
+        Ok(())
     }
 
     async fn run_inner(&mut self) {
@@ -204,10 +206,10 @@ impl ClientNodeTask {
     }
 
     pub async fn run(self, stop: CancellationToken) -> anyhow::Result<()> {
-        tokio::join!(
+        tokio::try_join!(
             self.network_outgoing.run(stop.clone()),
-            self.client_worker.run(stop)
-        );
+            self.client_worker.run(stop.clone())
+        )?;
         Ok(())
     }
 }
