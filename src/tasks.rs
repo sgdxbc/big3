@@ -36,7 +36,7 @@ impl Task {
             schema::Task::Replica => Self::Replica(ReplicaNodeTask::load().await?),
             schema::Task::Client(task) => Self::Client(ClientNodeTask::load(task).await?),
             schema::Task::Prefill(task) => {
-                PrefillTask::load(&task).await?;
+                PrefillTask::load(task).await?;
                 Self::Prefill
             }
         };

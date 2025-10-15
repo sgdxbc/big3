@@ -53,6 +53,11 @@ impl Instance {
 }
 
 pub async fn run_endpoints(instances: impl IntoIterator<Item = Instance>) -> anyhow::Result<()> {
+    let _ = fs::remove_dir_all("log").await;
+    fs::create_dir("log").await?;
+    fs::write("log/.gitignore", "*").await?;
+    fs::create_dir("log/stderr").await?;
+
     let mut tasks = JoinSet::new();
     for instance in instances {
         tasks.spawn(async move {

@@ -5,7 +5,6 @@ use big_schema::{Scrape, Task};
 use hdrhistogram::serialization::Deserializer;
 use reqwest::Client;
 use tokio::{
-    fs,
     task::JoinSet,
     time::{Instant, sleep, sleep_until},
     try_join,
@@ -13,11 +12,6 @@ use tokio::{
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let _ = fs::remove_dir_all("log").await;
-    fs::create_dir("log").await?;
-    fs::write("log/.gitignore", "*").await?;
-    fs::create_dir("log/stderr").await?;
-
     let cluster = Cluster::from_terraform().await?;
     let endpoints = run_endpoints([cluster.servers.clone(), cluster.clients.clone()].concat());
     let workload = run_workload(cluster.servers, cluster.clients);
