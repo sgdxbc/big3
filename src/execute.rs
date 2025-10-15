@@ -16,12 +16,14 @@ impl<C> Execute<C> {
 }
 
 impl<C: ExecuteContext> Execute<C> {
-    pub fn on_request(&mut self, request: Request) {
-        let reply = Reply {
-            client_seq: request.client_seq,
-            res: request.command, // echo
-            node_index: self.index,
-        };
-        self.context.send(request.client_id, reply);
+    pub fn on_requests(&mut self, requests: Vec<Request>) {
+        for request in requests {
+            let reply = Reply {
+                client_seq: request.client_seq,
+                res: request.command, // echo
+                node_index: self.index,
+            };
+            self.context.send(request.client_id, reply);
+        }
     }
 }

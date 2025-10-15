@@ -64,7 +64,7 @@ async fn run_workload(
             num_nodes: 1,
             num_faulty_nodes: 0,
         },
-        worker_config: big_schema::ClientWorkerConfig { num_concurrent: 20 },
+        worker_config: big_schema::ClientWorkerConfig { num_concurrent: 40 },
     };
     load_all(
         &client_instances,

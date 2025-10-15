@@ -11,22 +11,61 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     cert::server_config,
+    consensus::{Consensus, ConsensusContext},
     execute::{Execute, ExecuteContext},
     types::{ClientId, Reply, Request},
 };
 
+pub struct ConsensusTask {
+    tx_request: Sender<Request>,
+    rx_request: Receiver<Request>,
+    consensus: Consensus<ConsensusTaskContext>,
+}
+
+impl ConsensusTask {
+    fn new(consensus: Consensus<ConsensusTaskContext>) -> Self {
+        let (tx_request, rx_request) = channel(100);
+        Self {
+            tx_request,
+            rx_request,
+            consensus,
+        }
+    }
+
+    pub async fn run(mut self, stop: CancellationToken) -> anyhow::Result<()> {
+        tokio::spawn(async move { stop.run_until_cancelled(self.run_inner()).await }).await?;
+        Ok(())
+    }
+
+    async fn run_inner(&mut self) {
+        while let Some(request) = self.rx_request.recv().await {
+            self.consensus.on_request(request);
+        }
+    }
+}
+
+struct ConsensusTaskContext {
+    tx_requests: UnboundedSender<Vec<Request>>,
+}
+
+impl ConsensusContext for ConsensusTaskContext {
+    fn execute(&mut self, requests: Vec<Request>) {
+        let _ = self.tx_requests.send(requests);
+    }
+}
+
 pub struct ExecuteTask {
-    tx_incoming_message: Sender<Request>,
-    rx_incoming_message: Receiver<Request>,
-    execute: Execute<Context>,
+    tx_requests: UnboundedSender<Vec<Request>>,
+    rx_requests: UnboundedReceiver<Vec<Request>>,
+    execute: Execute<ExecuteTaskContext>,
 }
 
 impl ExecuteTask {
-    fn new(execute: Execute<Context>) -> Self {
-        let (tx_incoming_message, rx_incoming_message) = channel(100);
+    fn new(execute: Execute<ExecuteTaskContext>) -> Self {
+        let (tx_requests, rx_requests) = unbounded_channel();
         Self {
-            tx_incoming_message,
-            rx_incoming_message,
+            tx_requests,
+            rx_requests,
             execute,
         }
     }
@@ -37,17 +76,17 @@ impl ExecuteTask {
     }
 
     async fn run_inner(&mut self) {
-        while let Some(request) = self.rx_incoming_message.recv().await {
-            self.execute.on_request(request);
+        while let Some(request) = self.rx_requests.recv().await {
+            self.execute.on_requests(request);
         }
     }
 }
 
-struct Context {
+struct ExecuteTaskContext {
     tx_outgoing_message: UnboundedSender<(ClientId, Reply)>,
 }
 
-impl ExecuteContext for Context {
+impl ExecuteContext for ExecuteTaskContext {
     fn send(&mut self, id: ClientId, reply: Reply) {
         let _ = self.tx_outgoing_message.send((id, reply));
     }
@@ -179,6 +218,7 @@ impl NetworkOutgoingTask {
 
 pub struct ReplicaNodeTask {
     network_outgoing: NetworkOutgoingTask,
+    consensus: ConsensusTask,
     execute: ExecuteTask,
     network_incoming: NetworkIncomingTask,
 }
@@ -186,19 +226,27 @@ pub struct ReplicaNodeTask {
 impl ReplicaNodeTask {
     pub async fn load() -> anyhow::Result<Self> {
         let network_outgoing = NetworkOutgoingTask::new();
-        let execute_context = Context {
+
+        let execute_context = ExecuteTaskContext {
             tx_outgoing_message: network_outgoing.tx_outgoing_message.clone(),
         };
         let execute = ExecuteTask::new(Execute::new(execute_context, 0));
+
+        let consensus_context = ConsensusTaskContext {
+            tx_requests: execute.tx_requests.clone(),
+        };
+        let consensus = ConsensusTask::new(Consensus::new(consensus_context, 0));
+
         let endpoint = Endpoint::server(server_config(), ([0, 0, 0, 0], 5000).into())?;
         let network_incoming = NetworkIncomingTask::new(
             endpoint,
-            execute.tx_incoming_message.clone(),
+            consensus.tx_request.clone(),
             network_outgoing.tx_connection.clone(),
         );
         Ok(Self {
             network_outgoing,
             execute,
+            consensus,
             network_incoming,
         })
     }
@@ -207,6 +255,7 @@ impl ReplicaNodeTask {
         tokio::try_join!(
             self.network_outgoing.run(stop.clone()),
             self.execute.run(stop.clone()),
+            self.consensus.run(stop.clone()),
             self.network_incoming.run(stop.clone()),
         )?;
         Ok(())
