@@ -100,7 +100,10 @@ async fn scrape_all(
         let p50 = Duration::from_nanos(latency_histogram.value_at_quantile(0.5));
         let p95 = Duration::from_nanos(latency_histogram.value_at_quantile(0.95));
         let p99 = Duration::from_nanos(latency_histogram.value_at_quantile(0.99));
-        println!("throughput {throughput:.0} req/s, p50 {p50:?}, p95 {p95:?}, p99 {p99:?}");
+        println!(
+            "interval {:?}, throughput {throughput:.0} req/s, p50 {p50:?}, p95 {p95:?}, p99 {p99:?}",
+            scrape.interval
+        );
     }
     Ok(())
 }

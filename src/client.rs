@@ -17,7 +17,7 @@ pub trait ClientContext {
 }
 
 pub struct Client<C> {
-    context: C,
+    pub context: C,
     config: ClientConfig,
     id: ClientId,
 
@@ -89,8 +89,12 @@ impl<C: ClientContext> Client<C> {
     }
 }
 
+pub trait ClientWorkerContext {
+    fn invoke(&mut self, command: Vec<u8>) -> ClientSeq;
+}
+
 pub struct ClientWorker<C> {
-    pub client: Client<C>,
+    context: C,
     config: ClientWorkerConfig,
 
     ongoing: HashMap<ClientSeq, Instant>,
@@ -103,9 +107,9 @@ pub struct Records {
 }
 
 impl<C> ClientWorker<C> {
-    pub fn new(client: Client<C>, config: ClientWorkerConfig) -> Self {
+    pub fn new(context: C, config: ClientWorkerConfig) -> Self {
         Self {
-            client,
+            context,
             config,
             ongoing: Default::default(),
             records: Arc::new(Mutex::new(Records {
@@ -116,7 +120,7 @@ impl<C> ClientWorker<C> {
     }
 }
 
-impl<C: ClientContext> ClientWorker<C> {
+impl<C: ClientWorkerContext> ClientWorker<C> {
     pub fn start(&mut self) {
         for _ in 0..self.config.num_concurrent {
             self.invoke();
@@ -124,7 +128,7 @@ impl<C: ClientContext> ClientWorker<C> {
     }
 
     fn invoke(&mut self) {
-        let seq = self.client.invoke(vec![]); // TODO
+        let seq = self.context.invoke(vec![]); // TODO
         self.ongoing.insert(seq, Instant::now());
     }
 
