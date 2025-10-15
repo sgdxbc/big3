@@ -126,8 +126,7 @@ impl ClientTask {
         loop {
             select! {
                 Some((command, tx_response)) = self.channels.rx_invoke.recv() => {
-                    let seq = self.client.invoke(command);
-                    self.client.context.invoke_responses.insert(seq, tx_response);
+                    self.client.invoke(command, tx_response);
                 }
                 Some(reply) = self.channels.rx_incoming_message.recv() => {
                     self.client.on_message(reply);
@@ -138,15 +137,10 @@ impl ClientTask {
 }
 
 struct ClientTaskContext {
-    invoke_responses: HashMap<ClientSeq, oneshot::Sender<Vec<u8>>>,
     tx_outgoing_message: UnboundedSender<(NodeIndex, Request)>,
 }
 
 impl ClientContext for ClientTaskContext {
-    fn finalize(&mut self, seq: ClientSeq, res: Vec<u8>) {
-        let _ = self.invoke_responses.remove(&seq).unwrap().send(res);
-    }
-
     fn send(&mut self, to: NodeIndex, request: Request) {
         let _ = self.tx_outgoing_message.send((to, request));
     }
@@ -251,7 +245,6 @@ impl ClientNodeTask {
         .await?;
 
         let client_context = ClientTaskContext {
-            invoke_responses: Default::default(),
             tx_outgoing_message: network_outgoing.tx_outgoing_message.clone(),
         };
         let client = ClientTask::new(

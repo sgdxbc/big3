@@ -5,6 +5,7 @@ use std::{
 };
 
 use hdrhistogram::Histogram;
+use tokio::sync::oneshot;
 
 use crate::{
     schema::{ClientConfig, ClientWorkerConfig},
@@ -13,7 +14,6 @@ use crate::{
 
 pub trait ClientContext {
     fn send(&mut self, to: NodeIndex, request: Request);
-    fn finalize(&mut self, seq: ClientSeq, res: Vec<u8>);
 }
 
 pub struct Client<C> {
@@ -27,6 +27,7 @@ pub struct Client<C> {
 
 struct Ongoing {
     replies: HashMap<NodeIndex, Vec<u8>>,
+    tx_response: oneshot::Sender<Vec<u8>>,
     // save command if resending
 }
 
@@ -45,7 +46,7 @@ impl<C> Client<C> {
 }
 
 impl<C: ClientContext> Client<C> {
-    pub fn invoke(&mut self, command: Vec<u8>) -> ClientSeq {
+    pub fn invoke(&mut self, command: Vec<u8>, tx_response: oneshot::Sender<Vec<u8>>) {
         self.seq += 1;
 
         let request = Request {
@@ -60,13 +61,12 @@ impl<C: ClientContext> Client<C> {
             self.seq,
             Ongoing {
                 replies: Default::default(),
+                tx_response,
             },
         );
         while self.ongoing.len() > Self::NUM_MAX_ONGOING {
             self.ongoing.pop_first();
         }
-
-        self.seq
     }
 
     pub fn on_message(&mut self, message: Reply) {
@@ -83,8 +83,8 @@ impl<C: ClientContext> Client<C> {
             .count()
             == (self.config.num_faulty_nodes + 1) as usize
         {
-            self.ongoing.remove(&message.client_seq);
-            self.context.finalize(message.client_seq, message.res);
+            let ongoing = self.ongoing.remove(&message.client_seq).unwrap();
+            let _ = ongoing.tx_response.send(message.res);
         }
     }
 }
