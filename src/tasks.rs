@@ -11,14 +11,18 @@ use crate::{
     schema::{self, Stopped},
 };
 
-use self::{client::ClientNodeTask, replica::ReplicaNodeTask};
+use self::{client::ClientNodeTask, prefill::PrefillTask, replica::ReplicaNodeTask};
 
 pub mod client;
+pub mod prefill;
 pub mod replica;
+
+const PREFILL_PATH: &str = "/tmp/big-prefill";
 
 pub enum Task {
     Replica(ReplicaNodeTask),
     Client(ClientNodeTask),
+    Prefill,
 }
 
 pub enum ScrapeState {
@@ -31,6 +35,10 @@ impl Task {
         let task = match schema {
             schema::Task::Replica => Self::Replica(ReplicaNodeTask::load().await?),
             schema::Task::Client(task) => Self::Client(ClientNodeTask::load(task).await?),
+            schema::Task::Prefill(task) => {
+                PrefillTask::load(&task).await?;
+                Self::Prefill
+            }
         };
         Ok(task)
     }
@@ -39,6 +47,7 @@ impl Task {
         match self {
             Self::Replica(_) => ScrapeState::Replica,
             Self::Client(task) => ScrapeState::Client(task.scrape_state()),
+            Self::Prefill => panic!("prefill has no scrape state"),
         }
     }
 
@@ -52,6 +61,7 @@ impl Task {
                 task.run(stop).await?;
                 Stopped::Client
             }
+            Self::Prefill => anyhow::bail!("prefill has no run method"),
         };
         Ok(stopped)
     }

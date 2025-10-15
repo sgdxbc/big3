@@ -1,7 +1,7 @@
 use std::time::Duration;
 
-use big_control::{Cluster, Instance};
-use big_schema::{Scrape, Stopped, Task};
+use big_control::{Cluster, Instance, load_all, run_endpoints, stop_all};
+use big_schema::{Scrape, Task};
 use hdrhistogram::serialization::Deserializer;
 use reqwest::Client;
 use tokio::{
@@ -22,24 +22,6 @@ async fn main() -> anyhow::Result<()> {
     let endpoints = run_endpoints([cluster.servers.clone(), cluster.clients.clone()].concat());
     let workload = run_workload(cluster.servers, cluster.clients);
     try_join!(endpoints, workload)?;
-    Ok(())
-}
-
-async fn run_endpoints(instances: impl IntoIterator<Item = Instance>) -> anyhow::Result<()> {
-    let mut tasks = JoinSet::new();
-    for instance in instances {
-        tasks.spawn(async move {
-            let output = instance.ssh().arg("./big").output().await?;
-            anyhow::Ok((instance.public_dns, output))
-        });
-    }
-    while let Some(result) = tasks.join_next().await {
-        let (dns, output) = result??;
-        if !output.status.success() {
-            fs::write(format!("log/stderr/{dns}.log"), output.stderr).await?;
-            anyhow::bail!("instance {dns} failed");
-        }
-    }
     Ok(())
 }
 
@@ -90,24 +72,6 @@ async fn run_workload(
     Ok(())
 }
 
-async fn load_all(
-    instances: impl IntoIterator<Item = &Instance>,
-    task: Task,
-    control_client: Client,
-) -> anyhow::Result<()> {
-    let mut tasks = JoinSet::new();
-    for instance in instances {
-        let client = control_client.clone();
-        let url = format!("http://{}:3000/load", instance.public_dns);
-        let task = task.clone();
-        tasks.spawn(async move { client.post(url).json(&task).send().await });
-    }
-    while let Some(result) = tasks.join_next().await {
-        result??.error_for_status()?;
-    }
-    Ok(())
-}
-
 async fn start_all(
     instances: impl IntoIterator<Item = &Instance>,
     control_client: Client,
@@ -143,22 +107,6 @@ async fn scrape_all(
         let p95 = Duration::from_nanos(latency_histogram.value_at_quantile(0.95));
         let p99 = Duration::from_nanos(latency_histogram.value_at_quantile(0.99));
         println!("throughput {throughput:.0} req/s, p50 {p50:?}, p95 {p95:?}, p99 {p99:?}");
-    }
-    Ok(())
-}
-
-async fn stop_all(
-    instances: impl IntoIterator<Item = &Instance>,
-    control_client: Client,
-) -> anyhow::Result<()> {
-    let mut tasks = JoinSet::new();
-    for instance in instances {
-        let client = control_client.clone();
-        let url = format!("http://{}:3000/stop", instance.public_dns);
-        tasks.spawn(async move { client.post(url).send().await });
-    }
-    while let Some(result) = tasks.join_next().await {
-        result??.error_for_status()?.json::<Stopped>().await?;
     }
     Ok(())
 }

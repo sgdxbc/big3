@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 pub enum Task {
     Replica,
     Client(ClientTask),
+    Prefill(PrefillTask),
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -14,6 +15,11 @@ pub struct ClientTask {
     pub addrs: Vec<SocketAddr>,
     pub config: ClientConfig,
     pub worker_config: ClientWorkerConfig,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct PrefillTask {
+    pub num_keys: u64,
 }
 
 // response of `/scrape`
@@ -27,6 +33,7 @@ pub struct Scrape {
 // response of `/stop`
 #[derive(Serialize, Deserialize)]
 pub enum Stopped {
+    BeforeStart,
     Replica,
     Client,
 }

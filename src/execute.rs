@@ -1,4 +1,24 @@
+use sha2::{Digest as _, Sha256};
+
 use crate::types::{ClientId, NodeIndex, Reply, Request};
+
+pub enum Op {
+    Put(String, Vec<u8>),
+    Get(String),
+}
+
+pub enum Res {
+    Put,
+    Get(Option<Vec<u8>>),
+}
+
+pub fn key(index: u64) -> String {
+    format!("key-{index:08}")
+}
+
+pub fn storage_key(key: &str) -> [u8; 32] {
+    Sha256::digest(key).into()
+}
 
 pub trait ExecuteContext {
     fn send(&mut self, id: ClientId, reply: Reply);

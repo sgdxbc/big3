@@ -1,7 +1,9 @@
 use std::net::Ipv4Addr;
 
+use big_schema::{Stopped, Task};
+use reqwest::Client;
 use serde::{Deserialize, de::DeserializeOwned};
-use tokio::process::Command;
+use tokio::{fs, process::Command, task::JoinSet};
 
 #[derive(Debug, Deserialize)]
 struct TerraformOutputInstances(Vec<TerraformOutputInstance>);
@@ -48,4 +50,57 @@ impl Instance {
         cmd.arg(&self.public_dns);
         cmd
     }
+}
+
+pub async fn run_endpoints(instances: impl IntoIterator<Item = Instance>) -> anyhow::Result<()> {
+    let mut tasks = JoinSet::new();
+    for instance in instances {
+        tasks.spawn(async move {
+            let output = instance.ssh().arg("./big").output().await?;
+            anyhow::Ok((instance.public_dns, output))
+        });
+    }
+    while let Some(result) = tasks.join_next().await {
+        let (dns, output) = result??;
+        if !output.status.success() {
+            fs::write(format!("log/stderr/{dns}.log"), output.stderr).await?;
+            anyhow::bail!("instance {dns} failed");
+        }
+    }
+    Ok(())
+}
+
+pub async fn load_all(
+    instances: impl IntoIterator<Item = &Instance>,
+    task: Task,
+    control_client: Client,
+) -> anyhow::Result<()> {
+    let mut tasks = JoinSet::new();
+    for instance in instances {
+        let client = control_client.clone();
+        let url = format!("http://{}:3000/load", instance.public_dns);
+        let task = task.clone();
+        tasks.spawn(async move { client.post(url).json(&task).send().await });
+    }
+    while let Some(result) = tasks.join_next().await {
+        result??.error_for_status()?;
+    }
+    Ok(())
+}
+
+pub async fn stop_all(
+    instances: impl IntoIterator<Item = &Instance>,
+    control_client: Client,
+) -> anyhow::Result<Vec<Stopped>> {
+    let mut tasks = JoinSet::new();
+    for instance in instances {
+        let client = control_client.clone();
+        let url = format!("http://{}:3000/stop", instance.public_dns);
+        tasks.spawn(async move { client.post(url).send().await });
+    }
+    let mut results = Vec::new();
+    while let Some(result) = tasks.join_next().await {
+        results.push(result??.error_for_status()?.json::<Stopped>().await?);
+    }
+    Ok(results)
 }

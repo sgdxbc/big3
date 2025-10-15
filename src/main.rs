@@ -11,6 +11,9 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
+#[global_allocator]
+static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let (tx_command, rx_command) = channel(1);
@@ -53,9 +56,14 @@ async fn run(mut rx_command: Receiver<Command>) -> anyhow::Result<()> {
     let task = Task::load(task).await?;
     let _ = tx.send(());
 
-    let Some(Command::Start) = rx_command.recv().await else {
-        anyhow::bail!("second command must be start");
-    };
+    match rx_command.recv().await {
+        Some(Command::Stop(tx)) => {
+            let _ = tx.send(schema::Stopped::BeforeStart);
+            return Ok(());
+        }
+        Some(Command::Start) => {}
+        _ => anyhow::bail!("second command must be start"),
+    }
     let stop = CancellationToken::new();
     let scrape_state = task.scrape_state();
     let watch = async {
