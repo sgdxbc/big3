@@ -260,8 +260,7 @@ impl NetworkOutgoingTask {
     pub async fn run(mut self, stop: CancellationToken) -> anyhow::Result<()> {
         tokio::spawn(async move { stop.run_until_cancelled(self.run_inner()).await })
             .await?
-            .unwrap_or(Ok(()))?;
-        Ok(())
+            .unwrap_or(Ok(()))
     }
 
     async fn run_inner(&mut self) -> anyhow::Result<()> {
@@ -272,7 +271,7 @@ impl NetworkOutgoingTask {
                 }
                 Some((id, reply)) = self.rx_outgoing_message.recv() => {
                     // self.handle_outgoing_message(id, reply);
-                    self.handle_outgoing_message(id, reply).await;
+                    self.handle_outgoing_message(id, reply).await?;
                 }
             }
         }
@@ -282,31 +281,12 @@ impl NetworkOutgoingTask {
         self.connections.insert(id, conn.clone());
     }
 
-    // fn handle_outgoing_message(&mut self, id: ClientId, reply: Reply) {
-    //     if let Some(conn) = self.connections.get(&id) {
-    //         let conn = conn.clone();
-    //         tokio::spawn(async move {
-    //             let mut send = conn.open_uni().await?;
-    //             let bytes = bincode::encode_to_vec(&reply, bincode::config::standard())?;
-    //             send.write_all(&bytes).await?;
-    //             anyhow::Ok(())
-    //         });
-    //     }
-    // }
-
-    async fn handle_outgoing_message(&mut self, id: ClientId, reply: Reply) {
-        if let Some(conn) = self.connections.get(&id) {
-            // let conn = conn.clone();
-            // tokio::spawn(async move {
-            let _ = async {
-                let mut send = conn.open_uni().await?;
-                let bytes = bincode::encode_to_vec(&reply, bincode::config::standard())?;
-                send.write_all(&bytes).await?;
-                anyhow::Ok(())
-                // });
-            }
-            .await;
-        }
+    async fn handle_outgoing_message(&mut self, id: ClientId, reply: Reply) -> anyhow::Result<()> {
+        let conn = self.connections[&id].clone();
+        let bytes = bincode::encode_to_vec(&reply, bincode::config::standard())?;
+        let mut send = conn.open_uni().await?;
+        send.write_all(&bytes).await?;
+        anyhow::Ok(())
     }
 }
 

@@ -194,41 +194,28 @@ impl NetworkOutgoingTask {
     }
 
     pub async fn run(mut self, stop: CancellationToken) -> anyhow::Result<()> {
-        tokio::spawn(async move { stop.run_until_cancelled(self.run_inner()).await }).await?;
+        tokio::spawn(async move { stop.run_until_cancelled(self.run_inner()).await })
+            .await?
+            .unwrap_or(Ok(()))
+    }
+
+    async fn run_inner(&mut self) -> anyhow::Result<()> {
+        while let Some((to, message)) = self.rx_outgoing_message.recv().await {
+            self.handle_outgoing_message(to, message).await?
+        }
         Ok(())
     }
 
-    async fn run_inner(&mut self) {
-        while let Some((to, message)) = self.rx_outgoing_message.recv().await {
-            self.handle_outgoing_message(to, message).await
-        }
-    }
-
-    // fn handle_outgoing_message(&mut self, id: NodeIndex, request: Request) {
-    //     if let Some(conn) = self.connections.get(&id) {
-    //         let conn = conn.clone();
-    //         tokio::spawn(async move {
-    //             let mut send = conn.open_uni().await?;
-    //             let bytes = bincode::encode_to_vec(&request, bincode::config::standard())?;
-    //             send.write_all(&bytes).await?;
-    //             anyhow::Ok(())
-    //         });
-    //     }
-    // }
-
-    async fn handle_outgoing_message(&mut self, id: NodeIndex, request: Request) {
-        if let Some(conn) = self.connections.get(&id) {
-            // let conn = conn.clone();
-            // tokio::spawn(async move {
-            let _ = async {
-                let mut send = conn.open_uni().await?;
-                let bytes = bincode::encode_to_vec(&request, bincode::config::standard())?;
-                send.write_all(&bytes).await?;
-                anyhow::Ok(())
-                // });
-            }
-            .await;
-        }
+    async fn handle_outgoing_message(
+        &mut self,
+        id: NodeIndex,
+        request: Request,
+    ) -> anyhow::Result<()> {
+        let conn = self.connections[&id].clone();
+        let bytes = bincode::encode_to_vec(&request, bincode::config::standard())?;
+        let mut send = conn.open_uni().await?;
+        send.write_all(&bytes).await?;
+        anyhow::Ok(())
     }
 }
 
