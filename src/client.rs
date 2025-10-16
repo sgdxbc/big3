@@ -91,15 +91,17 @@ impl<C: ClientContext> Client<C> {
     }
 }
 
+pub type InvokeId = u64;
+
 pub trait ClientWorkerContext {
-    fn invoke(&mut self, command: Vec<u8>) -> ClientSeq;
+    fn invoke(&mut self, command: Vec<u8>) -> InvokeId;
 }
 
 pub struct ClientWorker<C> {
-    context: C,
+    pub context: C,
     config: ClientWorkerConfig,
 
-    ongoing: HashMap<ClientSeq, Instant>,
+    ongoing: HashMap<InvokeId, Instant>,
     pub records: Arc<Mutex<Records>>,
 }
 
@@ -129,9 +131,17 @@ impl<C: ClientWorkerContext> ClientWorker<C> {
         }
     }
 
+    pub fn on_invoke_response(&mut self, invoke_id: InvokeId, _res: Vec<u8>) {
+        let Some(start) = self.ongoing.remove(&invoke_id) else {
+            unimplemented!()
+        };
+        self.records.lock().unwrap().latency_histogram += start.elapsed().as_nanos() as u64;
+        self.invoke()
+    }
+
     fn invoke(&mut self) {
         let key = execute::key(rng().random_range(0..self.config.num_keys));
-        let op = if rng().random_bool(1.) {
+        let op = if rng().random_bool(self.config.read_ratio) {
             Op::Get(key)
         } else {
             let mut value = vec![0; 100 - 32];
@@ -139,15 +149,7 @@ impl<C: ClientWorkerContext> ClientWorker<C> {
             Op::Put(key, value)
         };
         let command = bincode::encode_to_vec(&op, bincode::config::standard()).unwrap();
-        let seq = self.context.invoke(command);
-        self.ongoing.insert(seq, Instant::now());
-    }
-
-    pub fn on_finalize(&mut self, seq: ClientSeq, _res: Vec<u8>) {
-        let Some(start) = self.ongoing.remove(&seq) else {
-            unimplemented!()
-        };
-        self.records.lock().unwrap().latency_histogram += start.elapsed().as_nanos() as u64;
-        self.invoke()
+        let invoke_id = self.context.invoke(command);
+        self.ongoing.insert(invoke_id, Instant::now());
     }
 }

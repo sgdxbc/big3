@@ -51,4 +51,5 @@ pub struct ClientConfig {
 pub struct ClientWorkerConfig {
     pub num_concurrent: usize,
     pub num_keys: u64,
+    pub read_ratio: f64,
 }

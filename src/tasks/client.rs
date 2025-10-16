@@ -16,40 +16,18 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     cert::client_config,
-    client::{Client, ClientContext, ClientWorker, ClientWorkerContext, Records},
+    client::{Client, ClientContext, ClientWorker, ClientWorkerContext, InvokeId, Records},
     schema,
-    types::{ClientId, ClientSeq, NodeIndex, Reply, Request},
+    types::{ClientId, NodeIndex, Reply, Request},
 };
 
-struct ClientWorkerChannels {
-    tx_finalize: Sender<(ClientSeq, Vec<u8>)>,
-    rx_finalize: Receiver<(ClientSeq, Vec<u8>)>,
-}
-
 pub struct ClientWorkerTask {
-    channels: ClientWorkerChannels,
     client_worker: ClientWorker<ClientWorkerTaskContext>,
 }
 
-impl ClientWorkerChannels {
-    fn new() -> Self {
-        let (tx_finalize, rx_finalize) = channel(100);
-        Self {
-            tx_finalize,
-            rx_finalize,
-        }
-    }
-}
-
 impl ClientWorkerTask {
-    fn new(
-        channels: ClientWorkerChannels,
-        client_worker: ClientWorker<ClientWorkerTaskContext>,
-    ) -> Self {
-        Self {
-            channels,
-            client_worker,
-        }
+    fn new(client_worker: ClientWorker<ClientWorkerTaskContext>) -> Self {
+        Self { client_worker }
     }
 
     pub async fn run(mut self, stop: CancellationToken) -> anyhow::Result<()> {
@@ -59,25 +37,38 @@ impl ClientWorkerTask {
 
     async fn run_inner(&mut self) {
         self.client_worker.start();
-        while let Some((seq, res)) = self.channels.rx_finalize.recv().await {
-            self.client_worker.on_finalize(seq, res);
+        while let Some((seq, res)) = self.client_worker.context.rx_invoke_response.recv().await {
+            self.client_worker.on_invoke_response(seq, res);
         }
     }
 }
 
 struct ClientWorkerTaskContext {
     tx_invoke: UnboundedSender<(Vec<u8>, oneshot::Sender<Vec<u8>>)>,
-    tx_finalize: Sender<(ClientSeq, Vec<u8>)>,
-    seq: ClientSeq,
+    tx_invoke_response: Sender<(InvokeId, Vec<u8>)>,
+    rx_invoke_response: Receiver<(InvokeId, Vec<u8>)>,
+    invoke_id: InvokeId,
+}
+
+impl ClientWorkerTaskContext {
+    fn new(tx_invoke: UnboundedSender<(Vec<u8>, oneshot::Sender<Vec<u8>>)>) -> Self {
+        let (tx_invoke_response, rx_invoke_response) = channel(100);
+        Self {
+            tx_invoke,
+            tx_invoke_response,
+            rx_invoke_response,
+            invoke_id: 0,
+        }
+    }
 }
 
 impl ClientWorkerContext for ClientWorkerTaskContext {
-    fn invoke(&mut self, command: Vec<u8>) -> ClientSeq {
+    fn invoke(&mut self, command: Vec<u8>) -> InvokeId {
         let (tx_response, rx_response) = oneshot::channel();
-        self.seq += 1;
-        let seq = self.seq;
+        self.invoke_id += 1;
+        let seq = self.invoke_id;
         let _ = self.tx_invoke.send((command, tx_response));
-        let tx_finalize = self.tx_finalize.clone();
+        let tx_finalize = self.tx_invoke_response.clone();
         tokio::spawn(async move {
             let _ = tx_finalize.send((seq, rx_response.await?)).await;
             anyhow::Ok(())
@@ -192,13 +183,13 @@ impl NetworkOutgoingTask {
     ) -> anyhow::Result<()> {
         loop {
             let mut recv = conn.accept_uni().await?;
-            let tx_incoming_message = tx_incoming_message.clone();
-            tokio::spawn(async move {
-                let bytes = recv.read_to_end(usize::MAX).await?;
-                let message = bincode::decode_from_slice(&bytes, bincode::config::standard())?.0;
-                let _ = tx_incoming_message.send(message).await;
-                anyhow::Ok(())
-            });
+            // let tx_incoming_message = tx_incoming_message.clone();
+            // tokio::spawn(async move {
+            let bytes = recv.read_to_end(usize::MAX).await?;
+            let message = bincode::decode_from_slice(&bytes, bincode::config::standard())?.0;
+            let _ = tx_incoming_message.send(message).await;
+            // anyhow::Ok(())
+            // });
         }
     }
 
@@ -209,19 +200,34 @@ impl NetworkOutgoingTask {
 
     async fn run_inner(&mut self) {
         while let Some((to, message)) = self.rx_outgoing_message.recv().await {
-            self.handle_outgoing_message(to, message)
+            self.handle_outgoing_message(to, message).await
         }
     }
 
-    fn handle_outgoing_message(&mut self, id: NodeIndex, request: Request) {
+    // fn handle_outgoing_message(&mut self, id: NodeIndex, request: Request) {
+    //     if let Some(conn) = self.connections.get(&id) {
+    //         let conn = conn.clone();
+    //         tokio::spawn(async move {
+    //             let mut send = conn.open_uni().await?;
+    //             let bytes = bincode::encode_to_vec(&request, bincode::config::standard())?;
+    //             send.write_all(&bytes).await?;
+    //             anyhow::Ok(())
+    //         });
+    //     }
+    // }
+
+    async fn handle_outgoing_message(&mut self, id: NodeIndex, request: Request) {
         if let Some(conn) = self.connections.get(&id) {
-            let conn = conn.clone();
-            tokio::spawn(async move {
+            // let conn = conn.clone();
+            // tokio::spawn(async move {
+            let _ = async {
                 let mut send = conn.open_uni().await?;
                 let bytes = bincode::encode_to_vec(&request, bincode::config::standard())?;
                 send.write_all(&bytes).await?;
                 anyhow::Ok(())
-            });
+                // });
+            }
+            .await;
         }
     }
 }
@@ -252,16 +258,11 @@ impl ClientNodeTask {
             Client::new(client_context, schema.config, client_id),
         );
 
-        let client_worker_channels = ClientWorkerChannels::new();
-        let client_worker_context = ClientWorkerTaskContext {
-            tx_invoke: client.channels.tx_invoke.clone(),
-            tx_finalize: client_worker_channels.tx_finalize.clone(),
-            seq: 0,
-        };
-        let client_worker = ClientWorkerTask::new(
-            client_worker_channels,
-            ClientWorker::new(client_worker_context, schema.worker_config),
-        );
+        let client_worker_context = ClientWorkerTaskContext::new(client.channels.tx_invoke.clone());
+        let client_worker = ClientWorkerTask::new(ClientWorker::new(
+            client_worker_context,
+            schema.worker_config,
+        ));
         Ok(Self {
             network_outgoing,
             client,

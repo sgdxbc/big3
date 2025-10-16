@@ -223,13 +223,13 @@ impl NetworkIncomingTask {
     ) -> anyhow::Result<()> {
         loop {
             let mut recv = conn.accept_uni().await?;
-            let tx_incoming_message = tx_incoming_message.clone();
-            tokio::spawn(async move {
-                let bytes = recv.read_to_end(usize::MAX).await?;
-                let message = bincode::decode_from_slice(&bytes, bincode::config::standard())?.0;
-                let _ = tx_incoming_message.send(message).await;
-                anyhow::Ok(())
-            });
+            // let tx_incoming_message = tx_incoming_message.clone();
+            // tokio::spawn(async move {
+            let bytes = recv.read_to_end(usize::MAX).await?;
+            let message = bincode::decode_from_slice(&bytes, bincode::config::standard())?.0;
+            let _ = tx_incoming_message.send(message).await;
+            //     anyhow::Ok(())
+            // });
         }
     }
 }
@@ -271,7 +271,8 @@ impl NetworkOutgoingTask {
                     self.handle_connection(id, conn);
                 }
                 Some((id, reply)) = self.rx_outgoing_message.recv() => {
-                    self.handle_outgoing_message(id, reply);
+                    // self.handle_outgoing_message(id, reply);
+                    self.handle_outgoing_message(id, reply).await;
                 }
             }
         }
@@ -281,15 +282,30 @@ impl NetworkOutgoingTask {
         self.connections.insert(id, conn.clone());
     }
 
-    fn handle_outgoing_message(&mut self, id: ClientId, reply: Reply) {
+    // fn handle_outgoing_message(&mut self, id: ClientId, reply: Reply) {
+    //     if let Some(conn) = self.connections.get(&id) {
+    //         let conn = conn.clone();
+    //         tokio::spawn(async move {
+    //             let mut send = conn.open_uni().await?;
+    //             let bytes = bincode::encode_to_vec(&reply, bincode::config::standard())?;
+    //             send.write_all(&bytes).await?;
+    //             anyhow::Ok(())
+    //         });
+    //     }
+    // }
+
+    async fn handle_outgoing_message(&mut self, id: ClientId, reply: Reply) {
         if let Some(conn) = self.connections.get(&id) {
-            let conn = conn.clone();
-            tokio::spawn(async move {
+            // let conn = conn.clone();
+            // tokio::spawn(async move {
+            let _ = async {
                 let mut send = conn.open_uni().await?;
                 let bytes = bincode::encode_to_vec(&reply, bincode::config::standard())?;
                 send.write_all(&bytes).await?;
                 anyhow::Ok(())
-            });
+                // });
+            }
+            .await;
         }
     }
 }
@@ -328,7 +344,13 @@ impl ReplicaNodeTask {
         };
         let consensus = ConsensusTask::new(Consensus::new(consensus_context, 0));
 
-        let endpoint = Endpoint::server(server_config(), ([0, 0, 0, 0], 5000).into())?;
+        let endpoint = {
+            let mut server_config = server_config();
+            let mut transport_config = quinn::TransportConfig::default();
+            transport_config.max_concurrent_uni_streams(1000u32.into());
+            server_config.transport_config(transport_config.into());
+            Endpoint::server(server_config, ([0, 0, 0, 0], 5000).into())?
+        };
         let network_incoming = NetworkIncomingTask::new(
             endpoint,
             consensus.tx_request.clone(),

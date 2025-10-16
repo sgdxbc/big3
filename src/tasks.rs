@@ -19,6 +19,7 @@ pub mod replica;
 
 const PREFILL_PATH: &str = "/tmp/big-prefill";
 
+#[allow(clippy::large_enum_variant)]
 pub enum Task {
     Replica(ReplicaNodeTask),
     Client(ClientNodeTask),
