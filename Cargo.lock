@@ -143,6 +143,7 @@ dependencies = [
  "axum",
  "big-schema",
  "bincode",
+ "bytes",
  "flexi_logger",
  "hdrhistogram",
  "log",

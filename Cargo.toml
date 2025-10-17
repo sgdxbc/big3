@@ -11,6 +11,7 @@ anyhow = { version = "1.0.100", features = ["backtrace"] }
 axum = "0.8.6"
 big-schema = { version = "0.1.0", path = "schema" }
 bincode = "2.0.1"
+bytes = "1.10.1"
 flexi_logger = "0.31.7"
 hdrhistogram = "7.5.4"
 log = "0.4.28"

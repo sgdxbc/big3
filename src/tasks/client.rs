@@ -4,6 +4,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use bytes::Bytes;
 use quinn::{Connection, Endpoint};
 use tokio::{
     select,
@@ -128,32 +129,21 @@ impl ClientTask {
 }
 
 struct ClientTaskContext {
-    tx_outgoing_message: UnboundedSender<(NodeIndex, Request)>,
+    txs_outgoing_message: HashMap<NodeIndex, UnboundedSender<Bytes>>,
 }
 
 impl ClientContext for ClientTaskContext {
     fn send(&mut self, to: NodeIndex, request: Request) {
-        let _ = self.tx_outgoing_message.send((to, request));
+        let bytes = bincode::encode_to_vec(&request, bincode::config::standard()).unwrap();
+        let _ = self.txs_outgoing_message[&to].send(bytes.into());
     }
 }
 
 pub struct NetworkOutgoingTask {
-    tx_outgoing_message: UnboundedSender<(NodeIndex, Request)>,
-    rx_outgoing_message: UnboundedReceiver<(NodeIndex, Request)>,
-
-    connections: HashMap<NodeIndex, Connection>,
+    txs_outgoing_message: HashMap<NodeIndex, UnboundedSender<Bytes>>,
 }
 
 impl NetworkOutgoingTask {
-    fn new(connections: HashMap<NodeIndex, Connection>) -> Self {
-        let (tx_outgoing_message, rx_outgoing_message) = unbounded_channel();
-        Self {
-            tx_outgoing_message,
-            rx_outgoing_message,
-            connections,
-        }
-    }
-
     pub async fn load(
         client_id: ClientId,
         addrs: Vec<SocketAddr>,
@@ -161,7 +151,7 @@ impl NetworkOutgoingTask {
     ) -> anyhow::Result<Self> {
         let mut endpoint = Endpoint::client(([0, 0, 0, 0], 0).into())?;
         endpoint.set_default_client_config(client_config());
-        let mut connections = HashMap::new();
+        let mut txs_outgoing_message = HashMap::new();
         for (i, &addr) in addrs.iter().enumerate() {
             let conn = endpoint.connect(addr, "server.example")?.await?;
             conn.open_uni()
@@ -172,9 +162,13 @@ impl NetworkOutgoingTask {
                 conn.clone(),
                 tx_incoming_message.clone(),
             ));
-            connections.insert(i as _, conn);
+            let (tx_outgoing, rx_outgoing) = unbounded_channel();
+            tokio::spawn(Self::handle_outgoing_message(conn.clone(), rx_outgoing));
+            txs_outgoing_message.insert(i as NodeIndex, tx_outgoing);
         }
-        Ok(Self::new(connections))
+        Ok(Self {
+            txs_outgoing_message,
+        })
     }
 
     async fn handle_connection(
@@ -193,6 +187,17 @@ impl NetworkOutgoingTask {
         }
     }
 
+    async fn handle_outgoing_message(
+        conn: Connection,
+        mut tx_outgoing_message: UnboundedReceiver<Bytes>,
+    ) -> anyhow::Result<()> {
+        while let Some(bytes) = tx_outgoing_message.recv().await {
+            let mut send = conn.open_uni().await?;
+            send.write_all(&bytes).await?;
+        }
+        Ok(())
+    }
+
     pub async fn run(mut self, stop: CancellationToken) -> anyhow::Result<()> {
         tokio::spawn(async move { stop.run_until_cancelled(self.run_inner()).await })
             .await?
@@ -200,22 +205,7 @@ impl NetworkOutgoingTask {
     }
 
     async fn run_inner(&mut self) -> anyhow::Result<()> {
-        while let Some((to, message)) = self.rx_outgoing_message.recv().await {
-            self.handle_outgoing_message(to, message).await?
-        }
         Ok(())
-    }
-
-    async fn handle_outgoing_message(
-        &mut self,
-        id: NodeIndex,
-        request: Request,
-    ) -> anyhow::Result<()> {
-        let conn = self.connections[&id].clone();
-        let bytes = bincode::encode_to_vec(&request, bincode::config::standard())?;
-        let mut send = conn.open_uni().await?;
-        send.write_all(&bytes).await?;
-        anyhow::Ok(())
     }
 }
 
@@ -238,7 +228,7 @@ impl ClientNodeTask {
         .await?;
 
         let client_context = ClientTaskContext {
-            tx_outgoing_message: network_outgoing.tx_outgoing_message.clone(),
+            txs_outgoing_message: network_outgoing.txs_outgoing_message.clone(),
         };
         let client = ClientTask::new(
             client_channels,
