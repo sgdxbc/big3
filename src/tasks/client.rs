@@ -139,11 +139,11 @@ impl ClientContext for ClientTaskContext {
     }
 }
 
-pub struct NetworkOutgoingTask {
+pub struct NetworkConnectTask {
     txs_outgoing_message: HashMap<NodeIndex, UnboundedSender<Bytes>>,
 }
 
-impl NetworkOutgoingTask {
+impl NetworkConnectTask {
     pub async fn load(
         client_id: ClientId,
         addrs: Vec<SocketAddr>,
@@ -158,12 +158,12 @@ impl NetworkOutgoingTask {
                 .await?
                 .write_all(&client_id.to_le_bytes())
                 .await?;
-            tokio::spawn(Self::handle_connection(
+            tokio::spawn(Self::run_connection_incoming(
                 conn.clone(),
                 tx_incoming_message.clone(),
             ));
             let (tx_outgoing, rx_outgoing) = unbounded_channel();
-            tokio::spawn(Self::handle_outgoing_message(conn.clone(), rx_outgoing));
+            tokio::spawn(Self::run_connection_outgoing(conn.clone(), rx_outgoing));
             txs_outgoing_message.insert(i as NodeIndex, tx_outgoing);
         }
         Ok(Self {
@@ -171,23 +171,19 @@ impl NetworkOutgoingTask {
         })
     }
 
-    async fn handle_connection(
+    async fn run_connection_incoming(
         conn: Connection,
         tx_incoming_message: Sender<Reply>,
     ) -> anyhow::Result<()> {
         loop {
             let mut recv = conn.accept_uni().await?;
-            // let tx_incoming_message = tx_incoming_message.clone();
-            // tokio::spawn(async move {
             let bytes = recv.read_to_end(usize::MAX).await?;
             let message = bincode::decode_from_slice(&bytes, bincode::config::standard())?.0;
             let _ = tx_incoming_message.send(message).await;
-            // anyhow::Ok(())
-            // });
         }
     }
 
-    async fn handle_outgoing_message(
+    async fn run_connection_outgoing(
         conn: Connection,
         mut tx_outgoing_message: UnboundedReceiver<Bytes>,
     ) -> anyhow::Result<()> {
@@ -210,9 +206,9 @@ impl NetworkOutgoingTask {
 }
 
 pub struct ClientNodeTask {
-    network_outgoing: NetworkOutgoingTask,
-    client_worker: ClientWorkerTask,
+    network_connect: NetworkConnectTask,
     client: ClientTask,
+    client_worker: ClientWorkerTask,
 }
 
 impl ClientNodeTask {
@@ -220,7 +216,7 @@ impl ClientNodeTask {
         let client_channels = ClientChannels::new();
         let client_id = rand::random();
 
-        let network_outgoing = NetworkOutgoingTask::load(
+        let network_connect = NetworkConnectTask::load(
             client_id,
             schema.addrs,
             client_channels.tx_incoming_message.clone(),
@@ -228,7 +224,7 @@ impl ClientNodeTask {
         .await?;
 
         let client_context = ClientTaskContext {
-            txs_outgoing_message: network_outgoing.txs_outgoing_message.clone(),
+            txs_outgoing_message: network_connect.txs_outgoing_message.clone(),
         };
         let client = ClientTask::new(
             client_channels,
@@ -241,7 +237,7 @@ impl ClientNodeTask {
             schema.worker_config,
         ));
         Ok(Self {
-            network_outgoing,
+            network_connect,
             client,
             client_worker,
         })
@@ -253,7 +249,7 @@ impl ClientNodeTask {
 
     pub async fn run(self, stop: CancellationToken) -> anyhow::Result<()> {
         tokio::try_join!(
-            self.network_outgoing.run(stop.clone()),
+            self.network_connect.run(stop.clone()),
             self.client.run(stop.clone()),
             self.client_worker.run(stop.clone())
         )?;

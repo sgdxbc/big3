@@ -1,7 +1,7 @@
 use std::thread::available_parallelism;
 
 use rand::{RngCore as _, SeedableRng, rngs::StdRng};
-use rocksdb::{DB, Options, WriteBatch};
+use rocksdb::{DB, Options, WriteBatch, WriteOptions};
 use tokio::fs;
 
 use crate::{execute, schema};
@@ -24,8 +24,8 @@ impl PrefillTask {
         let batch_size = 10_000;
         let mut rng = StdRng::seed_from_u64(117418);
 
-        let (tx_batch, rx_batch) = std::sync::mpsc::sync_channel(100);
-        let produce = tokio::task::spawn_blocking(move || {
+        let (tx_batch, mut rx_batch) = tokio::sync::mpsc::channel(100);
+        let produce = tokio::task::spawn(async move {
             let mut batch = WriteBatch::new();
             let mut value = vec![0u8; 100 - 32];
             for i in 0..schema.num_keys {
@@ -33,17 +33,19 @@ impl PrefillTask {
                 rng.fill_bytes(&mut value);
                 batch.put(key, &value);
                 if i % batch_size == batch_size - 1 {
-                    let _ = tx_batch.send(batch);
+                    let _ = tx_batch.send(batch).await;
                     batch = WriteBatch::new();
                 }
             }
             if !batch.is_empty() {
-                let _ = tx_batch.send(batch);
+                let _ = tx_batch.send(batch).await;
             }
         });
         let consume = tokio::task::spawn_blocking(move || {
-            for batch in rx_batch {
-                db.write(batch)?;
+            let mut options = WriteOptions::default();
+            options.disable_wal(true);
+            while let Some(batch) = rx_batch.blocking_recv() {
+                db.write_opt(batch, &options)?;
             }
             db.compact_range::<&[u8], &[u8]>(None, None);
             anyhow::Ok(())

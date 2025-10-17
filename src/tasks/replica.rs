@@ -171,7 +171,7 @@ impl StorageTask {
     }
 }
 
-pub struct NetworkIncomingTask {
+pub struct NetworkAcceptTask {
     endpoint: Endpoint,
 
     // execute handle
@@ -181,7 +181,7 @@ pub struct NetworkIncomingTask {
     tx_connection: Sender<(ClientId, UnboundedSender<Bytes>)>,
 }
 
-impl NetworkIncomingTask {
+impl NetworkAcceptTask {
     pub fn new(
         endpoint: Endpoint,
         tx_incoming_message: Sender<Request>,
@@ -212,32 +212,28 @@ impl NetworkIncomingTask {
                 .tx_connection
                 .send((ClientId::from_le_bytes(client_id), tx_outgoing))
                 .await;
-            tokio::spawn(Self::handle_connection(
+            tokio::spawn(Self::run_connection_incoming(
                 conn.clone(),
                 self.tx_incoming_message.clone(),
             ));
-            tokio::spawn(Self::handle_outgoing_message(conn, rx_outgoing));
+            tokio::spawn(Self::run_connection_outgoing(conn, rx_outgoing));
         }
         Ok(())
     }
 
-    async fn handle_connection(
+    async fn run_connection_incoming(
         conn: Connection,
         tx_incoming_message: Sender<Request>,
     ) -> anyhow::Result<()> {
         loop {
             let mut recv = conn.accept_uni().await?;
-            // let tx_incoming_message = tx_incoming_message.clone();
-            // tokio::spawn(async move {
             let bytes = recv.read_to_end(usize::MAX).await?;
             let message = bincode::decode_from_slice(&bytes, bincode::config::standard())?.0;
             let _ = tx_incoming_message.send(message).await;
-            //     anyhow::Ok(())
-            // });
         }
     }
 
-    async fn handle_outgoing_message(
+    async fn run_connection_outgoing(
         conn: Connection,
         mut tx_outgoing_message: UnboundedReceiver<Bytes>,
     ) -> anyhow::Result<()> {
@@ -308,7 +304,7 @@ pub struct ReplicaNodeTask {
     consensus: ConsensusTask,
     execute: ExecuteTask,
     storage: StorageTask,
-    network_incoming: NetworkIncomingTask,
+    network_accept: NetworkAcceptTask,
     _temp_dir: TempDir,
 }
 
@@ -344,7 +340,7 @@ impl ReplicaNodeTask {
             server_config.transport_config(transport_config.into());
             Endpoint::server(server_config, ([0, 0, 0, 0], 5000).into())?
         };
-        let network_incoming = NetworkIncomingTask::new(
+        let network_accept = NetworkAcceptTask::new(
             endpoint,
             consensus.tx_request.clone(),
             network_outgoing.tx_connection.clone(),
@@ -354,7 +350,7 @@ impl ReplicaNodeTask {
             execute,
             storage,
             consensus,
-            network_incoming,
+            network_accept,
             _temp_dir: temp_dir,
         })
     }
@@ -365,7 +361,7 @@ impl ReplicaNodeTask {
             self.execute.run(stop.clone()),
             self.consensus.run(stop.clone()),
             self.storage.run(stop.clone()),
-            self.network_incoming.run(stop.clone()),
+            self.network_accept.run(stop.clone()),
         )?;
         Ok(())
     }
