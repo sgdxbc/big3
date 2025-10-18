@@ -20,8 +20,9 @@ async fn run_workload(server_instances: Vec<Instance>) -> anyhow::Result<()> {
     println!("load servers");
     let task = PrefillTask { num_keys: NUM_KEYS };
     load_all(
-        &server_instances,
-        Task::Prefill(task),
+        server_instances
+            .iter()
+            .map(|instance| (instance, Task::Prefill(task.clone()))),
         control_client.clone(),
     )
     .await?;

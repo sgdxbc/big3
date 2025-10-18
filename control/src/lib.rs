@@ -1,4 +1,4 @@
-use std::net::Ipv4Addr;
+use std::net::IpAddr;
 
 use big_schema::{Stopped, Task};
 use reqwest::Client;
@@ -12,7 +12,7 @@ struct TerraformOutputInstances(Vec<TerraformOutputInstance>);
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct TerraformOutputInstance {
-    pub private_ip: Ipv4Addr,
+    pub private_ip: IpAddr,
     pub public_dns: String,
 }
 
@@ -78,15 +78,13 @@ pub async fn run_endpoints(instances: impl IntoIterator<Item = Instance>) -> any
 }
 
 pub async fn load_all(
-    instances: impl IntoIterator<Item = &Instance>,
-    task: Task,
+    items: impl IntoIterator<Item = (&Instance, Task)>,
     control_client: Client,
 ) -> anyhow::Result<()> {
     let mut tasks = JoinSet::new();
-    for instance in instances {
+    for (instance, task) in items {
         let client = control_client.clone();
         let url = format!("http://{}:3000/load", instance.public_dns);
-        let task = task.clone();
         tasks.spawn(async move { client.post(url).json(&task).send().await });
     }
     while let Some(result) = tasks.join_next().await {

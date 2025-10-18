@@ -34,7 +34,7 @@ pub enum ScrapeState {
 impl Task {
     pub async fn load(schema: schema::Task) -> anyhow::Result<Self> {
         let task = match schema {
-            schema::Task::Replica => Self::Replica(ReplicaNodeTask::load().await?),
+            schema::Task::Replica(task) => Self::Replica(ReplicaNodeTask::load(task).await?),
             schema::Task::Client(task) => Self::Client(ClientNodeTask::load(task).await?),
             schema::Task::Prefill(task) => {
                 PrefillTask::load(task).await?;

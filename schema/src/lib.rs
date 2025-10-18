@@ -1,18 +1,25 @@
-use std::{net::SocketAddr, time::Duration};
+use std::{net::IpAddr, time::Duration};
 
 use serde::{Deserialize, Serialize};
 
 // payload of `/load`
 #[derive(Clone, Serialize, Deserialize)]
 pub enum Task {
-    Replica,
+    Replica(ReplicaTask),
     Client(ClientTask),
     Prefill(PrefillTask),
 }
 
 #[derive(Clone, Serialize, Deserialize)]
+pub struct ReplicaTask {
+    pub ips: Vec<IpAddr>,
+    pub config: ReplicaConfig,
+    pub node_index: NodeIndex,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ClientTask {
-    pub addrs: Vec<SocketAddr>,
+    pub ips: Vec<IpAddr>,
     pub config: ClientConfig,
     pub worker_config: ClientWorkerConfig,
 }
@@ -40,6 +47,12 @@ pub enum Stopped {
 
 // inner types
 pub type NodeIndex = u16;
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ReplicaConfig {
+    pub num_nodes: NodeIndex,
+    pub num_faulty_nodes: NodeIndex,
+}
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ClientConfig {

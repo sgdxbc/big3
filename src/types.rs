@@ -4,7 +4,7 @@ pub type NodeIndex = big_schema::NodeIndex;
 pub type ClientId = u32;
 pub type ClientSeq = u64;
 
-#[derive(Debug, Encode, Decode)]
+#[derive(Debug, Clone, Encode, Decode)]
 pub struct Request {
     pub client_id: ClientId,
     pub client_seq: ClientSeq,

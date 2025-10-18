@@ -15,6 +15,6 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn reset_instance(instance: &Instance) -> anyhow::Result<()> {
-    instance.ssh().arg("pkill big").output().await?;
+    instance.ssh().arg("pkill big; rm -r /tmp/.tmp*").output().await?;
     Ok(())
 }

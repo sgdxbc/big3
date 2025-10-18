@@ -1,6 +1,6 @@
 use std::{
     collections::HashMap,
-    net::SocketAddr,
+    net::IpAddr,
     sync::{Arc, Mutex},
 };
 
@@ -146,14 +146,16 @@ pub struct NetworkConnectTask {
 impl NetworkConnectTask {
     pub async fn load(
         client_id: ClientId,
-        addrs: Vec<SocketAddr>,
+        ips: &[IpAddr],
         tx_incoming_message: Sender<Reply>,
     ) -> anyhow::Result<Self> {
         let mut endpoint = Endpoint::client(([0, 0, 0, 0], 0).into())?;
         endpoint.set_default_client_config(client_config());
         let mut txs_outgoing_message = HashMap::new();
-        for (i, &addr) in addrs.iter().enumerate() {
-            let conn = endpoint.connect(addr, "server.example")?.await?;
+        for (i, &ip) in ips.iter().enumerate() {
+            let conn = endpoint
+                .connect((ip, 5000).into(), "server.example")?
+                .await?;
             conn.open_uni()
                 .await?
                 .write_all(&client_id.to_le_bytes())
@@ -218,7 +220,7 @@ impl ClientNodeTask {
 
         let network_connect = NetworkConnectTask::load(
             client_id,
-            schema.addrs,
+            &schema.ips,
             client_channels.tx_incoming_message.clone(),
         )
         .await?;

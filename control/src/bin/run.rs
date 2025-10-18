@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use big_control::{
     Cluster, Instance,
-    configs::{NUM_KEYS, READ_RATIO},
+    configs::{NUM_FAULTY_NODES, NUM_KEYS, READ_RATIO, num_nodes},
     load_all, run_endpoints, stop_all,
 };
 use big_schema::{Scrape, Task};
@@ -24,25 +24,47 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn run_workload(
-    server_instances: Vec<Instance>,
+    mut server_instances: Vec<Instance>,
     client_instances: Vec<Instance>,
 ) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        server_instances.len() >= num_nodes() as usize,
+        "not enough server instances"
+    );
+    server_instances.truncate(num_nodes() as _);
+
     let control_client = Client::new();
     sleep(Duration::from_secs(3)).await;
+
+    let ips = server_instances
+        .iter()
+        .map(|instance| instance.private_ip)
+        .collect::<Vec<_>>();
+
     println!("load servers");
-    load_all(&server_instances, Task::Replica, control_client.clone()).await?;
+    let replica_items = (0..num_nodes())
+        .zip(&server_instances)
+        .map(|(node_index, instance)| {
+            let schema = big_schema::ReplicaTask {
+                node_index,
+                ips: ips.clone(),
+                config: big_schema::ReplicaConfig {
+                    num_nodes: num_nodes(),
+                    num_faulty_nodes: NUM_FAULTY_NODES,
+                },
+            };
+            (instance, Task::Replica(schema))
+        });
+    load_all(replica_items, control_client.clone()).await?;
     println!("start servers");
     start_all(&server_instances, control_client.clone()).await?;
 
     println!("load clients");
     let client_task = big_schema::ClientTask {
-        addrs: server_instances
-            .iter()
-            .map(|instance| (instance.private_ip, 5000).into())
-            .collect(),
+        ips,
         config: big_schema::ClientConfig {
-            num_nodes: 1,
-            num_faulty_nodes: 0,
+            num_nodes: num_nodes(),
+            num_faulty_nodes: NUM_FAULTY_NODES,
         },
         worker_config: big_schema::ClientWorkerConfig {
             num_concurrent: 200,
@@ -50,12 +72,10 @@ async fn run_workload(
             read_ratio: READ_RATIO,
         },
     };
-    load_all(
-        &client_instances,
-        Task::Client(client_task),
-        control_client.clone(),
-    )
-    .await?; //
+    let client_items = client_instances
+        .iter()
+        .map(|instance| (instance, Task::Client(client_task.clone())));
+    load_all(client_items, control_client.clone()).await?;
     println!("start clients");
     start_all(&client_instances, control_client.clone()).await?;
 

@@ -3,7 +3,10 @@ use std::{collections::VecDeque, mem::replace};
 use bincode::{Decode, Encode};
 use sha2::{Digest as _, Sha256};
 
-use crate::types::{ClientId, NodeIndex, Reply, Request};
+use crate::{
+    consensus::Block,
+    types::{ClientId, NodeIndex, Reply, Request},
+};
 
 #[derive(Encode, Decode)]
 pub enum Op {
@@ -59,8 +62,8 @@ impl<C> Execute<C> {
 }
 
 impl<C: ExecuteContext> Execute<C> {
-    pub fn on_requests(&mut self, requests: Vec<Request>) {
-        self.requests.extend(requests);
+    pub fn on_block(&mut self, block: Block) {
+        self.requests.extend(block.txns);
         self.may_execute();
     }
 
