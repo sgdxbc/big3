@@ -464,7 +464,7 @@ impl ReplicaNodeTask {
             network_outgoing.tx_outgoing_message.clone(),
             storage.tx_storage_op.clone(),
         );
-        let execute = ExecuteTask::new(Execute::new(execute_context, 0));
+        let execute = ExecuteTask::new(Execute::new(execute_context, schema.node_index));
 
         let network_connect =
             NetworkConnectTask::load(&schema, consensus_channels.tx_incoming_message.clone())
@@ -476,7 +476,11 @@ impl ReplicaNodeTask {
         };
         let consensus = ConsensusTask::new(
             consensus_channels,
-            Narwhal::new(consensus_context, (&schema.config).into(), 0),
+            Narwhal::new(
+                consensus_context,
+                (&schema.config).into(),
+                schema.node_index,
+            ),
         );
 
         let endpoint = {

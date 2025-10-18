@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use axum::{Json, extract::State, response::IntoResponse, routing::post};
 use big::{schema, tasks::Task};
+use log::info;
 use tokio::{
     sync::{
         mpsc::{Receiver, Sender, channel},
@@ -16,6 +17,12 @@ static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let _logger = flexi_logger::Logger::try_with_env_or_str("info")?
+        .log_to_file(flexi_logger::FileSpec::default().suppress_timestamp())
+        .write_mode(flexi_logger::WriteMode::BufferAndFlush)
+        .start()?;
+    info!("logger initialized");
+
     let (tx_command, rx_command) = channel(1);
     let run_task = run(rx_command);
 

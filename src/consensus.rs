@@ -201,6 +201,12 @@ impl<C: NarwhalContext> Narwhal<C> {
     }
 
     fn propose(&mut self) {
+        trace!(
+            "[{}] proposing for round {} pool size {}",
+            self.node_index,
+            self.round,
+            self.txn_pool.len()
+        );
         if let Some(block_hash) = self.block_hash {
             debug!("[{}] interrupted proposal {block_hash:?}", self.node_index);
             self.block_oks.clear()

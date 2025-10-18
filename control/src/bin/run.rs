@@ -42,11 +42,12 @@ async fn run_workload(
         .collect::<Vec<_>>();
 
     println!("load servers");
-    let replica_items = (0..num_nodes())
-        .zip(&server_instances)
+    let replica_items = server_instances
+        .iter()
+        .enumerate()
         .map(|(node_index, instance)| {
             let schema = big_schema::ReplicaTask {
-                node_index,
+                node_index: node_index as _,
                 ips: ips.clone(),
                 config: big_schema::ReplicaConfig {
                     num_nodes: num_nodes(),

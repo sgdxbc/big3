@@ -54,16 +54,23 @@ impl Instance {
     }
 }
 
-pub async fn run_endpoints(instances: impl IntoIterator<Item = Instance>) -> anyhow::Result<()> {
+pub async fn run_endpoints(
+    instances: impl IntoIterator<Item = Instance> + Clone,
+) -> anyhow::Result<()> {
     let _ = fs::remove_dir_all("log").await;
     fs::create_dir("log").await?;
     fs::write("log/.gitignore", "*").await?;
     fs::create_dir("log/stderr").await?;
 
     let mut tasks = JoinSet::new();
-    for instance in instances {
+    for instance in instances.clone() {
         tasks.spawn(async move {
-            let output = instance.ssh().arg("./big").output().await?;
+            // let output = instance.ssh().arg("./big").output().await?;
+            let output = instance
+                .ssh()
+                .arg("RUST_LOG=info,big::consensus=trace,big::execute=trace ./big")
+                .output()
+                .await?;
             anyhow::Ok((instance.public_dns, output))
         });
     }
@@ -73,6 +80,25 @@ pub async fn run_endpoints(instances: impl IntoIterator<Item = Instance>) -> any
             fs::write(format!("log/stderr/{dns}.log"), output.stderr).await?;
             anyhow::bail!("instance {dns} failed");
         }
+    }
+
+    let mut tasks = JoinSet::new();
+    for instance in instances {
+        tasks.spawn(async move {
+            let status = Command::new("rsync")
+                .args([
+                    "-az",
+                    &format!("{}:big.log", instance.public_dns),
+                    &format!("log/{}.log", instance.public_dns),
+                ])
+                .status()
+                .await?;
+            anyhow::ensure!(status.success(), "rsync failed for {}", instance.public_dns);
+            anyhow::Ok(())
+        });
+    }
+    while let Some(result) = tasks.join_next().await {
+        result??;
     }
     Ok(())
 }
