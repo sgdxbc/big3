@@ -1,0 +1,17 @@
+Notes
+
+I really need to start to log my thoughts during coding somewhere. Not for bookkeeping or any other useful means, just to record how many thinks I have came up during working on this, so I will know whether it is much or not based on something other than my impression.
+
+I won't do retrospection, for all previous thoughts, just log them when (if) they are back. The current thing is about open loop clients.
+
+See the atomic broadcast part of BigBFT is borrowed from Narwhal/Bullshark, which deploys open loop clients, so that even if some proposed blocks are not committed eventually. If BigBFT follows the same practice, the latency may constantly increase as the system runs, because more and more transactions are queued between consensus and execution.
+
+Bullshark is pure atomic broadcast work. The protocol ends at the point the block is committed, which is inside the scope of the consensus protocol itself. So, if the consensus cannot catch up to the request rate, the block interval will build up, and nodes can easily decrease (or sustain a stable) workload by discarding transactions before proposing new blocks.
+
+BigBFT is a replication work, the ordered transactions need to be executed, and by all signs the execution will probably not keep up with the ordering. If there is no proper back pressure from execution to consensus, consensus will not slow down according to execution throughput, the latency will keep increase and not stabilize.
+
+There are two approaches. One is to add the back pressure, the other is to switch to close loop clients, which naturally comes with back pressure.
+
+For the first approach, I need the consensus to be aware of the progress of execution. I need to set up signals that "permit to execute more", and consensus decides the timing to propose blocks according to not only how itself is going but also how execution is going. Alternative to signal I can also just implement consensus and execution as one big state machine, so consensus can directly query execution's progress from the shared state, but that is a bad idea obviously.
+
+For the second approach, I need to implement "lossless" replication i.e. all transactions are executed without the need of retrying, so the latency will not be affected by the choice of retry timeout. This means the Bullshark implementation must commit every proposed blocks, without either giving up certify them or garbage collect the pending-delivery blocks (either certified or not). I have currently done this, but the first approach seems to make more sense after I came up with it. So I will need to try it instead.

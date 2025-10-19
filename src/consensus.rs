@@ -42,7 +42,8 @@ impl From<&crate::schema::ReplicaConfig> for NarwhalConfig {
         Self {
             num_node: config.num_nodes,
             num_faulty_node: config.num_faulty_nodes,
-            garbage_collection_depth: Some(10),
+            // garbage_collection_depth: Some(10),
+            garbage_collection_depth: None,
         }
     }
 }
@@ -179,6 +180,7 @@ impl<C: NarwhalContext> Narwhal<C> {
         round_certs.insert(cert.creator_index, cert);
         if round_certs.len() >= (self.config.num_node - self.config.num_faulty_node) as usize
         // TODO may need to restrict DAG shape
+        && round_certs.contains_key(&self.node_index)
         {
             if cert_round > self.round {
                 warn!(
@@ -236,10 +238,19 @@ impl<C: NarwhalContext> Narwhal<C> {
 
     fn validate(&mut self, block: &Block) {
         if block.round < self.round {
-            trace!(
-                "[{}] ignoring old block for round {} < {}",
-                self.node_index, block.round, self.round
-            );
+            // trace!(
+            //     "[{}] ignoring old block for round {} < {}",
+            //     self.node_index, block.round, self.round
+            // );
+            let block_ok = message::BlockOk {
+                hash: block.hash(),
+                round: block.round,
+                creator_index: block.node_index,
+                validator_index: self.node_index,
+                sig: vec![], // TODO
+            };
+            self.context
+                .send(block.node_index, message::Message::BlockOk(block_ok));
             return;
         }
         // TODO verify integrity
