@@ -53,7 +53,7 @@ impl<C> Client<C> {
         }
     }
 
-    const NUM_MAX_ONGOING: usize = 10_000;
+    const NUM_MAX_ONGOING: usize = 100_000;
 }
 
 impl<C: ClientContext> Client<C> {
@@ -65,8 +65,8 @@ impl<C: ClientContext> Client<C> {
             client_seq: self.seq,
             command,
         };
-        // TODO randomize
-        self.context.send(0, request);
+        self.context
+            .send(rng().random_range(0..self.config.num_nodes), request);
 
         self.ongoing.insert(
             self.seq,

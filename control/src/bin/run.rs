@@ -68,7 +68,7 @@ async fn run_workload(
             num_faulty_nodes: NUM_FAULTY_NODES,
         },
         worker_config: big_schema::ClientWorkerConfig {
-            rate: 10_000.0,
+            rate: 130_000.,
             num_keys: NUM_KEYS,
             read_ratio: READ_RATIO,
         },

@@ -7,13 +7,14 @@ use std::{
 
 use bytes::Bytes;
 use quinn::{Connection, Endpoint};
+use rand::{Rng, rng};
 use tokio::{
     select,
     sync::{
         mpsc::{Receiver, Sender, UnboundedReceiver, UnboundedSender, channel, unbounded_channel},
         oneshot,
     },
-    time::interval,
+    time::{interval, sleep},
 };
 use tokio_util::sync::CancellationToken;
 
@@ -38,9 +39,11 @@ impl ClientWorkerTask {
         Ok(())
     }
 
-    const TICK_INTERVAL: Duration = Duration::from_millis(20);
+    const TICK_INTERVAL: Duration = Duration::from_millis(10);
 
     async fn run_inner(&mut self) {
+        let duration = rng().random_range(Duration::ZERO..Self::TICK_INTERVAL);
+        sleep(duration).await;
         self.client_worker.start();
         let mut ticker = interval(Self::TICK_INTERVAL);
         loop {

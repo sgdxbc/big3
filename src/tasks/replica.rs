@@ -15,7 +15,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     cert::{client_config, server_config},
-    consensus::{Block, Narwhal, NarwhalContext},
+    consensus::{Block, Bullshark, BullsharkContext},
     execute::{Execute, ExecuteContext, FetchId},
     schema,
     storage::{Storage, StorageOp},
@@ -46,11 +46,11 @@ impl ConsensusChannels {
 
 pub struct ConsensusTask {
     channels: ConsensusChannels,
-    consensus: Narwhal<ConsensusTaskContext>,
+    consensus: Bullshark<ConsensusTaskContext>,
 }
 
 impl ConsensusTask {
-    fn new(channels: ConsensusChannels, consensus: Narwhal<ConsensusTaskContext>) -> Self {
+    fn new(channels: ConsensusChannels, consensus: Bullshark<ConsensusTaskContext>) -> Self {
         Self {
             channels,
             consensus,
@@ -86,8 +86,8 @@ struct ConsensusTaskContext {
     txs_outgoing_message: HashMap<NodeIndex, UnboundedSender<Bytes>>,
 }
 
-impl NarwhalContext for ConsensusTaskContext {
-    fn deliver(&mut self, block: Block) {
+impl BullsharkContext for ConsensusTaskContext {
+    fn output(&mut self, block: Block) {
         let _ = self.tx_deliver.send(block);
     }
 
@@ -480,7 +480,7 @@ impl ReplicaNodeTask {
         };
         let consensus = ConsensusTask::new(
             consensus_channels,
-            Narwhal::new(
+            Bullshark::new(
                 consensus_context,
                 (&schema.config).into(),
                 schema.node_index,

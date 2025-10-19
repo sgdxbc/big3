@@ -71,8 +71,16 @@ impl<C: ExecuteContext> Execute<C> {
             block.node_index,
             block.txns.len()
         );
-        self.requests.extend(block.txns);
-        self.may_execute();
+        // self.requests.extend(block.txns);
+        // self.may_execute();
+        for request in block.txns {
+            let reply = Reply {
+                client_seq: request.client_seq,
+                res: bincode::encode_to_vec(&Res::Put, bincode::config::standard()).unwrap(),
+                node_index: self.index,
+            };
+            self.context.send(request.client_id, reply);
+        }
     }
 
     pub fn on_fetch_response(&mut self, fetch_id: FetchId, value: Option<Vec<u8>>) {

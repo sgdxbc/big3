@@ -28,7 +28,7 @@ impl Debug for BlockHash {
 }
 
 #[derive(Clone)]
-pub struct NarwhalConfig {
+pub struct BullsharkConfig {
     num_node: NodeIndex,
     num_faulty_node: NodeIndex,
     // we adopt a simplified garbage collection rule of the Bullshark paper
@@ -37,7 +37,7 @@ pub struct NarwhalConfig {
     garbage_collection_depth: Option<Round>,
 }
 
-impl From<&crate::schema::ReplicaConfig> for NarwhalConfig {
+impl From<&crate::schema::ReplicaConfig> for BullsharkConfig {
     fn from(config: &crate::schema::ReplicaConfig) -> Self {
         Self {
             num_node: config.num_nodes,
@@ -47,7 +47,7 @@ impl From<&crate::schema::ReplicaConfig> for NarwhalConfig {
     }
 }
 
-impl NarwhalConfig {
+impl BullsharkConfig {
     fn is_bullshark_leader(&self, node_index: NodeIndex, round: Round) -> bool {
         round % 2 == 0 && node_index == (round / 2 % self.num_node as Round) as NodeIndex
     }
@@ -87,15 +87,15 @@ impl Block {
     }
 }
 
-pub trait NarwhalContext {
+pub trait BullsharkContext {
     fn send(&mut self, node_index: NodeIndex, message: message::Message);
     fn send_to_all(&mut self, message: message::Message);
-    fn deliver(&mut self, block: Block);
+    fn output(&mut self, block: Block);
 }
 
-pub struct Narwhal<C> {
+pub struct Bullshark<C> {
     context: C,
-    config: NarwhalConfig,
+    config: BullsharkConfig,
     node_index: NodeIndex,
 
     round: Round,
@@ -110,11 +110,13 @@ pub struct Narwhal<C> {
     reorder_blocks: HashMap<BlockHash, Vec<Block>>, // missing parent -> children
     reorder_certified: HashSet<BlockHash>,
 
-    metrics: NarwhalMetrics,
+    reorder_delivered: HashMap<BlockHash, Block>,
+
+    metrics: BullsharkMetrics,
 }
 
 #[derive(Default)]
-struct NarwhalMetrics {
+struct BullsharkMetrics {
     request_count: usize,
     proposed_block_count: u64,
     certified_own_block_count: u64,
@@ -122,8 +124,8 @@ struct NarwhalMetrics {
     delivered_block_count: u64,
 }
 
-impl<C> Narwhal<C> {
-    pub fn new(context: C, config: NarwhalConfig, node_index: NodeIndex) -> Self {
+impl<C> Bullshark<C> {
+    pub fn new(context: C, config: BullsharkConfig, node_index: NodeIndex) -> Self {
         let (
             round,
             block_hash,
@@ -135,6 +137,7 @@ impl<C> Narwhal<C> {
             delivered,
             reorder_blocks,
             reorder_certified,
+            reorder_delivered,
             metrics,
         ) = Default::default();
         Self {
@@ -151,12 +154,13 @@ impl<C> Narwhal<C> {
             delivered,
             reorder_blocks,
             reorder_certified,
+            reorder_delivered,
             metrics,
         }
     }
 }
 
-impl<C: NarwhalContext> Narwhal<C> {
+impl<C: BullsharkContext> Bullshark<C> {
     pub fn init(&mut self) {
         self.propose();
     }
@@ -193,7 +197,7 @@ impl<C: NarwhalContext> Narwhal<C> {
         let delivered_block_per_round =
             self.metrics.delivered_block_count as f64 / (self.round as f64 + 1.0);
         info!(
-            "Narwhal Metrics: proposed blocks {}, certified own blocks {}, certified blocks {}, delivered blocks {}, avg block size {:.2}, certification rate {:.2}, delivery rate {:.2}, blocks/round {:.2}",
+            "proposed blocks {}, certified own blocks {}, certified blocks {}, delivered blocks {}, avg block size {:.2}, certification rate {:.2}, delivery rate {:.2}, blocks/round {:.2}",
             self.metrics.proposed_block_count,
             self.metrics.certified_own_block_count,
             self.metrics.certified_block_count,
@@ -369,15 +373,32 @@ impl<C: NarwhalContext> Narwhal<C> {
                 return;
             }
         }
+        let block_hash = block.hash();
+        self.deliver(block);
+        if let Some(blocks) = self.reorder_blocks.remove(&block_hash) {
+            for block in blocks {
+                self.may_deliver(block)
+            }
+        }
+    }
+
+    fn deliver(&mut self, block: Block) {
+        self.metrics.delivered_block_count += 1;
         // first perform bookkeeping that access block fields
         let block_hash = block.hash();
         let round_delivered = self.delivered.entry(block.round).or_default();
         round_delivered.insert(block_hash);
+
+        if !self
+            .config
+            .is_bullshark_leader(block.node_index, block.round)
+        {
+            self.reorder_delivered.insert(block_hash, block);
+            return;
+        }
+
         if let Some(depth) = self.config.garbage_collection_depth
             && block.round >= depth
-            && self
-                .config
-                .is_bullshark_leader(block.node_index, block.round)
         {
             let gc_round = block.round - depth;
             self.delivered.retain(|&r, _| r > gc_round);
@@ -386,14 +407,17 @@ impl<C: NarwhalContext> Narwhal<C> {
             // because the relevant missing blocks are _secured_ by a quorum certificate so they
             // will eventually appear
         }
-        // then depart the block
-        self.context.deliver(block);
-        self.metrics.delivered_block_count += 1;
-        if let Some(blocks) = self.reorder_blocks.remove(&block_hash) {
-            for block in blocks {
-                self.may_deliver(block)
+
+        self.output_recursive(block);
+    }
+
+    fn output_recursive(&mut self, block: Block) {
+        for &link in &block.links {
+            if let Some(parent) = self.reorder_delivered.remove(&link) {
+                self.output_recursive(parent)
             }
         }
+        self.context.output(block);
     }
 }
 
