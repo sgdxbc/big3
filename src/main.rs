@@ -17,10 +17,9 @@ static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let _logger = flexi_logger::Logger::try_with_env_or_str("info")?
-        .log_to_file(flexi_logger::FileSpec::default().suppress_timestamp())
-        .write_mode(flexi_logger::WriteMode::BufferAndFlush)
-        .start()?;
+    env_logger::builder()
+        .target(env_logger::Target::Stdout)
+        .try_init()?;
     info!("logger initialized");
 
     let (tx_command, rx_command) = channel(1);
