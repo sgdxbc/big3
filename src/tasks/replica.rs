@@ -58,7 +58,11 @@ impl ConsensusTask {
     }
 
     pub async fn run(mut self, stop: CancellationToken) -> anyhow::Result<()> {
-        tokio::spawn(async move { stop.run_until_cancelled(self.run_inner()).await }).await?;
+        tokio::spawn(async move {
+            stop.run_until_cancelled(self.run_inner()).await;
+            self.consensus.log_metrics();
+        })
+        .await?;
         Ok(())
     }
 

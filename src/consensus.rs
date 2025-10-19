@@ -5,7 +5,7 @@ use std::{
 };
 
 use bincode::{Decode, Encode};
-use log::{debug, trace, warn};
+use log::{debug, info, trace, warn};
 use sha2::{Digest as _, Sha256};
 
 use crate::types::{NodeIndex, Request};
@@ -42,8 +42,7 @@ impl From<&crate::schema::ReplicaConfig> for NarwhalConfig {
         Self {
             num_node: config.num_nodes,
             num_faulty_node: config.num_faulty_nodes,
-            // garbage_collection_depth: Some(10),
-            garbage_collection_depth: None,
+            garbage_collection_depth: Some(10),
         }
     }
 }
@@ -110,6 +109,17 @@ pub struct Narwhal<C> {
     delivered: HashMap<Round, HashSet<BlockHash>>,
     reorder_blocks: HashMap<BlockHash, Vec<Block>>, // missing parent -> children
     reorder_certified: HashSet<BlockHash>,
+
+    metrics: NarwhalMetrics,
+}
+
+#[derive(Default)]
+struct NarwhalMetrics {
+    request_count: usize,
+    proposed_block_count: u64,
+    certified_own_block_count: u64,
+    certified_block_count: u64,
+    delivered_block_count: u64,
 }
 
 impl<C> Narwhal<C> {
@@ -125,6 +135,7 @@ impl<C> Narwhal<C> {
             delivered,
             reorder_blocks,
             reorder_certified,
+            metrics,
         ) = Default::default();
         Self {
             context,
@@ -140,6 +151,7 @@ impl<C> Narwhal<C> {
             delivered,
             reorder_blocks,
             reorder_certified,
+            metrics,
         }
     }
 }
@@ -151,6 +163,7 @@ impl<C: NarwhalContext> Narwhal<C> {
 
     pub fn on_request(&mut self, request: Request) {
         self.txn_pool.push(request);
+        self.metrics.request_count += 1;
     }
 
     pub fn on_message(&mut self, message: message::Message) {
@@ -170,6 +183,28 @@ impl<C: NarwhalContext> Narwhal<C> {
         }
     }
 
+    pub fn log_metrics(&self) {
+        let block_size =
+            self.metrics.request_count as f64 / self.metrics.proposed_block_count as f64;
+        let certification_rate = self.metrics.certified_own_block_count as f64
+            / self.metrics.proposed_block_count as f64;
+        let delivery_rate =
+            self.metrics.certified_block_count as f64 / self.metrics.delivered_block_count as f64;
+        let delivered_block_per_round =
+            self.metrics.delivered_block_count as f64 / (self.round as f64 + 1.0);
+        info!(
+            "Narwhal Metrics: proposed blocks {}, certified own blocks {}, certified blocks {}, delivered blocks {}, avg block size {:.2}, certification rate {:.2}, delivery rate {:.2}, blocks/round {:.2}",
+            self.metrics.proposed_block_count,
+            self.metrics.certified_own_block_count,
+            self.metrics.certified_block_count,
+            self.metrics.delivered_block_count,
+            block_size,
+            certification_rate,
+            delivery_rate,
+            delivered_block_per_round,
+        );
+    }
+
     fn handle_cert(&mut self, cert: message::Cert) {
         self.certified(cert.block_hash);
         let cert_round = cert.round;
@@ -180,7 +215,6 @@ impl<C: NarwhalContext> Narwhal<C> {
         round_certs.insert(cert.creator_index, cert);
         if round_certs.len() >= (self.config.num_node - self.config.num_faulty_node) as usize
         // TODO may need to restrict DAG shape
-        && round_certs.contains_key(&self.node_index)
         {
             if cert_round > self.round {
                 warn!(
@@ -209,6 +243,7 @@ impl<C: NarwhalContext> Narwhal<C> {
             self.round,
             self.txn_pool.len()
         );
+        self.metrics.proposed_block_count += 1;
         if let Some(block_hash) = self.block_hash {
             debug!("[{}] interrupted proposal {block_hash:?}", self.node_index);
             self.block_oks.clear()
@@ -238,19 +273,10 @@ impl<C: NarwhalContext> Narwhal<C> {
 
     fn validate(&mut self, block: &Block) {
         if block.round < self.round {
-            // trace!(
-            //     "[{}] ignoring old block for round {} < {}",
-            //     self.node_index, block.round, self.round
-            // );
-            let block_ok = message::BlockOk {
-                hash: block.hash(),
-                round: block.round,
-                creator_index: block.node_index,
-                validator_index: self.node_index,
-                sig: vec![], // TODO
-            };
-            self.context
-                .send(block.node_index, message::Message::BlockOk(block_ok));
+            trace!(
+                "[{}] ignoring old block for round {} < {}",
+                self.node_index, block.round, self.round
+            );
             return;
         }
         // TODO verify integrity
@@ -298,6 +324,7 @@ impl<C: NarwhalContext> Narwhal<C> {
                 "[{}] block {:?} certified for round {}",
                 self.node_index, block_hash, self.round
             );
+            self.metrics.certified_own_block_count += 1;
             let cert = message::Cert {
                 round: self.round,
                 creator_index: self.node_index,
@@ -323,6 +350,7 @@ impl<C: NarwhalContext> Narwhal<C> {
     }
 
     fn certified(&mut self, block_hash: BlockHash) {
+        self.metrics.certified_block_count += 1;
         let Some(block) = self.certifying_blocks.remove(&block_hash) else {
             self.reorder_certified.insert(block_hash);
             return;
@@ -360,6 +388,7 @@ impl<C: NarwhalContext> Narwhal<C> {
         }
         // then depart the block
         self.context.deliver(block);
+        self.metrics.delivered_block_count += 1;
         if let Some(blocks) = self.reorder_blocks.remove(&block_hash) {
             for block in blocks {
                 self.may_deliver(block)

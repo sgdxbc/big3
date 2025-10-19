@@ -5,6 +5,7 @@ use std::{
 };
 
 use hdrhistogram::Histogram;
+use log::info;
 use rand::{Rng, RngCore as _, rng};
 use tokio::sync::oneshot;
 
@@ -25,12 +26,19 @@ pub struct Client<C> {
 
     seq: ClientSeq,
     ongoing: BTreeMap<ClientSeq, Ongoing>,
+
+    metrics: ClientMetrics,
 }
 
 struct Ongoing {
     replies: HashMap<NodeIndex, Vec<u8>>,
     tx_response: oneshot::Sender<Vec<u8>>,
     // save command if resending
+}
+
+#[derive(Default)]
+struct ClientMetrics {
+    commit_count: u64,
 }
 
 impl<C> Client<C> {
@@ -41,10 +49,11 @@ impl<C> Client<C> {
             id,
             seq: 0,
             ongoing: Default::default(),
+            metrics: Default::default(),
         }
     }
 
-    const NUM_MAX_ONGOING: usize = 1000;
+    const NUM_MAX_ONGOING: usize = 10_000;
 }
 
 impl<C: ClientContext> Client<C> {
@@ -87,7 +96,13 @@ impl<C: ClientContext> Client<C> {
         {
             let ongoing = self.ongoing.remove(&message.client_seq).unwrap();
             let _ = ongoing.tx_response.send(message.res);
+            self.metrics.commit_count += 1;
         }
+    }
+
+    pub fn log_metrics(&self) {
+        let commit_rate = self.metrics.commit_count as f64 / self.seq as f64;
+        info!("commit rate: {:.2}%", commit_rate * 100.0);
     }
 }
 
@@ -101,6 +116,8 @@ pub struct ClientWorker<C> {
     pub context: C,
     config: ClientWorkerConfig,
 
+    start: Instant,
+    invoke_count: u64,
     ongoing: HashMap<InvokeId, Instant>,
     pub records: Arc<Mutex<Records>>,
 }
@@ -115,6 +132,8 @@ impl<C> ClientWorker<C> {
         Self {
             context,
             config,
+            start: Instant::now(), // placeholder
+            invoke_count: 0,
             ongoing: Default::default(),
             records: Arc::new(Mutex::new(Records {
                 start: Instant::now(),
@@ -126,8 +145,15 @@ impl<C> ClientWorker<C> {
 
 impl<C: ClientWorkerContext> ClientWorker<C> {
     pub fn start(&mut self) {
-        for _ in 0..self.config.num_concurrent {
+        self.start = Instant::now();
+    }
+
+    pub fn on_tick(&mut self) {
+        let elapsed = self.start.elapsed().as_secs_f64();
+        let target_invoke_count = (self.config.rate * elapsed).floor() as u64;
+        while self.invoke_count < target_invoke_count {
             self.invoke();
+            self.invoke_count += 1;
         }
     }
 
@@ -136,7 +162,6 @@ impl<C: ClientWorkerContext> ClientWorker<C> {
             unimplemented!()
         };
         self.records.lock().unwrap().latency_histogram += start.elapsed().as_nanos() as u64;
-        self.invoke()
     }
 
     fn invoke(&mut self) {

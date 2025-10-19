@@ -65,10 +65,10 @@ pub async fn run_endpoints(
     let mut tasks = JoinSet::new();
     for instance in instances.clone() {
         tasks.spawn(async move {
-            // let output = instance.ssh().arg("./big").output().await?;
             let output = instance
                 .ssh()
-                .arg("RUST_LOG=info,big ./big > big.log")
+                .arg("RUST_LOG=info ./big > big.log")
+                // .arg("RUST_LOG=info,big ./big > big.log")
                 .output()
                 .await?;
             anyhow::Ok((instance.public_dns, output))

@@ -2,6 +2,7 @@ use std::{
     collections::HashMap,
     net::IpAddr,
     sync::{Arc, Mutex},
+    time::Duration,
 };
 
 use bytes::Bytes;
@@ -12,6 +13,7 @@ use tokio::{
         mpsc::{Receiver, Sender, UnboundedReceiver, UnboundedSender, channel, unbounded_channel},
         oneshot,
     },
+    time::interval,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -36,10 +38,20 @@ impl ClientWorkerTask {
         Ok(())
     }
 
+    const TICK_INTERVAL: Duration = Duration::from_millis(20);
+
     async fn run_inner(&mut self) {
         self.client_worker.start();
-        while let Some((seq, res)) = self.client_worker.context.rx_invoke_response.recv().await {
-            self.client_worker.on_invoke_response(seq, res);
+        let mut ticker = interval(Self::TICK_INTERVAL);
+        loop {
+            select! {
+                _ = ticker.tick() => {
+                    self.client_worker.on_tick();
+                }
+                Some((seq, res)) = self.client_worker.context.rx_invoke_response.recv() => {
+                    self.client_worker.on_invoke_response(seq, res);
+                }
+            }
         }
     }
 }
@@ -110,7 +122,11 @@ impl ClientTask {
     }
 
     async fn run(mut self, stop: CancellationToken) -> anyhow::Result<()> {
-        tokio::spawn(async move { stop.run_until_cancelled(self.run_inner()).await }).await?;
+        tokio::spawn(async move {
+            stop.run_until_cancelled(self.run_inner()).await;
+            self.client.log_metrics();
+        })
+        .await?;
         Ok(())
     }
 
