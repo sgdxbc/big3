@@ -175,6 +175,7 @@ impl<C: ClientWorkerContext> ClientWorker<C> {
     fn invoke(&mut self) {
         let key = execute::key(self.zipfian.next_u64(&mut rng()));
         // let key = execute::key(0);
+        // let key = execute::key(rng().random_range(0..self.config.num_keys));
         let op = if rng().random_bool(self.config.read_ratio) {
             Op::Get(key)
         } else {

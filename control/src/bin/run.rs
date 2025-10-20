@@ -34,6 +34,7 @@ async fn run_workload(
     server_instances.truncate(num_nodes() as _);
 
     let control_client = Client::new();
+    println!("wait for servers to boot");
     sleep(Duration::from_secs(3)).await;
 
     let ips = server_instances
@@ -56,7 +57,9 @@ async fn run_workload(
             };
             (instance, Task::Replica(schema))
         });
-    load_all(replica_items, control_client.clone()).await?;
+    let result = load_all(replica_items, control_client.clone()).await;
+    sleep(Duration::from_secs(1)).await;
+    result?;
     println!("start servers");
     start_all(&server_instances, control_client.clone()).await?;
 
@@ -68,7 +71,7 @@ async fn run_workload(
             num_faulty_nodes: NUM_FAULTY_NODES,
         },
         worker_config: big_schema::ClientWorkerConfig {
-            rate: 40_000.,
+            rate: 4_000.,
             num_keys: NUM_KEYS,
             read_ratio: READ_RATIO,
         },

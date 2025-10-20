@@ -56,10 +56,9 @@ impl Zipfian {
         if uz < 1.0 + (0.5f64).powf(self.theta) {
             return self.base + 1;
         }
-        let val = self.base
+        self.base
             + ((self.items as f64) * (self.eta * u - self.eta + 1.0).powf(self.alpha)).floor()
-                as u64;
-        val
+                as u64
     }
 
     /// (Optional) Incremental re-computation if the domain grows.

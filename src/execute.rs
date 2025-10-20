@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     mem::take,
 };
 
@@ -48,12 +48,12 @@ pub struct Execute<C> {
     pub context: C,
     index: NodeIndex,
 
-    requests: VecDeque<(Op, ClientId, ClientSeq)>,
+    requests: Vec<(Op, ClientId, ClientSeq)>,
     fetching: HashMap<FetchId, String>,
     state: HashMap<String, Option<Vec<u8>>>,
     updates: Vec<([u8; 32], Option<Vec<u8>>)>,
 
-    pending_blocks: Vec<Block>,
+    pending_blocks: VecDeque<Block>,
 }
 
 impl<C> Execute<C> {
@@ -72,7 +72,7 @@ impl<C> Execute<C> {
 
     // tune this according to the ordering latency. ordering latency should not exceed the execution
     // latency of a block * NUM_MAX_PENDING
-    const NUM_MAX_PENDING: usize = 20;
+    const NUM_MAX_PENDING: usize = 50;
 }
 
 impl<C: ExecuteContext> Execute<C> {
@@ -90,9 +90,12 @@ impl<C: ExecuteContext> Execute<C> {
             block.node_index,
             block.txns.len()
         );
+        if block.txns.is_empty() {
+            return;
+        }
 
         if !self.requests.is_empty() {
-            self.pending_blocks.push(block);
+            self.pending_blocks.push_back(block);
             return;
         }
         self.prepare_block(block);
@@ -100,17 +103,19 @@ impl<C: ExecuteContext> Execute<C> {
 
     fn prepare_block(&mut self, block: Block) {
         assert!(self.requests.is_empty());
+        let mut fetching_keys = HashSet::new();
         for request in block.txns {
             let op = bincode::decode_from_slice(&request.command, bincode::config::standard())
                 .unwrap()
                 .0;
-            if let Op::Get(key) = &op {
-                let storage_key = storage_key(&key);
-                let fetch_id = self.context.fetch(storage_key);
+            if let Op::Get(key) = &op
+                && fetching_keys.insert(key.clone())
+            {
+                let fetch_id = self.context.fetch(storage_key(key));
                 self.fetching.insert(fetch_id, key.clone());
             }
             self.requests
-                .push_back((op, request.client_id, request.client_seq));
+                .push((op, request.client_id, request.client_seq));
         }
 
         if self.fetching.is_empty() {
@@ -142,7 +147,7 @@ impl<C: ExecuteContext> Execute<C> {
         }
         self.context.post(take(&mut self.updates));
 
-        if let Some(block) = self.pending_blocks.pop() {
+        if let Some(block) = self.pending_blocks.pop_front() {
             self.prepare_block(block);
         }
     }
