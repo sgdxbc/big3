@@ -24,8 +24,8 @@ use crate::{
 };
 
 pub struct ConsensusChannels {
-    tx_request: Sender<Request>,
-    rx_request: Receiver<Request>,
+    tx_request: UnboundedSender<Request>,
+    rx_request: UnboundedReceiver<Request>,
 
     tx_incoming_message: Sender<crate::consensus::message::Message>,
     rx_incoming_message: Receiver<crate::consensus::message::Message>,
@@ -33,7 +33,7 @@ pub struct ConsensusChannels {
 
 impl ConsensusChannels {
     fn new() -> Self {
-        let (tx_request, rx_request) = channel(100);
+        let (tx_request, rx_request) = unbounded_channel();
         let (tx_incoming_message, rx_incoming_message) = channel(100);
         Self {
             tx_request,
@@ -106,6 +106,9 @@ impl BullsharkContext for ConsensusTaskContext {
 }
 
 pub struct ExecuteTask {
+    tx_request: Sender<Request>,
+    rx_request: Receiver<Request>,
+
     tx_block: UnboundedSender<Block>,
     rx_block: UnboundedReceiver<Block>,
     execute: Execute<ExecuteTaskContext>,
@@ -113,8 +116,11 @@ pub struct ExecuteTask {
 
 impl ExecuteTask {
     fn new(execute: Execute<ExecuteTaskContext>) -> Self {
+        let (tx_request, rx_request) = channel(100);
         let (tx_block, rx_block) = unbounded_channel();
         Self {
+            tx_request,
+            rx_request,
             tx_block,
             rx_block,
             execute,
@@ -135,6 +141,9 @@ impl ExecuteTask {
                 Some(block) = self.rx_block.recv() => {
                     self.execute.on_block(block);
                 }
+                Some(request) = self.rx_request.recv() => {
+                    self.execute.on_request(request);
+                }
             }
         }
     }
@@ -146,17 +155,20 @@ struct ExecuteTaskContext {
     tx_fetch_response: Sender<(FetchId, Option<Vec<u8>>)>,
     rx_fetch_response: Receiver<(FetchId, Option<Vec<u8>>)>,
     fetch_id: FetchId,
+    tx_request: UnboundedSender<Request>,
 }
 
 impl ExecuteTaskContext {
     fn new(
         tx_outgoing_message: UnboundedSender<(ClientId, Reply)>,
         tx_storage_op: UnboundedSender<StorageOp>,
+        tx_request: UnboundedSender<Request>,
     ) -> Self {
         let (tx_fetch_response, rx_fetch_response) = channel(100);
         Self {
             tx_outgoing_message,
             tx_storage_op,
+            tx_request,
             tx_fetch_response,
             rx_fetch_response,
             fetch_id: 0,
@@ -184,6 +196,10 @@ impl ExecuteContext for ExecuteTaskContext {
 
     fn post(&mut self, updates: Vec<([u8; 32], Option<Vec<u8>>)>) {
         let _ = self.tx_storage_op.send(StorageOp::Post(updates));
+    }
+
+    fn submit(&mut self, request: Request) {
+        let _ = self.tx_request.send(request);
     }
 }
 
@@ -467,6 +483,7 @@ impl ReplicaNodeTask {
         let execute_context = ExecuteTaskContext::new(
             network_outgoing.tx_outgoing_message.clone(),
             storage.tx_storage_op.clone(),
+            consensus_channels.tx_request.clone(),
         );
         let execute = ExecuteTask::new(Execute::new(execute_context, schema.node_index));
 
@@ -496,7 +513,7 @@ impl ReplicaNodeTask {
         };
         let network_accept = NetworkAcceptTask::new(
             endpoint,
-            consensus.channels.tx_request.clone(),
+            execute.tx_request.clone(),
             network_outgoing.tx_connection.clone(),
         );
         Ok(Self {

@@ -32,10 +32,13 @@ pub fn storage_key(key: &str) -> [u8; 32] {
 pub type FetchId = u64;
 
 pub trait ExecuteContext {
+    // network
     fn send(&mut self, id: ClientId, reply: Reply);
-
+    // storage
     fn fetch(&mut self, key: [u8; 32]) -> FetchId;
     fn post(&mut self, updates: Vec<([u8; 32], Option<Vec<u8>>)>);
+    // consensus
+    fn submit(&mut self, request: Request);
 }
 
 pub struct Execute<C> {
@@ -60,9 +63,17 @@ impl<C> Execute<C> {
             request_state: ExecuteRequestState::Idle,
         }
     }
+
+    const NUM_REQUESTS_THRESHOLD: usize = 10;
 }
 
 impl<C: ExecuteContext> Execute<C> {
+    pub fn on_request(&mut self, request: Request) {
+        if self.requests.len() < Self::NUM_REQUESTS_THRESHOLD {
+            self.context.submit(request);
+        } // otherwise discard the request that is over processing capacity
+    }
+
     pub fn on_block(&mut self, block: Block) {
         trace!(
             "node {} executing block ({}, {}) size {}",
@@ -71,16 +82,8 @@ impl<C: ExecuteContext> Execute<C> {
             block.node_index,
             block.txns.len()
         );
-        // self.requests.extend(block.txns);
-        // self.may_execute();
-        for request in block.txns {
-            let reply = Reply {
-                client_seq: request.client_seq,
-                res: bincode::encode_to_vec(&Res::Put, bincode::config::standard()).unwrap(),
-                node_index: self.index,
-            };
-            self.context.send(request.client_id, reply);
-        }
+        self.requests.extend(block.txns);
+        self.may_execute();
     }
 
     pub fn on_fetch_response(&mut self, fetch_id: FetchId, value: Option<Vec<u8>>) {
@@ -96,6 +99,7 @@ impl<C: ExecuteContext> Execute<C> {
             node_index: self.index,
         };
         self.context.send(client_id, reply);
+
         self.may_execute();
     }
 
