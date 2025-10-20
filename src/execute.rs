@@ -1,4 +1,7 @@
-use std::{collections::VecDeque, mem::replace};
+use std::{
+    collections::{HashMap, VecDeque},
+    mem::take,
+};
 
 use bincode::{Decode, Encode};
 use log::trace;
@@ -6,7 +9,7 @@ use sha2::{Digest as _, Sha256};
 
 use crate::{
     consensus::Block,
-    types::{ClientId, NodeIndex, Reply, Request},
+    types::{ClientId, ClientSeq, NodeIndex, Reply, Request},
 };
 
 #[derive(Encode, Decode)]
@@ -45,13 +48,12 @@ pub struct Execute<C> {
     pub context: C,
     index: NodeIndex,
 
-    requests: VecDeque<Request>,
-    request_state: ExecuteRequestState,
-}
+    requests: VecDeque<(Op, ClientId, ClientSeq)>,
+    fetching: HashMap<FetchId, String>,
+    state: HashMap<String, Option<Vec<u8>>>,
+    updates: Vec<([u8; 32], Option<Vec<u8>>)>,
 
-enum ExecuteRequestState {
-    Idle,
-    Getting(FetchId, ClientId, u64),
+    pending_blocks: Vec<Block>,
 }
 
 impl<C> Execute<C> {
@@ -59,17 +61,23 @@ impl<C> Execute<C> {
         Self {
             context,
             index,
+
             requests: Default::default(),
-            request_state: ExecuteRequestState::Idle,
+            fetching: Default::default(),
+            state: Default::default(),
+            updates: Default::default(),
+            pending_blocks: Default::default(),
         }
     }
 
-    const NUM_REQUESTS_THRESHOLD: usize = 10;
+    // tune this according to the ordering latency. ordering latency should not exceed the execution
+    // latency of a block * NUM_MAX_PENDING
+    const NUM_MAX_PENDING: usize = 20;
 }
 
 impl<C: ExecuteContext> Execute<C> {
     pub fn on_request(&mut self, request: Request) {
-        if self.requests.len() < Self::NUM_REQUESTS_THRESHOLD {
+        if self.pending_blocks.len() < Self::NUM_MAX_PENDING {
             self.context.submit(request);
         } // otherwise discard the request that is over processing capacity
     }
@@ -82,55 +90,70 @@ impl<C: ExecuteContext> Execute<C> {
             block.node_index,
             block.txns.len()
         );
-        self.requests.extend(block.txns);
-        self.may_execute();
-    }
 
-    pub fn on_fetch_response(&mut self, fetch_id: FetchId, value: Option<Vec<u8>>) {
-        let ExecuteRequestState::Getting(fetch_id2, client_id, client_seq) =
-            replace(&mut self.request_state, ExecuteRequestState::Idle)
-        else {
-            panic!("unexpected fetch response");
-        };
-        assert_eq!(fetch_id, fetch_id2);
-        let reply = Reply {
-            client_seq,
-            res: bincode::encode_to_vec(Res::Get(value), bincode::config::standard()).unwrap(),
-            node_index: self.index,
-        };
-        self.context.send(client_id, reply);
-
-        self.may_execute();
-    }
-
-    fn may_execute(&mut self) {
-        if matches!(self.request_state, ExecuteRequestState::Getting(..)) {
+        if !self.requests.is_empty() {
+            self.pending_blocks.push(block);
             return;
         }
-        while let Some(request) = self.requests.pop_front() {
+        self.prepare_block(block);
+    }
+
+    fn prepare_block(&mut self, block: Block) {
+        assert!(self.requests.is_empty());
+        for request in block.txns {
             let op = bincode::decode_from_slice(&request.command, bincode::config::standard())
                 .unwrap()
                 .0;
-            match op {
+            if let Op::Get(key) = &op {
+                let storage_key = storage_key(&key);
+                let fetch_id = self.context.fetch(storage_key);
+                self.fetching.insert(fetch_id, key.clone());
+            }
+            self.requests
+                .push_back((op, request.client_id, request.client_seq));
+        }
+
+        if self.fetching.is_empty() {
+            self.commit_block()
+        }
+    }
+
+    fn commit_block(&mut self) {
+        assert!(self.fetching.is_empty());
+        for (op, client_id, client_seq) in self.requests.drain(..) {
+            let op = match op {
                 Op::Put(key, value) => {
                     let storage_key = storage_key(&key);
-                    self.context.post(vec![(storage_key, Some(value))]);
-                    let reply = Reply {
-                        client_seq: request.client_seq,
-                        res: bincode::encode_to_vec(&Res::Put, bincode::config::standard())
-                            .unwrap(),
-                        node_index: self.index,
-                    };
-                    self.context.send(request.client_id, reply);
+                    self.updates.push((storage_key, Some(value.clone())));
+                    self.state.insert(key, Some(value));
+                    Res::Put
                 }
                 Op::Get(key) => {
-                    let storage_key = storage_key(&key);
-                    let id = self.context.fetch(storage_key);
-                    self.request_state =
-                        ExecuteRequestState::Getting(id, request.client_id, request.client_seq);
-                    break;
+                    let value = self.state[&key].clone();
+                    Res::Get(value)
                 }
-            }
+            };
+            let reply = Reply {
+                client_seq,
+                res: bincode::encode_to_vec(&op, bincode::config::standard()).unwrap(),
+                node_index: self.index,
+            };
+            self.context.send(client_id, reply);
+        }
+        self.context.post(take(&mut self.updates));
+
+        if let Some(block) = self.pending_blocks.pop() {
+            self.prepare_block(block);
+        }
+    }
+
+    pub fn on_fetch_response(&mut self, fetch_id: FetchId, value: Option<Vec<u8>>) {
+        let Some(key) = self.fetching.remove(&fetch_id) else {
+            unimplemented!()
+        };
+        self.state.insert(key, value);
+        if self.fetching.is_empty() {
+            self.commit_block()
         }
     }
 }

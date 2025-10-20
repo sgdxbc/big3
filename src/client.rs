@@ -15,6 +15,11 @@ use crate::{
     types::{ClientId, ClientSeq, NodeIndex, Reply, Request},
 };
 
+use self::zipfian::ScrambledZipfian;
+
+#[allow(unused)]
+mod zipfian;
+
 pub trait ClientContext {
     fn send(&mut self, to: NodeIndex, request: Request);
 }
@@ -118,6 +123,7 @@ pub struct ClientWorker<C> {
 
     start: Instant,
     invoke_count: u64,
+    zipfian: ScrambledZipfian,
     ongoing: HashMap<InvokeId, Instant>,
     pub records: Arc<Mutex<Records>>,
 }
@@ -129,11 +135,13 @@ pub struct Records {
 
 impl<C> ClientWorker<C> {
     pub fn new(context: C, config: ClientWorkerConfig) -> Self {
+        let zipfian = ScrambledZipfian::new_range(0, config.num_keys - 1);
         Self {
             context,
             config,
             start: Instant::now(), // placeholder
             invoke_count: 0,
+            zipfian,
             ongoing: Default::default(),
             records: Arc::new(Mutex::new(Records {
                 start: Instant::now(),
@@ -165,7 +173,8 @@ impl<C: ClientWorkerContext> ClientWorker<C> {
     }
 
     fn invoke(&mut self) {
-        let key = execute::key(rng().random_range(0..self.config.num_keys));
+        let key = execute::key(self.zipfian.next_u64(&mut rng()));
+        // let key = execute::key(0);
         let op = if rng().random_bool(self.config.read_ratio) {
             Op::Get(key)
         } else {

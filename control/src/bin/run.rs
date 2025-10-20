@@ -68,7 +68,7 @@ async fn run_workload(
             num_faulty_nodes: NUM_FAULTY_NODES,
         },
         worker_config: big_schema::ClientWorkerConfig {
-            rate: 150_000.,
+            rate: 40_000.,
             num_keys: NUM_KEYS,
             read_ratio: READ_RATIO,
         },
@@ -81,9 +81,9 @@ async fn run_workload(
     start_all(&client_instances, control_client.clone()).await?;
 
     let mut next_scrape = Instant::now() + Duration::from_secs(1);
-    for _ in 0..10 {
+    for i in 0..100 {
         sleep_until(next_scrape).await;
-        println!("scrape clients");
+        println!("scrape clients round {}", i + 1);
         scrape_all(&client_instances, control_client.clone()).await?;
         next_scrape += Duration::from_secs(1);
     }
@@ -121,6 +121,8 @@ async fn scrape_all(
         let url = format!("http://{}:3000/scrape", instance.public_dns);
         tasks.spawn(async move { client.post(url).send().await });
     }
+    let mut agg_throughput = 0.;
+    let mut agg_histogram = hdrhistogram::Histogram::<u64>::new(3).unwrap();
     while let Some(result) = tasks.join_next().await {
         let scrape = result??.error_for_status()?.json::<Scrape>().await?;
         let latency_histogram =
@@ -133,6 +135,15 @@ async fn scrape_all(
             "interval {:?}, throughput {throughput:.0} req/s, p50 {p50:?}, p95 {p95:?}, p99 {p99:?}",
             scrape.interval
         );
+
+        agg_throughput += throughput;
+        agg_histogram += latency_histogram;
     }
+    let agg_p50 = Duration::from_nanos(agg_histogram.value_at_quantile(0.5));
+    let agg_p95 = Duration::from_nanos(agg_histogram.value_at_quantile(0.95));
+    let agg_p99 = Duration::from_nanos(agg_histogram.value_at_quantile(0.99));
+    println!(
+        "AGGREGATE: throughput {agg_throughput:.0} req/s, p50 {agg_p50:?}, p95 {agg_p95:?}, p99 {agg_p99:?}",
+    );
     Ok(())
 }
