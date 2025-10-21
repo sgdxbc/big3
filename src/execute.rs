@@ -1,10 +1,11 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     mem::take,
+    time::{Duration, Instant},
 };
 
 use bincode::{Decode, Encode};
-use log::trace;
+use log::{info, trace};
 use sha2::{Digest as _, Sha256};
 
 use crate::{
@@ -54,6 +55,13 @@ pub struct Execute<C> {
     updates: Vec<([u8; 32], Option<Vec<u8>>)>,
 
     pending_blocks: VecDeque<Block>,
+
+    metrics: ExecuteMetrics,
+}
+
+struct ExecuteMetrics {
+    start: Instant,
+    work_time: Duration,
 }
 
 impl<C> Execute<C> {
@@ -67,12 +75,16 @@ impl<C> Execute<C> {
             state: Default::default(),
             updates: Default::default(),
             pending_blocks: Default::default(),
+            metrics: ExecuteMetrics {
+                start: Instant::now(),
+                work_time: Duration::ZERO,
+            },
         }
     }
 
     // tune this according to the ordering latency. ordering latency should not exceed the execution
     // latency of a block * NUM_MAX_PENDING
-    const NUM_MAX_PENDING: usize = 100;
+    const NUM_MAX_PENDING: usize = 10_000;
 }
 
 impl<C: ExecuteContext> Execute<C> {
@@ -107,7 +119,12 @@ impl<C: ExecuteContext> Execute<C> {
         self.prepare_block(block);
     }
 
+    pub fn log_metrics(&self) {
+        info!("execution work time: {:?}", self.metrics.work_time);
+    }
+
     fn prepare_block(&mut self, block: Block) {
+        self.metrics.start = Instant::now();
         assert!(self.requests.is_empty());
         let mut fetching_keys = HashSet::new();
         for request in block.txns {
@@ -152,6 +169,7 @@ impl<C: ExecuteContext> Execute<C> {
             self.context.send(client_id, reply);
         }
         self.context.post(take(&mut self.updates));
+        self.metrics.work_time += self.metrics.start.elapsed();
 
         if let Some(block) = self.pending_blocks.pop_front() {
             self.prepare_block(block);

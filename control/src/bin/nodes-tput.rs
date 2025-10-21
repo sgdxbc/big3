@@ -33,7 +33,7 @@ async fn main() -> anyhow::Result<()> {
         ",,,,,\"num of keys = {}, read ratio = {}\"",
         NUM_KEYS, READ_RATIO
     )?;
-    for num_faulty_nodes in [1, 2, 3] {
+    for num_faulty_nodes in [1, 3, 8, 13] {
         println!("running with num_faulty_nodes = {}", num_faulty_nodes);
         let run = run(&cluster, num_faulty_nodes).await?;
         anyhow::ensure!(
@@ -142,10 +142,10 @@ async fn run_workload(
     println!("start clients");
     start_all(client_instances, control_client.clone()).await?;
 
-    sleep(Duration::from_secs(10)).await;
+    sleep(Duration::from_secs(50)).await;
     println!("scrape and discard warmup data");
     scrape_all(client_instances, control_client.clone()).await?;
-    sleep(Duration::from_secs(10)).await;
+    sleep(Duration::from_secs(30)).await;
     println!("scrape measured data");
     let run = scrape_all(client_instances, control_client.clone()).await?;
 

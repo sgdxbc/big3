@@ -67,6 +67,8 @@ async fn build(instance: &Instance) -> anyhow::Result<()> {
             "--exclude",
             ".git",
             "--exclude",
+            ".venv",
+            "--exclude",
             "target",
             "--exclude",
             "control/terraform",
