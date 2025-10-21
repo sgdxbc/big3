@@ -81,6 +81,7 @@ pub async fn run_endpoints(
             anyhow::bail!("instance {dns} failed");
         }
     }
+    println!("endpoints joined");
 
     let mut tasks = JoinSet::new();
     for instance in instances {
@@ -100,6 +101,7 @@ pub async fn run_endpoints(
     while let Some(result) = tasks.join_next().await {
         result??;
     }
+    println!("logs collected");
     Ok(())
 }
 

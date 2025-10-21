@@ -17,7 +17,13 @@ use tokio::{
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cluster = Cluster::from_terraform().await?;
-    let endpoints = run_endpoints([cluster.servers.clone(), cluster.clients.clone()].concat());
+    let endpoints = run_endpoints(
+        [
+            cluster.servers[..num_nodes() as usize].to_vec(),
+            cluster.clients.clone(),
+        ]
+        .concat(),
+    );
     let endpoints = async {
         let result = endpoints.await;
         sleep(Duration::from_millis(300)).await;
@@ -88,7 +94,7 @@ async fn run_workload(
     start_all(&client_instances, control_client.clone()).await?;
 
     let mut next_scrape = Instant::now() + Duration::from_secs(1);
-    for i in 0..60 {
+    for i in 0..10 {
         sleep_until(next_scrape).await;
         println!("scrape clients round {}", i + 1);
         scrape_all(&client_instances, control_client.clone()).await?;
@@ -99,6 +105,7 @@ async fn run_workload(
     stop_all(&client_instances, control_client.clone()).await?;
     println!("stop servers");
     stop_all(&server_instances, control_client.clone()).await?;
+    println!("done");
     Ok(())
 }
 
