@@ -18,6 +18,11 @@ use tokio::{
 async fn main() -> anyhow::Result<()> {
     let cluster = Cluster::from_terraform().await?;
     let endpoints = run_endpoints([cluster.servers.clone(), cluster.clients.clone()].concat());
+    let endpoints = async {
+        let result = endpoints.await;
+        sleep(Duration::from_millis(300)).await;
+        result
+    };
     let workload = run_workload(cluster.servers, cluster.clients);
     try_join!(endpoints, workload)?;
     Ok(())
@@ -57,9 +62,8 @@ async fn run_workload(
             };
             (instance, Task::Replica(schema))
         });
-    let result = load_all(replica_items, control_client.clone()).await;
-    sleep(Duration::from_secs(1)).await;
-    result?;
+    load_all(replica_items, control_client.clone()).await?;
+
     println!("start servers");
     start_all(&server_instances, control_client.clone()).await?;
 
@@ -71,7 +75,7 @@ async fn run_workload(
             num_faulty_nodes: NUM_FAULTY_NODES,
         },
         worker_config: big_schema::ClientWorkerConfig {
-            rate: 4_000.,
+            rate: 10_000.,
             num_keys: NUM_KEYS,
             read_ratio: READ_RATIO,
         },
@@ -84,7 +88,7 @@ async fn run_workload(
     start_all(&client_instances, control_client.clone()).await?;
 
     let mut next_scrape = Instant::now() + Duration::from_secs(1);
-    for i in 0..100 {
+    for i in 0..60 {
         sleep_until(next_scrape).await;
         println!("scrape clients round {}", i + 1);
         scrape_all(&client_instances, control_client.clone()).await?;
@@ -135,7 +139,7 @@ async fn scrape_all(
         let p95 = Duration::from_nanos(latency_histogram.value_at_quantile(0.95));
         let p99 = Duration::from_nanos(latency_histogram.value_at_quantile(0.99));
         println!(
-            "interval {:?}, throughput {throughput:.0} req/s, p50 {p50:?}, p95 {p95:?}, p99 {p99:?}",
+            "interval {:12?}, throughput {throughput:.0} req/s, p50 {p50:?}, p95 {p95:?}, p99 {p99:?}",
             scrape.interval
         );
 

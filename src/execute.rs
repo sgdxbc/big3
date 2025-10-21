@@ -72,12 +72,18 @@ impl<C> Execute<C> {
 
     // tune this according to the ordering latency. ordering latency should not exceed the execution
     // latency of a block * NUM_MAX_PENDING
-    const NUM_MAX_PENDING: usize = 50;
+    const NUM_MAX_PENDING: usize = 100;
 }
 
 impl<C: ExecuteContext> Execute<C> {
     pub fn on_request(&mut self, request: Request) {
-        if self.pending_blocks.len() < Self::NUM_MAX_PENDING {
+        if self
+            .pending_blocks
+            .iter()
+            .map(|block| block.txns.len())
+            .sum::<usize>()
+            < Self::NUM_MAX_PENDING
+        {
             self.context.submit(request);
         } // otherwise discard the request that is over processing capacity
     }
