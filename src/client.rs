@@ -58,7 +58,7 @@ impl<C> Client<C> {
         }
     }
 
-    const NUM_MAX_ONGOING: usize = 100_000;
+    const SEQ_WINDOW: u64 = 100_000;
 }
 
 impl<C: ClientContext> Client<C> {
@@ -80,8 +80,8 @@ impl<C: ClientContext> Client<C> {
                 tx_response,
             },
         );
-        while self.ongoing.len() > Self::NUM_MAX_ONGOING {
-            self.ongoing.pop_first();
+        if self.seq >= Self::SEQ_WINDOW {
+            self.ongoing = self.ongoing.split_off(&(self.seq - Self::SEQ_WINDOW));
         }
     }
 

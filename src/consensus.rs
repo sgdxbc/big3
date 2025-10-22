@@ -48,7 +48,7 @@ impl From<&crate::schema::ReplicaConfig> for BullsharkConfig {
 }
 
 impl BullsharkConfig {
-    fn is_bullshark_leader(&self, node_index: NodeIndex, round: Round) -> bool {
+    fn is_leader(&self, node_index: NodeIndex, round: Round) -> bool {
         round % 2 == 0 && node_index == (round / 2 % self.num_node as Round) as NodeIndex
     }
 }
@@ -90,8 +90,10 @@ impl Block {
 pub trait BullsharkContext {
     fn send(&mut self, node_index: NodeIndex, message: message::Message);
     fn send_to_all(&mut self, message: message::Message);
-    fn output(&mut self, block: Block);
+    fn output(&mut self, block: Block) -> OutputId;
 }
+
+pub type OutputId = u64;
 
 pub struct Bullshark<C> {
     context: C,
@@ -161,7 +163,7 @@ impl<C> Bullshark<C> {
 }
 
 impl<C: BullsharkContext> Bullshark<C> {
-    pub fn init(&mut self) {
+    pub fn start(&mut self) {
         self.propose();
     }
 
@@ -389,10 +391,7 @@ impl<C: BullsharkContext> Bullshark<C> {
         let round_delivered = self.delivered.entry(block.round).or_default();
         round_delivered.insert(block_hash);
 
-        if !self
-            .config
-            .is_bullshark_leader(block.node_index, block.round)
-        {
+        if !self.config.is_leader(block.node_index, block.round) {
             self.reorder_delivered.insert(block_hash, block);
             return;
         }

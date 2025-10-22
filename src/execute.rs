@@ -1,16 +1,16 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
-    mem::take,
     time::{Duration, Instant},
 };
 
 use bincode::{Decode, Encode};
 use log::{info, trace};
 use sha2::{Digest as _, Sha256};
+use tokio::sync::oneshot;
 
 use crate::{
     consensus::Block,
-    types::{ClientId, ClientSeq, NodeIndex, Reply, Request},
+    types::{ClientId, ClientSeq, NodeIndex, Reply},
 };
 
 #[derive(Encode, Decode)]
@@ -39,24 +39,25 @@ pub trait ExecuteContext {
     // network
     fn send(&mut self, id: ClientId, reply: Reply);
     // storage
-    fn fetch(&mut self, key: [u8; 32]) -> FetchId;
+    fn fetch(&mut self, keys: Vec<[u8; 32]>) -> FetchId;
     fn post(&mut self, updates: Vec<([u8; 32], Option<Vec<u8>>)>);
-    // consensus
-    fn submit(&mut self, request: Request);
 }
 
 pub struct Execute<C> {
     pub context: C,
     index: NodeIndex,
 
-    requests: Vec<(Op, ClientId, ClientSeq)>,
-    fetching: HashMap<FetchId, String>,
-    state: HashMap<String, Option<Vec<u8>>>,
-    updates: Vec<([u8; 32], Option<Vec<u8>>)>,
-
-    pending_blocks: VecDeque<Block>,
+    working: Option<WorkingState>,
+    pending_blocks: VecDeque<(Block, oneshot::Sender<()>)>,
 
     metrics: ExecuteMetrics,
+}
+
+struct WorkingState {
+    requests: Vec<(Op, ClientId, ClientSeq)>,
+    fetch_id: FetchId,
+    fetching: Vec<String>,
+    tx_response: oneshot::Sender<()>,
 }
 
 struct ExecuteMetrics {
@@ -70,10 +71,7 @@ impl<C> Execute<C> {
             context,
             index,
 
-            requests: Default::default(),
-            fetching: Default::default(),
-            state: Default::default(),
-            updates: Default::default(),
+            working: None,
             pending_blocks: Default::default(),
             metrics: ExecuteMetrics {
                 start: Instant::now(),
@@ -81,26 +79,10 @@ impl<C> Execute<C> {
             },
         }
     }
-
-    // tune this according to the ordering latency. ordering latency should not exceed the execution
-    // latency of a block * NUM_MAX_PENDING
-    const NUM_MAX_PENDING: usize = 10_000;
 }
 
 impl<C: ExecuteContext> Execute<C> {
-    pub fn on_request(&mut self, request: Request) {
-        if self
-            .pending_blocks
-            .iter()
-            .map(|block| block.txns.len())
-            .sum::<usize>()
-            < Self::NUM_MAX_PENDING
-        {
-            self.context.submit(request);
-        } // otherwise discard the request that is over processing capacity
-    }
-
-    pub fn on_block(&mut self, block: Block) {
+    pub fn on_block(&mut self, block: Block, tx_response: oneshot::Sender<()>) {
         trace!(
             "node {} executing block ({}, {}) size {}",
             self.index,
@@ -112,52 +94,79 @@ impl<C: ExecuteContext> Execute<C> {
             return;
         }
 
-        if !self.requests.is_empty() {
-            self.pending_blocks.push_back(block);
+        if self.working.is_some() {
+            self.pending_blocks.push_back((block, tx_response));
             return;
         }
-        self.prepare_block(block);
+        self.prepare_block(block, tx_response);
     }
 
     pub fn log_metrics(&self) {
         info!("execution work time: {:?}", self.metrics.work_time);
     }
 
-    fn prepare_block(&mut self, block: Block) {
+    fn prepare_block(&mut self, block: Block, tx_response: oneshot::Sender<()>) {
         self.metrics.start = Instant::now();
-        assert!(self.requests.is_empty());
+        assert!(self.working.is_none());
+
+        let mut working = WorkingState {
+            requests: Default::default(),
+            fetch_id: 0,
+            fetching: Default::default(),
+            tx_response,
+        };
         let mut fetching_keys = HashSet::new();
         for request in block.txns {
             let op = bincode::decode_from_slice(&request.command, bincode::config::standard())
                 .unwrap()
                 .0;
-            if let Op::Get(key) = &op
-                && fetching_keys.insert(key.clone())
-            {
-                let fetch_id = self.context.fetch(storage_key(key));
-                self.fetching.insert(fetch_id, key.clone());
+            if let Op::Get(key) = &op {
+                fetching_keys.insert(key.clone());
             }
-            self.requests
+            working
+                .requests
                 .push((op, request.client_id, request.client_seq));
         }
 
-        if self.fetching.is_empty() {
-            self.commit_block()
+        // if fetching_keys.is_empty() {
+        //     self.commit_block(working, Default::default());
+        //     return;
+        // }
+        let mut keys = Vec::new();
+        for key in fetching_keys {
+            keys.push(storage_key(&key));
+            working.fetching.push(key);
         }
+        working.fetch_id = self.context.fetch(keys);
+        let replaced = self.working.replace(working);
+        assert!(replaced.is_none());
     }
 
-    fn commit_block(&mut self) {
-        assert!(self.fetching.is_empty());
-        for (op, client_id, client_seq) in self.requests.drain(..) {
+    pub fn on_fetch_response(&mut self, fetch_id: FetchId, values: Vec<Option<Vec<u8>>>) {
+        let Some(working) = self.working.take() else {
+            return;
+        };
+        assert_eq!(working.fetch_id, fetch_id);
+        self.commit_block(working, values);
+    }
+
+    fn commit_block(&mut self, working: WorkingState, values: Vec<Option<Vec<u8>>>) {
+        let mut state: HashMap<String, Option<Vec<u8>>> = working
+            .fetching
+            .into_iter()
+            .zip(values)
+            .collect::<HashMap<_, _>>();
+        let mut updates = Vec::new();
+        for (op, client_id, client_seq) in working.requests {
             let op = match op {
                 Op::Put(key, value) => {
                     let storage_key = storage_key(&key);
-                    self.updates.push((storage_key, Some(value.clone())));
-                    self.state.insert(key, Some(value));
+                    updates.push((storage_key, Some(value.clone())));
+                    state.insert(key, Some(value));
                     Res::Put
                 }
                 Op::Get(key) => {
-                    let value = self.state[&key].clone();
+                    let value = state[&key].clone();
                     Res::Get(value)
                 }
             };
@@ -168,21 +177,12 @@ impl<C: ExecuteContext> Execute<C> {
             };
             self.context.send(client_id, reply);
         }
-        self.context.post(take(&mut self.updates));
+        self.context.post(updates);
+        let _ = working.tx_response.send(());
         self.metrics.work_time += self.metrics.start.elapsed();
 
-        if let Some(block) = self.pending_blocks.pop_front() {
-            self.prepare_block(block);
-        }
-    }
-
-    pub fn on_fetch_response(&mut self, fetch_id: FetchId, value: Option<Vec<u8>>) {
-        let Some(key) = self.fetching.remove(&fetch_id) else {
-            unimplemented!()
-        };
-        self.state.insert(key, value);
-        if self.fetching.is_empty() {
-            self.commit_block()
+        if let Some((block, tx_response)) = self.pending_blocks.pop_front() {
+            self.prepare_block(block, tx_response);
         }
     }
 }

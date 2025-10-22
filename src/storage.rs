@@ -8,7 +8,7 @@ pub struct Storage {
 }
 
 pub enum StorageOp {
-    Fetch([u8; 32], oneshot::Sender<Option<Vec<u8>>>),
+    Fetch(Vec<[u8; 32]>, oneshot::Sender<Vec<Option<Vec<u8>>>>),
     Post(Vec<([u8; 32], Option<Vec<u8>>)>),
 }
 
@@ -20,8 +20,12 @@ impl Storage {
 
     pub fn invoke(&mut self, op: StorageOp) -> anyhow::Result<()> {
         match op {
-            StorageOp::Fetch(key, tx_response) => {
-                let res = self.db.get(key)?;
+            StorageOp::Fetch(keys, tx_response) => {
+                let res = self
+                    .db
+                    .multi_get(keys)
+                    .into_iter()
+                    .collect::<Result<_, _>>()?;
                 let _ = tx_response.send(res);
             }
             StorageOp::Post(kvs) => {
