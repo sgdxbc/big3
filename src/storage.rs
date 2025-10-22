@@ -1,5 +1,3 @@
-use std::path::Path;
-
 use rocksdb::{DB, WriteBatch};
 use tokio::sync::oneshot;
 
@@ -13,8 +11,7 @@ pub enum StorageOp {
 }
 
 impl Storage {
-    pub fn new(path: &Path) -> anyhow::Result<Self> {
-        let db = DB::open_default(path)?;
+    pub fn new(db: DB) -> anyhow::Result<Self> {
         Ok(Self { db })
     }
 

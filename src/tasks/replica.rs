@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 
 use bytes::Bytes;
+use log::error;
 use quinn::{Connection, Endpoint};
+use rocksdb::DB;
 use tempfile::{TempDir, tempdir};
 use tokio::{
     process::Command,
@@ -10,6 +12,7 @@ use tokio::{
         mpsc::{Receiver, Sender, UnboundedReceiver, UnboundedSender, channel, unbounded_channel},
         oneshot,
     },
+    task::JoinSet,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -93,6 +96,17 @@ pub struct ConsensusTask {
 impl ConsensusTask {
     fn new(channels: ConsensusChannels, state: Bullshark<ConsensusTaskContext>) -> Self {
         Self { channels, state }
+    }
+
+    async fn load(
+        channels: ConsensusChannels,
+        execute: ExecuteHandle,
+        network_connect: NetworkConnectHandle,
+        schema: &schema::ReplicaTask,
+    ) -> anyhow::Result<Self> {
+        let context = ConsensusTaskContext::new(channels.handle(), execute, network_connect);
+        let state = Bullshark::new(context, (&schema.config).into(), schema.node_index);
+        Ok(Self::new(channels, state))
     }
 
     pub async fn run(mut self, stop: CancellationToken) -> anyhow::Result<()> {
@@ -229,6 +243,17 @@ impl ExecuteTask {
         Self { channels, state }
     }
 
+    async fn load(
+        channels: ExecuteChannels,
+        storage: StorageHandle,
+        network_outgoing: NetworkOutgoingHandle,
+        schema: &schema::ReplicaTask,
+    ) -> anyhow::Result<Self> {
+        let context = ExecuteTaskContext::new(channels.handle(), storage, network_outgoing);
+        let state = Execute::new(context, schema.node_index);
+        Ok(Self::new(channels, state))
+    }
+
     pub async fn run(mut self, stop: CancellationToken) -> anyhow::Result<()> {
         tokio::spawn(async move {
             stop.run_until_cancelled(self.run_inner()).await;
@@ -341,11 +366,30 @@ impl StorageHandle {
 pub struct StorageTask {
     channels: StorageChannels,
     state: Storage,
+    _temp_dir: TempDir,
 }
 
 impl StorageTask {
-    fn new(channels: StorageChannels, state: Storage) -> Self {
-        Self { channels, state }
+    fn new(channels: StorageChannels, state: Storage, temp_dir: TempDir) -> Self {
+        Self {
+            channels,
+            state,
+            _temp_dir: temp_dir,
+        }
+    }
+
+    async fn load(channels: StorageChannels) -> anyhow::Result<Self> {
+        let temp_dir = tempdir()?;
+        let status = Command::new("cp")
+            .arg("-rT")
+            .arg(PREFILL_PATH)
+            .arg(temp_dir.path())
+            .status()
+            .await?;
+        anyhow::ensure!(status.success(), "failed to copy prefill data");
+        let db = DB::open_default(temp_dir.path())?;
+        let state = Storage::new(db)?;
+        Ok(Self::new(channels, state, temp_dir))
     }
 
     pub async fn run(mut self, stop: CancellationToken) -> anyhow::Result<()> {
@@ -378,6 +422,14 @@ impl NetworkAcceptTask {
             consensus,
             network_outgoing,
         }
+    }
+
+    async fn load(
+        consensus: ConsensusHandle,
+        network_outgoing: NetworkOutgoingHandle,
+    ) -> anyhow::Result<Self> {
+        let endpoint = Endpoint::server(server_config(), ([0, 0, 0, 0], 5000).into())?;
+        Ok(Self::new(endpoint, consensus, network_outgoing))
     }
 
     pub async fn run(mut self, stop: CancellationToken) -> anyhow::Result<()> {
@@ -493,6 +545,10 @@ impl NetworkOutgoingTask {
         }
     }
 
+    async fn load(channels: NetworkOutgoingChannels) -> anyhow::Result<Self> {
+        Ok(Self::new(channels))
+    }
+
     pub async fn run(mut self, stop: CancellationToken) -> anyhow::Result<()> {
         tokio::spawn(async move { stop.run_until_cancelled(self.run_inner()).await })
             .await?
@@ -525,6 +581,7 @@ impl NetworkOutgoingTask {
 
 pub struct NetworkConnectTask {
     txs_outgoing_message: HashMap<NodeIndex, UnboundedSender<Bytes>>,
+    join_set: JoinSet<anyhow::Result<()>>,
 }
 
 pub struct NetworkConnectHandle {
@@ -548,8 +605,8 @@ impl NetworkConnectHandle {
 
 impl NetworkConnectTask {
     async fn load(
-        schema: &schema::ReplicaTask,
         consensus: ConsensusHandle,
+        schema: &schema::ReplicaTask,
     ) -> anyhow::Result<Self> {
         let mut endpoint = Endpoint::server(
             server_config(),
@@ -567,13 +624,7 @@ impl NetworkConnectTask {
                     .await?
                     .write_all(&schema.node_index.to_le_bytes())
                     .await?;
-                let (tx_outgoing, rx_outgoing) = unbounded_channel();
-                tokio::spawn(Self::run_connection_incoming(
-                    conn.clone(),
-                    consensus.clone(),
-                ));
-                tokio::spawn(Self::run_connection_outgoing(conn.clone(), rx_outgoing));
-                txs.insert(i as NodeIndex, tx_outgoing);
+                txs.insert(i as NodeIndex, conn);
             }
             anyhow::Ok(txs)
         };
@@ -584,22 +635,26 @@ impl NetworkConnectTask {
                 let mut client_id = [0; size_of::<NodeIndex>()];
                 conn.accept_uni().await?.read_exact(&mut client_id).await?;
                 let client_index = NodeIndex::from_le_bytes(client_id);
-                let (tx_outgoing, rx_outgoing) = unbounded_channel();
-                tokio::spawn(Self::run_connection_incoming(
-                    conn.clone(),
-                    consensus.clone(),
-                ));
-                tokio::spawn(Self::run_connection_outgoing(conn.clone(), rx_outgoing));
-                txs.insert(client_index, tx_outgoing);
+                txs.insert(client_index, conn);
             }
             anyhow::Ok(txs)
         };
         let (txs_lower, txs_higher) = tokio::try_join!(connect, accept)?;
 
-        let mut txs_outgoing_message = txs_lower;
-        txs_outgoing_message.extend(txs_higher);
+        let mut txs_outgoing_message = HashMap::new();
+        let mut join_set = JoinSet::new();
+        for (node_index, conn) in txs_lower.into_iter().chain(txs_higher) {
+            join_set.spawn(Self::run_connection_incoming(
+                conn.clone(),
+                consensus.clone(),
+            ));
+            let (tx_outgoing, rx_outgoing) = unbounded_channel();
+            join_set.spawn(Self::run_connection_outgoing(conn, rx_outgoing));
+            txs_outgoing_message.insert(node_index, tx_outgoing);
+        }
         Ok(Self {
             txs_outgoing_message,
+            join_set,
         })
     }
 
@@ -639,6 +694,11 @@ impl NetworkConnectTask {
     }
 
     async fn run_inner(&mut self) -> anyhow::Result<()> {
+        while let Some(res) = self.join_set.join_next().await {
+            if let Err(err) = res.unwrap() {
+                error!("network connect task error: {}", err);
+            }
+        }
         Ok(())
     }
 }
@@ -650,7 +710,6 @@ pub struct ReplicaNodeTask {
     consensus: ConsensusTask,
     execute: ExecuteTask,
     storage: StorageTask,
-    _temp_dir: TempDir,
 }
 
 impl ReplicaNodeTask {
@@ -660,45 +719,29 @@ impl ReplicaNodeTask {
         let execute_channels = ExecuteChannels::new();
         let storage_channels = StorageChannels::new();
 
-        let network_accept = NetworkAcceptTask::new(
-            Endpoint::server(server_config(), ([0, 0, 0, 0], 5000).into())?,
+        let network_accept = NetworkAcceptTask::load(
             consensus_channels.handle(),
             network_outgoing_channels.handle(),
-        );
-        let network_outgoing = NetworkOutgoingTask::new(network_outgoing_channels);
+        )
+        .await?;
+        let network_outgoing = NetworkOutgoingTask::load(network_outgoing_channels).await?;
         let network_connect =
-            NetworkConnectTask::load(&schema, consensus_channels.handle()).await?;
-        let consensus_context = ConsensusTaskContext::new(
-            consensus_channels.handle(),
+            NetworkConnectTask::load(consensus_channels.handle(), &schema).await?;
+        let consensus = ConsensusTask::load(
+            consensus_channels,
             execute_channels.handle(),
             network_connect.handle(),
-        );
-        let consensus = ConsensusTask::new(
-            consensus_channels,
-            Bullshark::new(
-                consensus_context,
-                (&schema.config).into(),
-                schema.node_index,
-            ),
-        );
-        let execute_context = ExecuteTaskContext::new(
-            execute_channels.handle(),
+            &schema,
+        )
+        .await?;
+        let execute = ExecuteTask::load(
+            execute_channels,
             storage_channels.handle(),
             network_outgoing.channels.handle(),
-        );
-        let execute = ExecuteTask::new(
-            execute_channels,
-            Execute::new(execute_context, schema.node_index),
-        );
-        let temp_dir = tempdir()?;
-        let status = Command::new("cp")
-            .arg("-rT")
-            .arg(PREFILL_PATH)
-            .arg(temp_dir.path())
-            .status()
-            .await?;
-        anyhow::ensure!(status.success(), "failed to copy prefill data");
-        let storage = StorageTask::new(storage_channels, Storage::new(temp_dir.path())?);
+            &schema,
+        )
+        .await?;
+        let storage = StorageTask::load(storage_channels).await?;
         Ok(Self {
             network_outgoing,
             network_accept,
@@ -706,7 +749,6 @@ impl ReplicaNodeTask {
             execute,
             storage,
             consensus,
-            _temp_dir: temp_dir,
         })
     }
 
