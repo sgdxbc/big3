@@ -1,3 +1,6 @@
+use std::time::Instant;
+
+use log::trace;
 use rocksdb::{DB, ReadOptions, WriteBatch};
 use tokio::sync::oneshot;
 
@@ -18,13 +21,27 @@ impl Storage {
     pub fn invoke(&mut self, op: StorageOp) -> anyhow::Result<()> {
         match op {
             StorageOp::Fetch(keys, tx_response) => {
+                // keys.sort_unstable();
                 let mut read_options = ReadOptions::default();
                 read_options.set_async_io(true);
+                let start = Instant::now();
                 let res = self
                     .db
-                    .multi_get_opt(keys, &read_options)
+                    .multi_get_opt(&keys, &read_options)
+                    // .batched_multi_get_cf_opt(
+                    //     self.db.cf_handle("default").unwrap(),
+                    //     &keys,
+                    //     true,
+                    //     &read_options,
+                    // )
                     .into_iter()
+                    // .map(|r| r.map(|v| v.map(|vv| vv.to_vec())))
                     .collect::<Result<_, _>>()?;
+                let latency = start.elapsed();
+                trace!(
+                    "latency {latency:?} throughput {}",
+                    keys.len() as f64 / latency.as_secs_f64()
+                );
                 let _ = tx_response.send(res);
             }
             StorageOp::Post(kvs) => {

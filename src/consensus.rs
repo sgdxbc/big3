@@ -168,8 +168,8 @@ impl<C> Bullshark<C> {
         }
     }
 
-    const NUM_MAX_INFLIGHT_OUTPUTS: usize = 4;
-    const MAX_BLOCK_SIZE: usize = 1000;
+    const NUM_MAX_INFLIGHT_OUTPUTS: usize = 1;
+    const MAX_BLOCK_SIZE: usize = 4000;
 }
 
 impl<C: BullsharkContext> Bullshark<C> {
@@ -211,7 +211,16 @@ impl<C: BullsharkContext> Bullshark<C> {
         let delivered_block_per_round =
             self.metrics.delivered_block_count as f64 / (self.round as f64 + 1.0);
         info!(
-            "proposed blocks {}, certified own blocks {}, certified blocks {}, delivered blocks {}, avg block size {:.2}, certification rate {:.2}, delivery rate {:.2}, blocks/round {:.2}",
+            "[{}] Metrics:\n\
+             \tProposed blocks: {}\n\
+             \tCertified own blocks: {}\n\
+             \tCertified blocks: {}\n\
+             \tDelivered blocks: {}\n\
+             \tAvg block size: {:.2}\n\
+             \tCertification rate: {:.2}\n\
+             \tDelivery rate: {:.2}\n\
+             \tBlocks/round: {:.2}",
+            self.node_index,
             self.metrics.proposed_block_count,
             self.metrics.certified_own_block_count,
             self.metrics.certified_block_count,
@@ -261,7 +270,7 @@ impl<C: BullsharkContext> Bullshark<C> {
             && self.certs.get(&(self.round - 1)).is_some_and(|certs| {
                 certs.len() >= (self.config.num_node - self.config.num_faulty_node) as usize
             })
-            && self.executing.len() < Self::NUM_MAX_INFLIGHT_OUTPUTS
+            && self.executing.len() <= Self::NUM_MAX_INFLIGHT_OUTPUTS
         {
             self.propose();
         }

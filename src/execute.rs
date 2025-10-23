@@ -138,6 +138,7 @@ impl<C: ExecuteContext> Execute<C> {
             keys.push(storage_key(&key));
             working.fetching.push(key);
         }
+        // keys.sort_unstable();
         working.fetch_id = self.context.fetch(keys);
         let replaced = self.working.replace(working);
         assert!(replaced.is_none());

@@ -388,6 +388,17 @@ impl StorageTask {
             .await?;
         anyhow::ensure!(status.success(), "failed to copy prefill data");
         let db = DB::open_default(temp_dir.path())?;
+        // use rocksdb::Options;
+        // let mut db_opts = Options::default();
+        // db_opts.create_if_missing(true);
+        // // Explicitly include the "default" CF so we get a handle for it
+        // let default_cf_opts = Options::default();
+        // let cfs = vec![rocksdb::ColumnFamilyDescriptor::new(
+        //     "default",
+        //     default_cf_opts,
+        // )];
+        // let db = DB::open_cf_descriptors(&db_opts, temp_dir.path(), cfs)?;
+
         let state = Storage::new(db)?;
         Ok(Self::new(channels, state, temp_dir))
     }
