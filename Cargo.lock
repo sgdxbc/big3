@@ -191,6 +191,7 @@ dependencies = [
  "quinn",
  "rand",
  "rocksdb",
+ "rustix",
  "sha2",
  "tempfile",
  "tikv-jemallocator",

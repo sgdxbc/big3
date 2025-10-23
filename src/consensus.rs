@@ -101,7 +101,9 @@ pub struct Bullshark<C> {
     node_index: NodeIndex,
 
     round: Round,
-    block_hash: Option<BlockHash>, // None if proposal for current round has certified
+    // Some(bh): proposed & wait for certified, None: certified & wait for other certified for next
+    // proposal
+    block_hash: Option<BlockHash>,
     txn_pool: Vec<Request>,
     block_oks: HashMap<NodeIndex, message::BlockOk>,
     certs: HashMap<Round, HashMap<NodeIndex, message::Cert>>,
@@ -113,6 +115,7 @@ pub struct Bullshark<C> {
     reorder_certified: HashSet<BlockHash>,
 
     reorder_delivered: HashMap<BlockHash, Block>,
+    executing: HashSet<OutputId>,
 
     metrics: BullsharkMetrics,
 }
@@ -129,17 +132,20 @@ struct BullsharkMetrics {
 impl<C> Bullshark<C> {
     pub fn new(context: C, config: BullsharkConfig, node_index: NodeIndex) -> Self {
         let (
-            round,
-            block_hash,
-            txn_pool,
-            block_oks,
-            certs,
-            reorder_validate,
-            certifying_blocks,
-            delivered,
-            reorder_blocks,
-            reorder_certified,
-            reorder_delivered,
+            (
+                round,
+                block_hash,
+                txn_pool,
+                block_oks,
+                certs,
+                reorder_validate,
+                certifying_blocks,
+                delivered,
+                reorder_blocks,
+                reorder_certified,
+                reorder_delivered,
+                executing,
+            ),
             metrics,
         ) = Default::default();
         Self {
@@ -157,9 +163,13 @@ impl<C> Bullshark<C> {
             reorder_blocks,
             reorder_certified,
             reorder_delivered,
+            executing,
             metrics,
         }
     }
+
+    const NUM_MAX_INFLIGHT_OUTPUTS: usize = 10;
+    const MAX_BLOCK_SIZE: usize = 1000;
 }
 
 impl<C: BullsharkContext> Bullshark<C> {
@@ -214,7 +224,7 @@ impl<C: BullsharkContext> Bullshark<C> {
     fn handle_cert(&mut self, cert: message::Cert) {
         self.certified(cert.block_hash);
         let cert_round = cert.round;
-        if cert_round < self.round {
+        if cert_round + 1 < self.round {
             return;
         }
         let round_certs = self.certs.entry(cert_round).or_default();
@@ -222,23 +232,34 @@ impl<C: BullsharkContext> Bullshark<C> {
         if round_certs.len() >= (self.config.num_node - self.config.num_faulty_node) as usize
         // TODO may need to restrict DAG shape
         {
-            if cert_round > self.round {
+            if self.round < cert_round {
                 warn!(
                     "fast-forwarding from round {} to {}",
                     self.round,
                     cert_round + 1
                 );
             }
-            self.round = cert_round + 1;
-            trace!("[{}] advanced to round {}", self.node_index, self.round);
-            self.certs.retain(|&r, _| r >= cert_round);
-            self.propose();
-            self.reorder_validate.retain(|&r, _| r >= self.round);
-            if let Some(pending) = self.reorder_validate.remove(&self.round) {
-                for (node_index, block_hash) in pending {
-                    self.validate2(node_index, block_hash)
+            if self.round <= cert_round {
+                self.round = cert_round + 1;
+                trace!("[{}] advanced to round {}", self.node_index, self.round);
+                self.certs.retain(|&r, _| r >= cert_round);
+                self.reorder_validate.retain(|&r, _| r >= self.round);
+                if let Some(pending) = self.reorder_validate.remove(&self.round) {
+                    for (node_index, block_hash) in pending {
+                        self.validate2(node_index, block_hash)
+                    }
                 }
             }
+            self.may_propose();
+        }
+    }
+
+    fn may_propose(&mut self) {
+        if self.certs.get(&(self.round - 1)).is_some_and(|certs| {
+            certs.len() >= (self.config.num_node - self.config.num_faulty_node) as usize
+        }) && self.executing.len() < Self::NUM_MAX_INFLIGHT_OUTPUTS
+        {
+            self.propose();
         }
     }
 
@@ -260,14 +281,14 @@ impl<C: BullsharkContext> Bullshark<C> {
             self.certs.remove(&(self.round - 1)).unwrap()
         };
         assert!(certs.iter().all(|(_, cert)| cert.round == self.round - 1));
-        // TODO limit number of txns
-        let txns = self.txn_pool.clone();
-        self.txn_pool.clear();
         let network_block = message::Block {
             round: self.round,
             creator_index: self.node_index,
             certs: certs.into_values().collect(),
-            txns,
+            txns: {
+                let skip_len = self.txn_pool.len().saturating_sub(Self::MAX_BLOCK_SIZE);
+                self.txn_pool.drain(..).skip(skip_len).collect()
+            },
         };
         let block = Block::from_network(&network_block);
         self.context
@@ -416,7 +437,14 @@ impl<C: BullsharkContext> Bullshark<C> {
                 self.output_recursive(parent)
             }
         }
-        self.context.output(block);
+        let output_id = self.context.output(block);
+        self.executing.insert(output_id);
+    }
+
+    pub fn on_output_response(&mut self, output_id: OutputId) {
+        let removed = self.executing.remove(&output_id);
+        assert!(removed);
+        self.may_propose();
     }
 }
 

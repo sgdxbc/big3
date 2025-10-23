@@ -23,12 +23,12 @@ async fn main() -> anyhow::Result<()> {
 async fn run(cluster: &Cluster) -> anyhow::Result<()> {
     let endpoints =
         run_endpoints([&cluster.servers[..num_nodes() as usize], &cluster.clients].concat());
-    let endpoints = async {
-        let result = endpoints.await;
+    let workload = run_workload(&cluster.servers[..num_nodes() as usize], &cluster.clients);
+    let workload = async {
+        let result = workload.await;
         sleep(Duration::from_millis(1000)).await;
         result
     };
-    let workload = run_workload(&cluster.servers[..num_nodes() as usize], &cluster.clients);
     try_join!(endpoints, workload)?;
     Ok(())
 }

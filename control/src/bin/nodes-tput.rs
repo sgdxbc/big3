@@ -74,16 +74,16 @@ async fn run(cluster: &Cluster, num_faulty_nodes: u16) -> anyhow::Result<Run> {
         ]
         .concat(),
     );
-    let endpoints = async {
-        let result = endpoints.await;
-        sleep(Duration::from_millis(1000)).await;
-        result
-    };
     let workload = run_workload(
         &cluster.servers[..num_nodes(num_faulty_nodes) as usize],
         &cluster.clients,
         num_faulty_nodes,
     );
+    let workload = async {
+        let result = workload.await;
+        sleep(Duration::from_millis(1000)).await;
+        result
+    };
     let ((), run) = try_join!(endpoints, workload)?;
     Ok(run)
 }

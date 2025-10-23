@@ -10,12 +10,20 @@ async fn main() -> anyhow::Result<()> {
     let cluster = Cluster::from_terraform().await?;
     let endpoints = run_endpoints(cluster.servers.clone());
     let workload = run_workload(cluster.servers);
+    let workload = async {
+        let result = workload.await;
+        sleep(Duration::from_millis(3000)).await;
+        result
+    };
     try_join!(endpoints, workload)?;
     Ok(())
 }
 
 async fn run_workload(server_instances: Vec<Instance>) -> anyhow::Result<()> {
-    let control_client = Client::new();
+    // let control_client = Client::new();
+    let control_client = Client::builder()
+        .tcp_keepalive(Duration::from_secs(10))
+        .build()?;
     sleep(Duration::from_secs(3)).await;
     println!("load servers");
     let task = PrefillTask { num_keys: NUM_KEYS };

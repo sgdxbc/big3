@@ -129,7 +129,7 @@ impl ConsensusTask {
                     self.state.on_request(request);
                 }
                 Some(output_id) = self.channels.rx_output_response.recv() => {
-                    // self.state.on_output_response(output_id);
+                    self.state.on_output_response(output_id);
                 }
             }
         }

@@ -1,13 +1,20 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
-use axum::{Json, extract::State, response::IntoResponse, routing::post};
+use axum::{
+    Json,
+    extract::State,
+    response::{IntoResponse, Redirect, Response},
+    routing::{get, post},
+};
 use big::{schema, tasks::Task};
 use log::info;
+use rustix::process::{Resource, getrlimit, setrlimit};
 use tokio::{
     sync::{
         mpsc::{Receiver, Sender, channel},
         oneshot,
     },
+    time::timeout,
     try_join,
 };
 use tokio_util::sync::CancellationToken;
@@ -21,6 +28,9 @@ async fn main() -> anyhow::Result<()> {
         .target(env_logger::Target::Stdout)
         .try_init()?;
     info!("logger initialized");
+    let mut rlimit = getrlimit(Resource::Nofile);
+    rlimit.current = rlimit.maximum;
+    setrlimit(Resource::Nofile, rlimit)?;
 
     let (tx_command, rx_command) = channel(1);
     let run_task = run(rx_command);
@@ -28,10 +38,12 @@ async fn main() -> anyhow::Result<()> {
     let shutdown = CancellationToken::new();
     let state = AppState {
         shutdown: shutdown.clone(),
+        wait_load: CancellationToken::new(),
         tx_command,
     };
     let router = axum::Router::new()
         .route("/load", post(load))
+        .route("/wait-load", get(wait_load))
         .route("/start", post(start))
         .route("/scrape", post(scrape))
         .route("/stop", post(stop))
@@ -49,7 +61,7 @@ async fn main() -> anyhow::Result<()> {
 }
 
 enum Command {
-    Load(schema::Task, oneshot::Sender<()>),
+    Load(schema::Task, CancellationToken),
     Start,
     Scrape(oneshot::Sender<schema::Scrape>),
     Stop(oneshot::Sender<schema::Stopped>),
@@ -60,7 +72,7 @@ async fn run(mut rx_command: Receiver<Command>) -> anyhow::Result<()> {
         anyhow::bail!("first command must be load");
     };
     let task = Task::load(task).await?;
-    let _ = tx.send(());
+    tx.cancel();
 
     match rx_command.recv().await {
         Some(Command::Stop(tx)) => {
@@ -94,16 +106,27 @@ async fn run(mut rx_command: Receiver<Command>) -> anyhow::Result<()> {
 struct AppState {
     shutdown: CancellationToken,
     tx_command: Sender<Command>,
+    wait_load: CancellationToken,
 }
 
-async fn load(State(state): State<Arc<AppState>>, Json(task): Json<schema::Task>) {
-    let (tx, rx) = oneshot::channel();
+async fn load(State(state): State<Arc<AppState>>, Json(task): Json<schema::Task>) -> Response {
     state
         .tx_command
-        .send(Command::Load(task, tx))
+        .send(Command::Load(task, state.wait_load.clone()))
         .await
         .unwrap();
-    rx.await.unwrap();
+    do_wait_load(&state.wait_load).await
+}
+
+async fn wait_load(State(state): State<Arc<AppState>>) -> Response {
+    do_wait_load(&state.wait_load).await
+}
+
+async fn do_wait_load(cancellation_token: &CancellationToken) -> Response {
+    match timeout(Duration::from_secs(100), cancellation_token.cancelled()).await {
+        Ok(()) => ().into_response(),
+        Err(_) => Redirect::to("/wait-load").into_response(),
+    }
 }
 
 async fn start(State(state): State<Arc<AppState>>) {
