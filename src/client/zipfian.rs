@@ -1,52 +1,51 @@
 use rand::Rng;
 
-/// Zipfian random number generator (faithful to YCSB’s ZipfianGenerator).
-/// Draws from [base, base+items).
+/// Defaults from YCSB (precomputed zeta for fast path)
+const ZIPFIAN_CONSTANT: f64 = 0.99;
+const ZETAN: f64 = 26.469_028_201_783_02; // ζ(2^27, 0.99)
+
+/// Zipfian random number generator (YCSB-compatible, using precomputed constants).
+/// Draws from the inclusive range [base, base + items - 1].
 pub struct Zipfian {
-    items: u64,
     base: u64,
+    items: u64,
     theta: f64,
-    zeta2theta: f64,
     alpha: f64,
     zetan: f64,
     eta: f64,
-    count_for_zeta: u64,
 }
 
 impl Zipfian {
-    pub const ZIPFIAN_CONSTANT: f64 = 0.99;
-
-    /// Construct over an inclusive range [min, max].
+    /// Create a generator over [min, max] with YCSB's default theta=0.99 (fast precomputed mode).
     pub fn new_range(min: u64, max: u64) -> Self {
-        Self::new_range_with_theta(min, max, Self::ZIPFIAN_CONSTANT)
+        Self::new(min, max, ZIPFIAN_CONSTANT, ZETAN)
     }
 
-    /// Same as new_range, but let caller pick theta.
-    pub fn new_range_with_theta(min: u64, max: u64, theta: f64) -> Self {
+    /// Exact mode (recomputes ζ(items, θ)); slower but precise.
+    pub fn new_range_exact(min: u64, max: u64, theta: f64) -> Self {
+        let zetan = zeta(max - min + 1, theta);
+        Self::new(min, max, theta, zetan)
+    }
+
+    fn new(min: u64, max: u64, theta: f64, zetan: f64) -> Self {
         assert!(max >= min, "invalid range");
         let items = max - min + 1;
-        let base = min;
-
-        let zeta2theta = zeta(2, theta);
         let alpha = 1.0 / (1.0 - theta);
-        let zetan = zeta(items, theta);
+        let zeta2theta = zeta(2, theta);
         let eta = (1.0 - (2.0f64 / items as f64).powf(1.0 - theta)) / (1.0 - (zeta2theta / zetan));
-
         Self {
+            base: min,
             items,
-            base,
             theta,
-            zeta2theta,
             alpha,
             zetan,
             eta,
-            count_for_zeta: items,
         }
     }
 
-    /// Draw next value.
-    pub fn next_u64(&mut self, rng: &mut impl Rng) -> u64 {
-        // Identical branch structure to YCSB (Gray et al. method).
+    /// Draw the next value using any external RNG.
+    pub fn next_u64<R: Rng + ?Sized>(&self, rng: &mut R) -> u64 {
+        // Identical branching to YCSB / Gray et al.
         let u: f64 = rng.random();
         let uz = u * self.zetan;
 
@@ -61,23 +60,16 @@ impl Zipfian {
                 as u64
     }
 
-    /// (Optional) Incremental re-computation if the domain grows.
-    /// Matches the spirit of YCSB's "countforzeta" optimization.
-    pub fn ensure_items_at_least(&mut self, new_items: u64) {
-        if new_items <= self.count_for_zeta {
-            return;
-        }
-        for i in (self.count_for_zeta + 1)..=new_items {
-            self.zetan += 1.0 / (i as f64).powf(self.theta);
-        }
-        self.count_for_zeta = new_items;
-        self.items = new_items;
-        self.eta = (1.0 - (2.0f64 / new_items as f64).powf(1.0 - self.theta))
-            / (1.0 - (self.zeta2theta / self.zetan));
+    /// Accessors
+    pub fn items(&self) -> u64 {
+        self.items
+    }
+    pub fn base(&self) -> u64 {
+        self.base
     }
 }
 
-/// Scrambled Zipfian: hashes the Zipfian draw to distribute "hot" keys across the keyspace.
+/// Scrambled Zipfian: hashes the Zipfian draw to distribute hot keys across the keyspace.
 pub struct ScrambledZipfian {
     inner: Zipfian,
     items: u64,
@@ -95,9 +87,9 @@ impl ScrambledZipfian {
         }
     }
 
-    pub fn new_range_with_theta(min: u64, max: u64, theta: f64) -> Self {
+    pub fn new_range_exact(min: u64, max: u64, theta: f64) -> Self {
         let items = max - min + 1;
-        let inner = Zipfian::new_range_with_theta(0, items - 1, theta);
+        let inner = Zipfian::new_range_exact(0, items - 1, theta);
         Self {
             inner,
             items,
@@ -105,30 +97,48 @@ impl ScrambledZipfian {
         }
     }
 
-    pub fn next_u64(&mut self, rng: &mut impl Rng) -> u64 {
+    /// Draw using any external RNG; scrambling uses 64-bit FNV-1a on the raw Zipfian output.
+    pub fn next_u64<R: Rng + ?Sized>(&self, rng: &mut R) -> u64 {
         let v = self.inner.next_u64(rng);
-        let h = fnv1a64(v);
-        self.base + (h % self.items)
+        self.base + (fnv1a64(v) % self.items)
     }
 }
 
-/// Plain zeta(n, theta) = sum_{i=1..n} 1 / i^theta
+/// ζ(n, θ) = Σ_{i=1..n} i^{-θ}
 fn zeta(n: u64, theta: f64) -> f64 {
     let mut sum = 0.0;
     for i in 1..=n {
-        sum += 1.0 / (i as f64).powf(theta);
+        sum += (i as f64).powf(-theta);
     }
     sum
 }
 
-/// 64-bit FNV-1a over the 8 bytes of the input (little-endian), like YCSB’s usage.
+/// 64-bit FNV-1a over the 8 bytes of the input (little-endian).
 fn fnv1a64(mut x: u64) -> u64 {
     let mut hash: u64 = 0xcbf29ce484222325;
-    const PRIME: u64 = 0x100000001b3;
+    const PRIME: u64 = 0x1000_0000_01B3;
     for _ in 0..8 {
-        hash ^= x & 0xff;
+        hash ^= x & 0xFF;
         hash = hash.wrapping_mul(PRIME);
         x >>= 8;
     }
     hash
 }
+
+/* --- Example usage ---
+use rand::rngs::StdRng;
+use rand::SeedableRng;
+
+fn main() {
+    let mut rng = StdRng::seed_from_u64(42);
+    let z = Zipfian::new_range(0, 1_000_000 - 1);
+    let s = ScrambledZipfian::new_range(0, 1_000_000 - 1);
+
+    for _ in 0..5 {
+        println!("{}", z.next_u64(&mut rng));
+    }
+    for _ in 0..5 {
+        println!("{}", s.next_u64(&mut rng));
+    }
+}
+*/

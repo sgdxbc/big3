@@ -1,4 +1,4 @@
-use rocksdb::{DB, WriteBatch};
+use rocksdb::{DB, ReadOptions, WriteBatch};
 use tokio::sync::oneshot;
 
 pub struct Storage {
@@ -18,9 +18,11 @@ impl Storage {
     pub fn invoke(&mut self, op: StorageOp) -> anyhow::Result<()> {
         match op {
             StorageOp::Fetch(keys, tx_response) => {
+                let mut read_options = ReadOptions::default();
+                read_options.set_async_io(true);
                 let res = self
                     .db
-                    .multi_get(keys)
+                    .multi_get_opt(keys, &read_options)
                     .into_iter()
                     .collect::<Result<_, _>>()?;
                 let _ = tx_response.send(res);

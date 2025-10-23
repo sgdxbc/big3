@@ -5,7 +5,7 @@ use std::{
 };
 
 use bytes::Bytes;
-use log::error;
+use log::{debug, error};
 use quinn::{Connection, Endpoint};
 use rand::{Rng, rng};
 use tokio::{
@@ -69,15 +69,16 @@ impl ClientWorkerTask {
         Self { channels, state }
     }
 
-    async fn load(
+    fn load(
         client_worker_channels: ClientWorkerChannels,
         client: ClientHandle,
         schema: &schema::ClientTask,
     ) -> anyhow::Result<Self> {
-        let state = ClientWorker::new(
-            ClientWorkerTaskContext::new(client_worker_channels.handle(), client),
-            schema.worker_config.clone(),
-        );
+        debug!("loading client worker task");
+        let context = ClientWorkerTaskContext::new(client_worker_channels.handle(), client);
+        debug!("client worker context created");
+        let state = ClientWorker::new(context, schema.worker_config.clone());
+        debug!("client worker state created");
         Ok(Self::new(client_worker_channels, state))
     }
 
@@ -336,6 +337,7 @@ pub struct ClientNodeTask {
 
 impl ClientNodeTask {
     pub async fn load(schema: schema::ClientTask) -> anyhow::Result<Self> {
+        debug!("loading client node task");
         let client_channels = ClientChannels::new();
         let client_worker_channels = ClientWorkerChannels::new();
 
@@ -343,6 +345,7 @@ impl ClientNodeTask {
 
         let network_connect =
             NetworkConnectTask::load(client_channels.handle(), &schema, client_id).await?;
+        debug!("network connect loaded");
         let client = ClientTask::load(
             client_channels,
             network_connect.handle(),
@@ -350,9 +353,10 @@ impl ClientNodeTask {
             client_id,
         )
         .await?;
+        debug!("client loaded");
         let client_worker =
-            ClientWorkerTask::load(client_worker_channels, client.channels.handle(), &schema)
-                .await?;
+            ClientWorkerTask::load(client_worker_channels, client.channels.handle(), &schema)?;
+        debug!("client worker loaded");
         Ok(Self {
             network_connect,
             client,

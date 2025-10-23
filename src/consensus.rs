@@ -168,7 +168,7 @@ impl<C> Bullshark<C> {
         }
     }
 
-    const NUM_MAX_INFLIGHT_OUTPUTS: usize = 10;
+    const NUM_MAX_INFLIGHT_OUTPUTS: usize = 4;
     const MAX_BLOCK_SIZE: usize = 1000;
 }
 
@@ -179,7 +179,9 @@ impl<C: BullsharkContext> Bullshark<C> {
 
     pub fn on_request(&mut self, request: Request) {
         self.txn_pool.push(request);
-        self.metrics.request_count += 1;
+        if self.txn_pool.len() >= Self::MAX_BLOCK_SIZE * 10 {
+            self.txn_pool = self.txn_pool.split_off(Self::MAX_BLOCK_SIZE * 5);
+        }
     }
 
     pub fn on_message(&mut self, message: message::Message) {
@@ -255,9 +257,11 @@ impl<C: BullsharkContext> Bullshark<C> {
     }
 
     fn may_propose(&mut self) {
-        if self.certs.get(&(self.round - 1)).is_some_and(|certs| {
-            certs.len() >= (self.config.num_node - self.config.num_faulty_node) as usize
-        }) && self.executing.len() < Self::NUM_MAX_INFLIGHT_OUTPUTS
+        if self.round > 0
+            && self.certs.get(&(self.round - 1)).is_some_and(|certs| {
+                certs.len() >= (self.config.num_node - self.config.num_faulty_node) as usize
+            })
+            && self.executing.len() < Self::NUM_MAX_INFLIGHT_OUTPUTS
         {
             self.propose();
         }
@@ -270,7 +274,6 @@ impl<C: BullsharkContext> Bullshark<C> {
             self.round,
             self.txn_pool.len()
         );
-        self.metrics.proposed_block_count += 1;
         if let Some(block_hash) = self.block_hash {
             debug!("[{}] interrupted proposal {block_hash:?}", self.node_index);
             self.block_oks.clear()
@@ -285,11 +288,15 @@ impl<C: BullsharkContext> Bullshark<C> {
             round: self.round,
             creator_index: self.node_index,
             certs: certs.into_values().collect(),
-            txns: {
-                let skip_len = self.txn_pool.len().saturating_sub(Self::MAX_BLOCK_SIZE);
-                self.txn_pool.drain(..).skip(skip_len).collect()
-            },
+            txns: self
+                .txn_pool
+                .split_off(self.txn_pool.len().saturating_sub(Self::MAX_BLOCK_SIZE)),
         };
+        self.metrics.request_count += network_block.txns.len();
+        if !network_block.txns.is_empty() {
+            self.metrics.proposed_block_count += 1;
+        }
+
         let block = Block::from_network(&network_block);
         self.context
             .send_to_all(message::Message::Block(network_block));
@@ -444,6 +451,12 @@ impl<C: BullsharkContext> Bullshark<C> {
     pub fn on_output_response(&mut self, output_id: OutputId) {
         let removed = self.executing.remove(&output_id);
         assert!(removed);
+        trace!(
+            "[{}] output {} completed, inflight {}",
+            self.node_index,
+            output_id,
+            self.executing.len()
+        );
         self.may_propose();
     }
 }

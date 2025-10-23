@@ -20,11 +20,8 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn run_workload(server_instances: Vec<Instance>) -> anyhow::Result<()> {
-    // let control_client = Client::new();
-    let control_client = Client::builder()
-        .tcp_keepalive(Duration::from_secs(10))
-        .build()?;
-    sleep(Duration::from_secs(3)).await;
+    let control_client = Client::new();
+    sleep(Duration::from_millis(2000)).await;
     println!("load servers");
     let task = PrefillTask { num_keys: NUM_KEYS };
     load_all(

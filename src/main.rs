@@ -1,11 +1,6 @@
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
-use axum::{
-    Json,
-    extract::State,
-    response::{IntoResponse, Redirect, Response},
-    routing::{get, post},
-};
+use axum::{Json, extract::State, response::IntoResponse, routing::post};
 use big::{schema, tasks::Task};
 use log::info;
 use rustix::process::{Resource, getrlimit, setrlimit};
@@ -14,7 +9,6 @@ use tokio::{
         mpsc::{Receiver, Sender, channel},
         oneshot,
     },
-    time::timeout,
     try_join,
 };
 use tokio_util::sync::CancellationToken;
@@ -43,7 +37,6 @@ async fn main() -> anyhow::Result<()> {
     };
     let router = axum::Router::new()
         .route("/load", post(load))
-        .route("/wait-load", get(wait_load))
         .route("/start", post(start))
         .route("/scrape", post(scrape))
         .route("/stop", post(stop))
@@ -109,24 +102,13 @@ struct AppState {
     wait_load: CancellationToken,
 }
 
-async fn load(State(state): State<Arc<AppState>>, Json(task): Json<schema::Task>) -> Response {
+async fn load(State(state): State<Arc<AppState>>, Json(task): Json<schema::Task>) {
     state
         .tx_command
         .send(Command::Load(task, state.wait_load.clone()))
         .await
         .unwrap();
-    do_wait_load(&state.wait_load).await
-}
-
-async fn wait_load(State(state): State<Arc<AppState>>) -> Response {
-    do_wait_load(&state.wait_load).await
-}
-
-async fn do_wait_load(cancellation_token: &CancellationToken) -> Response {
-    match timeout(Duration::from_secs(100), cancellation_token.cancelled()).await {
-        Ok(()) => ().into_response(),
-        Err(_) => Redirect::to("/wait-load").into_response(),
-    }
+    state.wait_load.cancelled().await;
 }
 
 async fn start(State(state): State<Arc<AppState>>) {

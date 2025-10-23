@@ -91,6 +91,7 @@ impl<C: ExecuteContext> Execute<C> {
             block.txns.len()
         );
         if block.txns.is_empty() {
+            let _ = tx_response.send(());
             return;
         }
 
