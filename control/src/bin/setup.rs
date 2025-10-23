@@ -6,8 +6,11 @@ async fn main() -> anyhow::Result<()> {
     let cluster = Cluster::from_terraform().await?;
     let mut tasks = JoinSet::new();
     tasks.spawn(async move { setup_build(&cluster.build).await });
-    for server in cluster.servers {
-        tasks.spawn(async move { setup_storage(&server).await });
+    for instance in cluster.servers.clone() {
+        tasks.spawn(async move { setup_storage(&instance).await });
+    }
+    for instance in cluster.servers.into_iter().chain(cluster.clients) {
+        tasks.spawn(async move { setup_deps(&instance).await });
     }
     while let Some(result) = tasks.join_next().await {
         result??;
@@ -19,7 +22,7 @@ async fn setup_build(instance: &Instance) -> anyhow::Result<()> {
     let status = instance.ssh().arg([
         "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- --profile minimal -y",
         "sudo apt-get update",
-        "sudo apt-get install -y clang make"
+        "sudo apt-get install -y clang make pkg-config liburing-dev"
     ].join(" && ")).status().await?;
     anyhow::ensure!(status.success());
     Ok(())
@@ -42,5 +45,15 @@ async fn setup_storage(instance: &Instance) -> anyhow::Result<()> {
             .await?;
         anyhow::ensure!(status.success());
     }
+    Ok(())
+}
+
+async fn setup_deps(instance: &Instance) -> anyhow::Result<()> {
+    let status = instance
+        .ssh()
+        .arg("sudo apt-get update && sudo apt-get install -y liburing2")
+        .status()
+        .await?;
+    anyhow::ensure!(status.success());
     Ok(())
 }
