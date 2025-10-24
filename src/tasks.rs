@@ -14,9 +14,12 @@ use crate::{
 use self::{client::ClientNodeTask, prefill::PrefillTask, replica::ReplicaNodeTask};
 
 pub mod client;
+pub mod consensus;
+pub mod execute;
 pub mod network;
 pub mod prefill;
 pub mod replica;
+pub mod storage;
 
 const PREFILL_PATH: &str = "/tmp/big-prefill";
 
