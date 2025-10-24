@@ -95,7 +95,7 @@ pub type FetchId = u64;
 
 pub trait BigStorageContext {
     fn fetch(&mut self, keys: Vec<Vec<u8>>) -> FetchId;
-    fn post(&mut self, kvs: Vec<(Vec<u8>, Option<Vec<u8>>)>);
+    fn post(&mut self, updates: Vec<(Vec<u8>, Option<Vec<u8>>)>);
 
     fn send_to_all(&mut self, message: message::Message);
 }
@@ -300,6 +300,8 @@ impl<C: BigStorageContext> BigStorage<C> {
         let _ = fetching.tx_response.send(values);
     }
 }
+
+pub use message::Message;
 
 mod message {
     use big_schema::NodeIndex;

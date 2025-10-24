@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use bincode::Decode;
+use bincode::{Decode, Encode};
 use bytes::Bytes;
 use log::error;
 use quinn::{Connection, Endpoint};
@@ -54,12 +54,12 @@ pub struct NetworkInterconnectHandle {
 }
 
 impl NetworkInterconnectHandle {
-    pub fn send(&self, node_index: NodeIndex, message: crate::consensus::message::Message) {
+    pub fn send<M: Encode>(&self, node_index: NodeIndex, message: M) {
         let bytes = bincode::encode_to_vec(&message, bincode::config::standard()).unwrap();
         let _ = self.txs_outgoing_message[&node_index].send(bytes.into());
     }
 
-    pub fn send_to_all(&self, message: crate::consensus::message::Message) {
+    pub fn send_to_all<M: Encode>(&self, message: M) {
         let bytes =
             Bytes::from(bincode::encode_to_vec(&message, bincode::config::standard()).unwrap());
         for tx in self.txs_outgoing_message.values() {

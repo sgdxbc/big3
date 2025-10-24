@@ -20,6 +20,10 @@ pub struct StorageHandle {
 }
 
 impl StorageHandle {
+    pub fn new(tx_storage_op: UnboundedSender<StorageOp>) -> Self {
+        Self { tx_storage_op }
+    }
+
     pub async fn fetch(&self, keys: Vec<Vec<u8>>) -> anyhow::Result<Vec<Option<Vec<u8>>>> {
         let (tx_response, rx_response) = oneshot::channel();
         self.tx_storage_op
@@ -62,7 +66,7 @@ impl PlainStorageChannels {
 }
 
 pub struct PlainStorageTask {
-    channels: PlainStorageChannels,
+    pub channels: PlainStorageChannels,
     state: PlainStorage,
     _temp_dir: TempDir,
 }

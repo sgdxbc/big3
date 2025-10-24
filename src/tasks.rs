@@ -11,14 +11,15 @@ use crate::{
     schema::{self, Stopped},
 };
 
-use self::{client::ClientNodeTask, prefill::PrefillTask, replica::ReplicaNodeTask};
+use self::{client::ClientNodeTask, full::ReplicaNodeTask, prefill::PrefillTask};
 
+pub mod big;
 pub mod client;
 pub mod consensus;
 pub mod execute;
+pub mod full;
 pub mod network;
 pub mod prefill;
-pub mod replica;
 pub mod storage;
 
 const PREFILL_PATH: &str = "/tmp/big-prefill";
