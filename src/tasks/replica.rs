@@ -1,8 +1,5 @@
-use std::{collections::HashMap, time::Instant};
+use std::time::Instant;
 
-use bytes::Bytes;
-use log::error;
-use quinn::{Connection, Endpoint};
 use rocksdb::DB;
 use tempfile::{TempDir, tempdir};
 use tokio::{
@@ -12,18 +9,24 @@ use tokio::{
         mpsc::{Receiver, Sender, UnboundedReceiver, UnboundedSender, channel, unbounded_channel},
         oneshot,
     },
-    task::JoinSet,
 };
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    cert::{client_config, server_config},
     consensus::{Block, Bullshark, BullsharkContext, OutputId},
     execute::{Execute, ExecuteContext, FetchId},
     schema,
     storage::{PlainStorage, StorageOp},
     tasks::PREFILL_PATH,
     types::{ClientId, NodeIndex, Reply, Request},
+};
+
+use super::network::{
+    interconnect::{NetworkInterconnectHandle, NetworkInterconnectTask, ReceiveHandle},
+    server::{
+        NetworkAcceptTask, NetworkOutgoingChannels, NetworkOutgoingHandle, NetworkOutgoingTask,
+        SubmitHandle,
+    },
 };
 
 pub struct ConsensusChannels {
@@ -39,8 +42,8 @@ pub struct ConsensusChannels {
 
 #[derive(Clone)]
 struct ConsensusHandle {
-    tx_request: Sender<(Instant, Request)>,
-    tx_incoming_message: Sender<crate::consensus::message::Message>,
+    receive: ReceiveHandle<crate::consensus::message::Message>,
+    submit: SubmitHandle,
     tx_output_response: Sender<OutputId>,
 }
 
@@ -61,27 +64,14 @@ impl ConsensusChannels {
 
     fn handle(&self) -> ConsensusHandle {
         ConsensusHandle {
-            tx_request: self.tx_request.clone(),
-            tx_incoming_message: self.tx_incoming_message.clone(),
+            receive: ReceiveHandle::new(self.tx_incoming_message.clone()),
+            submit: SubmitHandle::new(self.tx_request.clone()),
             tx_output_response: self.tx_output_response.clone(),
         }
     }
 }
 
 impl ConsensusHandle {
-    async fn incoming_message(
-        &self,
-        message: crate::consensus::message::Message,
-    ) -> anyhow::Result<()> {
-        self.tx_incoming_message.send(message).await?;
-        anyhow::Ok(())
-    }
-
-    async fn submit_request(&self, request: Request) -> anyhow::Result<()> {
-        self.tx_request.send((Instant::now(), request)).await?;
-        anyhow::Ok(())
-    }
-
     async fn output_response(&self, output_id: OutputId) -> anyhow::Result<()> {
         self.tx_output_response.send(output_id).await?;
         anyhow::Ok(())
@@ -101,7 +91,7 @@ impl ConsensusTask {
     async fn load(
         channels: ConsensusChannels,
         execute: ExecuteHandle,
-        network_connect: NetworkConnectHandle,
+        network_connect: NetworkInterconnectHandle,
         schema: &schema::ReplicaTask,
     ) -> anyhow::Result<Self> {
         let context = ConsensusTaskContext::new(channels.handle(), execute, network_connect);
@@ -139,7 +129,7 @@ impl ConsensusTask {
 struct ConsensusTaskContext {
     consensus: ConsensusHandle,
     execute: ExecuteHandle,
-    network_connect: NetworkConnectHandle,
+    network_connect: NetworkInterconnectHandle,
     output_id: OutputId,
 }
 
@@ -147,7 +137,7 @@ impl ConsensusTaskContext {
     fn new(
         consensus: ConsensusHandle,
         execute: ExecuteHandle,
-        network_connect: NetworkConnectHandle,
+        network_connect: NetworkInterconnectHandle,
     ) -> Self {
         Self {
             consensus,
@@ -420,308 +410,10 @@ impl StorageTask {
     }
 }
 
-pub struct NetworkAcceptTask {
-    endpoint: Endpoint,
-    consensus: ConsensusHandle,
-    network_outgoing: NetworkOutgoingHandle,
-}
-
-impl NetworkAcceptTask {
-    fn new(
-        endpoint: Endpoint,
-        consensus: ConsensusHandle,
-        network_outgoing: NetworkOutgoingHandle,
-    ) -> Self {
-        Self {
-            endpoint,
-            consensus,
-            network_outgoing,
-        }
-    }
-
-    async fn load(
-        consensus: ConsensusHandle,
-        network_outgoing: NetworkOutgoingHandle,
-    ) -> anyhow::Result<Self> {
-        let endpoint = Endpoint::server(server_config(), ([0, 0, 0, 0], 5000).into())?;
-        Ok(Self::new(endpoint, consensus, network_outgoing))
-    }
-
-    pub async fn run(mut self, stop: CancellationToken) -> anyhow::Result<()> {
-        tokio::spawn(async move { stop.run_until_cancelled(self.run_inner()).await })
-            .await?
-            .unwrap_or(Ok(()))?;
-        Ok(())
-    }
-
-    async fn run_inner(&mut self) -> anyhow::Result<()> {
-        while let Some(incoming) = self.endpoint.accept().await {
-            let conn = incoming.await?;
-            let mut client_id = [0; size_of::<ClientId>()];
-            conn.accept_uni().await?.read_exact(&mut client_id).await?;
-
-            let (tx_outgoing, rx_outgoing) = unbounded_channel();
-            let _ = self
-                .network_outgoing
-                .new_connection(ClientId::from_le_bytes(client_id), tx_outgoing)
-                .await;
-            tokio::spawn(Self::run_connection_incoming(
-                conn.clone(),
-                self.consensus.clone(),
-            ));
-            tokio::spawn(Self::run_connection_outgoing(conn, rx_outgoing));
-        }
-        Ok(())
-    }
-
-    async fn run_connection_incoming(
-        conn: Connection,
-        consensus: ConsensusHandle,
-    ) -> anyhow::Result<()> {
-        loop {
-            let mut recv = conn.accept_uni().await?;
-            let bytes = recv.read_to_end(usize::MAX).await?;
-            let message = bincode::decode_from_slice(&bytes, bincode::config::standard())?.0;
-            let _ = consensus.submit_request(message).await;
-        }
-    }
-
-    async fn run_connection_outgoing(
-        conn: Connection,
-        mut tx_outgoing_message: UnboundedReceiver<Bytes>,
-    ) -> anyhow::Result<()> {
-        while let Some(bytes) = tx_outgoing_message.recv().await {
-            let mut send = conn.open_uni().await?;
-            send.write_all(&bytes).await?;
-        }
-        Ok(())
-    }
-}
-
-struct NetworkOutgoingChannels {
-    tx_connection: Sender<(ClientId, UnboundedSender<Bytes>)>,
-    rx_connection: Receiver<(ClientId, UnboundedSender<Bytes>)>,
-
-    tx_outgoing_message: UnboundedSender<(ClientId, Reply)>,
-    rx_outgoing_message: UnboundedReceiver<(ClientId, Reply)>,
-}
-
-struct NetworkOutgoingHandle {
-    tx_connection: Sender<(ClientId, UnboundedSender<Bytes>)>,
-    tx_outgoing_message: UnboundedSender<(ClientId, Reply)>,
-}
-
-impl NetworkOutgoingChannels {
-    fn new() -> Self {
-        let (tx_connection, rx_connection) = channel(100);
-        let (tx_outgoing_message, rx_outgoing_message) = unbounded_channel();
-        Self {
-            tx_connection,
-            rx_connection,
-            tx_outgoing_message,
-            rx_outgoing_message,
-        }
-    }
-
-    fn handle(&self) -> NetworkOutgoingHandle {
-        NetworkOutgoingHandle {
-            tx_connection: self.tx_connection.clone(),
-            tx_outgoing_message: self.tx_outgoing_message.clone(),
-        }
-    }
-}
-
-impl NetworkOutgoingHandle {
-    async fn new_connection(
-        &self,
-        id: ClientId,
-        conn: UnboundedSender<Bytes>,
-    ) -> anyhow::Result<()> {
-        self.tx_connection.send((id, conn)).await?;
-        anyhow::Ok(())
-    }
-
-    fn send_message(&self, id: ClientId, reply: Reply) -> anyhow::Result<()> {
-        self.tx_outgoing_message.send((id, reply))?;
-        anyhow::Ok(())
-    }
-}
-
-pub struct NetworkOutgoingTask {
-    channels: NetworkOutgoingChannels,
-    connections: HashMap<ClientId, UnboundedSender<Bytes>>,
-}
-
-impl NetworkOutgoingTask {
-    fn new(channels: NetworkOutgoingChannels) -> Self {
-        Self {
-            channels,
-            connections: Default::default(),
-        }
-    }
-
-    async fn load(channels: NetworkOutgoingChannels) -> anyhow::Result<Self> {
-        Ok(Self::new(channels))
-    }
-
-    pub async fn run(mut self, stop: CancellationToken) -> anyhow::Result<()> {
-        tokio::spawn(async move { stop.run_until_cancelled(self.run_inner()).await })
-            .await?
-            .unwrap_or(Ok(()))
-    }
-
-    async fn run_inner(&mut self) -> anyhow::Result<()> {
-        loop {
-            select! {
-                Some((id, conn)) = self.channels.rx_connection.recv() => {
-                    self.handle_connection(id, conn);
-                }
-                Some((id, reply)) = self.channels.rx_outgoing_message.recv() => {
-                    self.handle_outgoing_message(id, reply)?;
-                }
-            }
-        }
-    }
-
-    fn handle_connection(&mut self, id: ClientId, conn: UnboundedSender<Bytes>) {
-        self.connections.insert(id, conn);
-    }
-
-    fn handle_outgoing_message(&mut self, id: ClientId, reply: Reply) -> anyhow::Result<()> {
-        let bytes = bincode::encode_to_vec(&reply, bincode::config::standard())?;
-        let _ = self.connections[&id].send(bytes.into());
-        anyhow::Ok(())
-    }
-}
-
-pub struct NetworkConnectTask {
-    txs_outgoing_message: HashMap<NodeIndex, UnboundedSender<Bytes>>,
-    join_set: JoinSet<anyhow::Result<()>>,
-}
-
-pub struct NetworkConnectHandle {
-    txs_outgoing_message: HashMap<NodeIndex, UnboundedSender<Bytes>>,
-}
-
-impl NetworkConnectHandle {
-    fn send(&self, node_index: NodeIndex, message: crate::consensus::message::Message) {
-        let bytes = bincode::encode_to_vec(&message, bincode::config::standard()).unwrap();
-        let _ = self.txs_outgoing_message[&node_index].send(bytes.into());
-    }
-
-    fn send_to_all(&self, message: crate::consensus::message::Message) {
-        let bytes =
-            Bytes::from(bincode::encode_to_vec(&message, bincode::config::standard()).unwrap());
-        for tx in self.txs_outgoing_message.values() {
-            let _ = tx.send(bytes.clone());
-        }
-    }
-}
-
-impl NetworkConnectTask {
-    async fn load(
-        consensus: ConsensusHandle,
-        schema: &schema::ReplicaTask,
-    ) -> anyhow::Result<Self> {
-        let mut endpoint = Endpoint::server(
-            server_config(),
-            (schema.ips[schema.node_index as usize], 6000).into(),
-        )?;
-        endpoint.set_default_client_config(client_config());
-
-        let connect = async {
-            let mut txs = HashMap::new();
-            for (i, &ip) in schema.ips[..schema.node_index as usize].iter().enumerate() {
-                let conn = endpoint
-                    .connect((ip, 6000).into(), "server.example")?
-                    .await?;
-                conn.open_uni()
-                    .await?
-                    .write_all(&schema.node_index.to_le_bytes())
-                    .await?;
-                txs.insert(i as NodeIndex, conn);
-            }
-            anyhow::Ok(txs)
-        };
-        let accept = async {
-            let mut txs = HashMap::new();
-            while txs.len() < (schema.ips.len() - schema.node_index as usize - 1) {
-                let conn = endpoint.accept().await.unwrap().await?;
-                let mut client_id = [0; size_of::<NodeIndex>()];
-                conn.accept_uni().await?.read_exact(&mut client_id).await?;
-                let client_index = NodeIndex::from_le_bytes(client_id);
-                txs.insert(client_index, conn);
-            }
-            anyhow::Ok(txs)
-        };
-        let (txs_lower, txs_higher) = tokio::try_join!(connect, accept)?;
-
-        let mut txs_outgoing_message = HashMap::new();
-        let mut join_set = JoinSet::new();
-        for (node_index, conn) in txs_lower.into_iter().chain(txs_higher) {
-            join_set.spawn(Self::run_connection_incoming(
-                conn.clone(),
-                consensus.clone(),
-            ));
-            let (tx_outgoing, rx_outgoing) = unbounded_channel();
-            join_set.spawn(Self::run_connection_outgoing(conn, rx_outgoing));
-            txs_outgoing_message.insert(node_index, tx_outgoing);
-        }
-        Ok(Self {
-            txs_outgoing_message,
-            join_set,
-        })
-    }
-
-    fn handle(&self) -> NetworkConnectHandle {
-        NetworkConnectHandle {
-            txs_outgoing_message: self.txs_outgoing_message.clone(),
-        }
-    }
-
-    async fn run_connection_incoming(
-        conn: Connection,
-        consensus: ConsensusHandle,
-    ) -> anyhow::Result<()> {
-        loop {
-            let mut recv = conn.accept_uni().await?;
-            let bytes = recv.read_to_end(usize::MAX).await?;
-            let message = bincode::decode_from_slice(&bytes, bincode::config::standard())?.0;
-            let _ = consensus.incoming_message(message).await;
-        }
-    }
-
-    async fn run_connection_outgoing(
-        conn: Connection,
-        mut tx_outgoing_message: UnboundedReceiver<Bytes>,
-    ) -> anyhow::Result<()> {
-        while let Some(bytes) = tx_outgoing_message.recv().await {
-            let mut send = conn.open_uni().await?;
-            send.write_all(&bytes).await?;
-        }
-        Ok(())
-    }
-
-    pub async fn run(mut self, stop: CancellationToken) -> anyhow::Result<()> {
-        tokio::spawn(async move { stop.run_until_cancelled(self.run_inner()).await })
-            .await?
-            .unwrap_or(Ok(()))
-    }
-
-    async fn run_inner(&mut self) -> anyhow::Result<()> {
-        while let Some(res) = self.join_set.join_next().await {
-            if let Err(err) = res.unwrap() {
-                error!("network connect task error: {}", err);
-            }
-        }
-        Ok(())
-    }
-}
-
 pub struct ReplicaNodeTask {
     network_accept: NetworkAcceptTask,
     network_outgoing: NetworkOutgoingTask,
-    network_connect: NetworkConnectTask,
+    network_connect: NetworkInterconnectTask,
     consensus: ConsensusTask,
     execute: ExecuteTask,
     storage: StorageTask,
@@ -735,13 +427,14 @@ impl ReplicaNodeTask {
         let storage_channels = StorageChannels::new();
 
         let network_accept = NetworkAcceptTask::load(
-            consensus_channels.handle(),
+            consensus_channels.handle().submit,
             network_outgoing_channels.handle(),
         )
         .await?;
         let network_outgoing = NetworkOutgoingTask::load(network_outgoing_channels).await?;
         let network_connect =
-            NetworkConnectTask::load(consensus_channels.handle(), &schema).await?;
+            NetworkInterconnectTask::load(consensus_channels.handle().receive, &schema, 5001)
+                .await?;
         let consensus = ConsensusTask::load(
             consensus_channels,
             execute_channels.handle(),

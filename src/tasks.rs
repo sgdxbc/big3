@@ -14,6 +14,7 @@ use crate::{
 use self::{client::ClientNodeTask, prefill::PrefillTask, replica::ReplicaNodeTask};
 
 pub mod client;
+pub mod network;
 pub mod prefill;
 pub mod replica;
 
