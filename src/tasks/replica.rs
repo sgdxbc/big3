@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, time::Instant};
 
 use bytes::Bytes;
 use log::error;
@@ -27,8 +27,8 @@ use crate::{
 };
 
 pub struct ConsensusChannels {
-    tx_request: Sender<Request>,
-    rx_request: Receiver<Request>,
+    tx_request: Sender<(Instant, Request)>,
+    rx_request: Receiver<(Instant, Request)>,
 
     tx_incoming_message: Sender<crate::consensus::message::Message>,
     rx_incoming_message: Receiver<crate::consensus::message::Message>,
@@ -39,7 +39,7 @@ pub struct ConsensusChannels {
 
 #[derive(Clone)]
 struct ConsensusHandle {
-    tx_request: Sender<Request>,
+    tx_request: Sender<(Instant, Request)>,
     tx_incoming_message: Sender<crate::consensus::message::Message>,
     tx_output_response: Sender<OutputId>,
 }
@@ -78,7 +78,7 @@ impl ConsensusHandle {
     }
 
     async fn submit_request(&self, request: Request) -> anyhow::Result<()> {
-        self.tx_request.send(request).await?;
+        self.tx_request.send((Instant::now(), request)).await?;
         anyhow::Ok(())
     }
 
@@ -125,8 +125,8 @@ impl ConsensusTask {
                 Some(message) = self.channels.rx_incoming_message.recv() => {
                     self.state.on_message(message);
                 }
-                Some(request) = self.channels.rx_request.recv() => {
-                    self.state.on_request(request);
+                Some((at, request)) = self.channels.rx_request.recv() => {
+                    self.state.on_request(at, request);
                 }
                 Some(output_id) = self.channels.rx_output_response.recv() => {
                     self.state.on_output_response(output_id);

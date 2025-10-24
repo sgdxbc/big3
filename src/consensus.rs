@@ -1,10 +1,13 @@
 use std::{
     collections::{HashMap, HashSet},
+    convert::identity,
     fmt::Debug,
     mem::take,
+    time::{Duration, Instant},
 };
 
 use bincode::{Decode, Encode};
+use hdrhistogram::Histogram;
 use log::{debug, info, trace, warn};
 use sha2::{Digest as _, Sha256};
 
@@ -104,7 +107,7 @@ pub struct Bullshark<C> {
     // Some(bh): proposed & wait for certified, None: certified & wait for other certified for next
     // proposal
     block_hash: Option<BlockHash>,
-    txn_pool: Vec<Request>,
+    txn_pool: Vec<(Instant, Request)>,
     block_oks: HashMap<NodeIndex, message::BlockOk>,
     certs: HashMap<Round, HashMap<NodeIndex, message::Cert>>,
     reorder_validate: HashMap<Round, Vec<(NodeIndex, BlockHash)>>,
@@ -120,13 +123,18 @@ pub struct Bullshark<C> {
     metrics: BullsharkMetrics,
 }
 
-#[derive(Default)]
 struct BullsharkMetrics {
-    request_count: usize,
-    proposed_block_count: u64,
-    certified_own_block_count: u64,
-    certified_block_count: u64,
-    delivered_block_count: u64,
+    proposed_block_size: Histogram<u64>,
+    output_block_size: Histogram<u64>,
+}
+
+impl Default for BullsharkMetrics {
+    fn default() -> Self {
+        Self {
+            proposed_block_size: Histogram::new(3).unwrap(),
+            output_block_size: Histogram::new(3).unwrap(),
+        }
+    }
 }
 
 impl<C> Bullshark<C> {
@@ -168,8 +176,9 @@ impl<C> Bullshark<C> {
         }
     }
 
-    const NUM_MAX_INFLIGHT_OUTPUTS: usize = 1;
-    const MAX_BLOCK_SIZE: usize = 4000;
+    const MAX_POOL_SIZE: usize = 100_000;
+    const POOL_LATENCY_BUDGET: Duration = Duration::from_millis(100);
+    const MAX_BLOCK_TXNS: usize = 5_000;
 }
 
 impl<C: BullsharkContext> Bullshark<C> {
@@ -177,11 +186,19 @@ impl<C: BullsharkContext> Bullshark<C> {
         self.propose();
     }
 
-    pub fn on_request(&mut self, request: Request) {
-        self.txn_pool.push(request);
-        if self.txn_pool.len() >= Self::MAX_BLOCK_SIZE * 10 {
-            self.txn_pool = self.txn_pool.split_off(Self::MAX_BLOCK_SIZE * 5);
+    pub fn on_request(&mut self, at: Instant, request: Request) {
+        self.txn_pool.push((at, request));
+        if self.txn_pool.len() >= Self::MAX_POOL_SIZE {
+            self.prune_txn_pool();
         }
+    }
+
+    fn prune_txn_pool(&mut self) {
+        let pos = self
+            .txn_pool
+            .binary_search_by_key(&(Instant::now() - Self::POOL_LATENCY_BUDGET), |&(at, _)| at)
+            .unwrap_or_else(identity);
+        self.txn_pool.drain(..pos);
     }
 
     pub fn on_message(&mut self, message: message::Message) {
@@ -202,33 +219,18 @@ impl<C: BullsharkContext> Bullshark<C> {
     }
 
     pub fn log_metrics(&self) {
-        let block_size =
-            self.metrics.request_count as f64 / self.metrics.proposed_block_count as f64;
-        let certification_rate = self.metrics.certified_own_block_count as f64
-            / self.metrics.proposed_block_count as f64;
-        let delivery_rate =
-            self.metrics.certified_block_count as f64 / self.metrics.delivered_block_count as f64;
-        let delivered_block_per_round =
-            self.metrics.delivered_block_count as f64 / (self.round as f64 + 1.0);
         info!(
-            "[{}] Metrics:\n\
-             \tProposed blocks: {}\n\
-             \tCertified own blocks: {}\n\
-             \tCertified blocks: {}\n\
-             \tDelivered blocks: {}\n\
-             \tAvg block size: {:.2}\n\
-             \tCertification rate: {:.2}\n\
-             \tDelivery rate: {:.2}\n\
-             \tBlocks/round: {:.2}",
-            self.node_index,
-            self.metrics.proposed_block_count,
-            self.metrics.certified_own_block_count,
-            self.metrics.certified_block_count,
-            self.metrics.delivered_block_count,
-            block_size,
-            certification_rate,
-            delivery_rate,
-            delivered_block_per_round,
+            "bullshark metrics:\n\
+            \tproposed block size: avg {:.0} req, p50 {:.0} req, p95 {:.0} req, p99 {:.0} req\n\
+            \toutput block size: avg {:.0} req, p50 {:.0} req, p95 {:.0} req, p99 {:.0} req",
+            self.metrics.proposed_block_size.mean(),
+            self.metrics.proposed_block_size.value_at_quantile(0.5),
+            self.metrics.proposed_block_size.value_at_quantile(0.95),
+            self.metrics.proposed_block_size.value_at_quantile(0.99),
+            self.metrics.output_block_size.mean(),
+            self.metrics.output_block_size.value_at_quantile(0.5),
+            self.metrics.output_block_size.value_at_quantile(0.95),
+            self.metrics.output_block_size.value_at_quantile(0.99),
         );
     }
 
@@ -270,7 +272,10 @@ impl<C: BullsharkContext> Bullshark<C> {
             && self.certs.get(&(self.round - 1)).is_some_and(|certs| {
                 certs.len() >= (self.config.num_node - self.config.num_faulty_node) as usize
             })
-            && self.executing.len() <= Self::NUM_MAX_INFLIGHT_OUTPUTS
+            // allow one inflight output to enable concurrent execution and consensus
+            // with sufficient large request rate, the execution of that one output will finish
+            // after this proposal is outputted
+            && self.executing.len() <= 1
         {
             self.propose();
         }
@@ -293,17 +298,22 @@ impl<C: BullsharkContext> Bullshark<C> {
             self.certs.remove(&(self.round - 1)).unwrap()
         };
         assert!(certs.iter().all(|(_, cert)| cert.round == self.round - 1));
+        self.prune_txn_pool();
         let network_block = message::Block {
             round: self.round,
             creator_index: self.node_index,
             certs: certs.into_values().collect(),
-            txns: self
-                .txn_pool
-                .split_off(self.txn_pool.len().saturating_sub(Self::MAX_BLOCK_SIZE)),
+            txns: {
+                let skip_count = self.txn_pool.len().saturating_sub(Self::MAX_BLOCK_TXNS);
+                self.txn_pool
+                    .drain(..)
+                    .skip(skip_count)
+                    .map(|(_, req)| req)
+                    .collect()
+            },
         };
-        self.metrics.request_count += network_block.txns.len();
         if !network_block.txns.is_empty() {
-            self.metrics.proposed_block_count += 1;
+            self.metrics.proposed_block_size += network_block.txns.len() as u64;
         }
 
         let block = Block::from_network(&network_block);
@@ -367,7 +377,6 @@ impl<C: BullsharkContext> Bullshark<C> {
                 "[{}] block {:?} certified for round {}",
                 self.node_index, block_hash, self.round
             );
-            self.metrics.certified_own_block_count += 1;
             let cert = message::Cert {
                 round: self.round,
                 creator_index: self.node_index,
@@ -393,7 +402,6 @@ impl<C: BullsharkContext> Bullshark<C> {
     }
 
     fn certified(&mut self, block_hash: BlockHash) {
-        self.metrics.certified_block_count += 1;
         let Some(block) = self.certifying_blocks.remove(&block_hash) else {
             self.reorder_certified.insert(block_hash);
             return;
@@ -422,7 +430,6 @@ impl<C: BullsharkContext> Bullshark<C> {
     }
 
     fn deliver(&mut self, block: Block) {
-        self.metrics.delivered_block_count += 1;
         // first perform bookkeeping that access block fields
         let block_hash = block.hash();
         let round_delivered = self.delivered.entry(block.round).or_default();
@@ -452,6 +459,9 @@ impl<C: BullsharkContext> Bullshark<C> {
             if let Some(parent) = self.reorder_delivered.remove(&link) {
                 self.output_recursive(parent)
             }
+        }
+        if !block.txns.is_empty() {
+            self.metrics.output_block_size += block.txns.len() as u64;
         }
         let output_id = self.context.output(block);
         self.executing.insert(output_id);
