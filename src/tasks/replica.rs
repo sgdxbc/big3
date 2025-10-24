@@ -21,7 +21,7 @@ use crate::{
     consensus::{Block, Bullshark, BullsharkContext, OutputId},
     execute::{Execute, ExecuteContext, FetchId},
     schema,
-    storage::{Storage, StorageOp},
+    storage::{PlainStorage, StorageOp},
     tasks::PREFILL_PATH,
     types::{ClientId, NodeIndex, Reply, Request},
 };
@@ -159,13 +159,13 @@ impl ConsensusTaskContext {
 }
 
 impl BullsharkContext for ConsensusTaskContext {
-    fn output(&mut self, block: Block) -> OutputId {
+    fn output(&mut self, blocks: Vec<Block>) -> OutputId {
         self.output_id += 1;
         let output_id = self.output_id;
         let execute = self.execute.clone();
         let consensus = self.consensus.clone();
         tokio::spawn(async move {
-            execute.execute(block).await?;
+            execute.execute(blocks).await?;
             consensus.output_response(output_id).await?;
             anyhow::Ok(())
         });
@@ -182,8 +182,8 @@ impl BullsharkContext for ConsensusTaskContext {
 }
 
 struct ExecuteChannels {
-    tx_block: Sender<(Block, oneshot::Sender<()>)>,
-    rx_block: Receiver<(Block, oneshot::Sender<()>)>,
+    tx_blocks: Sender<(Vec<Block>, oneshot::Sender<()>)>,
+    rx_blocks: Receiver<(Vec<Block>, oneshot::Sender<()>)>,
 
     tx_fetch_response: Sender<(FetchId, Vec<Option<Vec<u8>>>)>,
     rx_fetch_response: Receiver<(FetchId, Vec<Option<Vec<u8>>>)>,
@@ -191,7 +191,7 @@ struct ExecuteChannels {
 
 #[derive(Clone)]
 struct ExecuteHandle {
-    tx_block: Sender<(Block, oneshot::Sender<()>)>,
+    tx_block: Sender<(Vec<Block>, oneshot::Sender<()>)>,
     tx_fetch_response: Sender<(FetchId, Vec<Option<Vec<u8>>>)>,
 }
 
@@ -200,8 +200,8 @@ impl ExecuteChannels {
         let (tx_block, rx_block) = channel(100);
         let (tx_fetch_response, rx_fetch_response) = channel(100);
         Self {
-            tx_block,
-            rx_block,
+            tx_blocks: tx_block,
+            rx_blocks: rx_block,
             tx_fetch_response,
             rx_fetch_response,
         }
@@ -209,16 +209,16 @@ impl ExecuteChannels {
 
     fn handle(&self) -> ExecuteHandle {
         ExecuteHandle {
-            tx_block: self.tx_block.clone(),
+            tx_block: self.tx_blocks.clone(),
             tx_fetch_response: self.tx_fetch_response.clone(),
         }
     }
 }
 
 impl ExecuteHandle {
-    async fn execute(&self, block: Block) -> anyhow::Result<()> {
+    async fn execute(&self, blocks: Vec<Block>) -> anyhow::Result<()> {
         let (tx_response, rx_response) = oneshot::channel();
-        self.tx_block.send((block, tx_response)).await?;
+        self.tx_block.send((blocks, tx_response)).await?;
         rx_response.await?;
         anyhow::Ok(())
     }
@@ -269,7 +269,7 @@ impl ExecuteTask {
                 Some((fetch_id, values)) = self.channels.rx_fetch_response.recv() => {
                     self.state.on_fetch_response(fetch_id, values);
                 }
-                Some((block, tx_response)) = self.channels.rx_block.recv() => {
+                Some((block, tx_response)) = self.channels.rx_blocks.recv() => {
                     self.state.on_block(block, tx_response);
                 }
             }
@@ -304,7 +304,7 @@ impl ExecuteContext for ExecuteTaskContext {
         let _ = self.network_outgoing.send_message(id, reply);
     }
 
-    fn fetch(&mut self, keys: Vec<[u8; 32]>) -> FetchId {
+    fn fetch(&mut self, keys: Vec<Vec<u8>>) -> FetchId {
         self.fetch_id += 1;
         let fetch_id = self.fetch_id;
         let execute = self.execute.clone();
@@ -317,7 +317,7 @@ impl ExecuteContext for ExecuteTaskContext {
         fetch_id
     }
 
-    fn post(&mut self, updates: Vec<([u8; 32], Option<Vec<u8>>)>) {
+    fn post(&mut self, updates: Vec<(Vec<u8>, Option<Vec<u8>>)>) {
         let _ = self.storage.post(updates);
     }
 }
@@ -349,7 +349,7 @@ impl StorageChannels {
 }
 
 impl StorageHandle {
-    async fn fetch(&self, keys: Vec<[u8; 32]>) -> anyhow::Result<Vec<Option<Vec<u8>>>> {
+    async fn fetch(&self, keys: Vec<Vec<u8>>) -> anyhow::Result<Vec<Option<Vec<u8>>>> {
         let (tx_response, rx_response) = oneshot::channel();
         self.tx_storage_op
             .send(StorageOp::Fetch(keys, tx_response))?;
@@ -357,7 +357,7 @@ impl StorageHandle {
         anyhow::Ok(res)
     }
 
-    fn post(&self, updates: Vec<([u8; 32], Option<Vec<u8>>)>) -> anyhow::Result<()> {
+    fn post(&self, updates: Vec<(Vec<u8>, Option<Vec<u8>>)>) -> anyhow::Result<()> {
         self.tx_storage_op.send(StorageOp::Post(updates))?;
         anyhow::Ok(())
     }
@@ -365,12 +365,12 @@ impl StorageHandle {
 
 pub struct StorageTask {
     channels: StorageChannels,
-    state: Storage,
+    state: PlainStorage,
     _temp_dir: TempDir,
 }
 
 impl StorageTask {
-    fn new(channels: StorageChannels, state: Storage, temp_dir: TempDir) -> Self {
+    fn new(channels: StorageChannels, state: PlainStorage, temp_dir: TempDir) -> Self {
         Self {
             channels,
             state,
@@ -399,12 +399,16 @@ impl StorageTask {
         // )];
         // let db = DB::open_cf_descriptors(&db_opts, temp_dir.path(), cfs)?;
 
-        let state = Storage::new(db)?;
+        let state = PlainStorage::new(db)?;
         Ok(Self::new(channels, state, temp_dir))
     }
 
     pub async fn run(mut self, stop: CancellationToken) -> anyhow::Result<()> {
-        tokio::spawn(async move { stop.run_until_cancelled(self.run_inner()).await }).await?;
+        tokio::spawn(async move {
+            stop.run_until_cancelled(self.run_inner()).await;
+            self.state.log_metrics();
+        })
+        .await?;
         Ok(())
     }
 

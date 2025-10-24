@@ -20,7 +20,7 @@ fn num_nodes(num_faulty_nodes: u16) -> u16 {
     3 * num_faulty_nodes + 1
 }
 
-const CLIENT_RATE: f64 = 10_000.0;
+const CLIENT_RATE: f64 = 25_000.0;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -142,7 +142,7 @@ async fn run_workload(
     println!("start clients");
     start_all(client_instances, control_client.clone()).await?;
 
-    sleep(Duration::from_secs(50)).await;
+    sleep(Duration::from_secs(10)).await;
     println!("scrape and discard warmup data");
     scrape_all(client_instances, control_client.clone()).await?;
     sleep(Duration::from_secs(30)).await;

@@ -33,9 +33,9 @@ impl PrefillTask {
             let db = db.clone();
             join_set.spawn(async move {
                 let mut batch = WriteBatch::new();
-                let mut value = vec![0u8; 100 - 32];
+                let mut value = vec![0u8; 100 - 16];
                 for j in i..(i + batch_size).min(schema.num_keys) {
-                    let key = execute::storage_key(&execute::key(j));
+                    let key = execute::key(j);
                     rng.fill_bytes(&mut value);
                     batch.put(key, &value);
                 }

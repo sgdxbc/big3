@@ -58,7 +58,7 @@ impl<C> Client<C> {
         }
     }
 
-    const SEQ_WINDOW: u64 = 100_000;
+    const SEQ_WINDOW: u64 = 1_000_000;
 }
 
 impl<C: ClientContext> Client<C> {
@@ -179,7 +179,7 @@ impl<C: ClientWorkerContext> ClientWorker<C> {
         let op = if rng().random_bool(self.config.read_ratio) {
             Op::Get(key)
         } else {
-            let mut value = vec![0; 100 - 32];
+            let mut value = vec![0; 100 - 16];
             rng().fill_bytes(&mut value);
             Op::Put(key, value)
         };

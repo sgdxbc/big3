@@ -93,7 +93,7 @@ impl Block {
 pub trait BullsharkContext {
     fn send(&mut self, node_index: NodeIndex, message: message::Message);
     fn send_to_all(&mut self, message: message::Message);
-    fn output(&mut self, block: Block) -> OutputId;
+    fn output(&mut self, blocks: Vec<Block>) -> OutputId;
 }
 
 pub type OutputId = u64;
@@ -451,20 +451,23 @@ impl<C: BullsharkContext> Bullshark<C> {
             // will eventually appear
         }
 
-        self.output_recursive(block);
+        let blocks = self.output_recursive(block);
+        let output_id = self.context.output(blocks);
+        self.executing.insert(output_id);
     }
 
-    fn output_recursive(&mut self, block: Block) {
+    fn output_recursive(&mut self, block: Block) -> Vec<Block> {
+        let mut blocks = Vec::new();
         for &link in &block.links {
             if let Some(parent) = self.reorder_delivered.remove(&link) {
-                self.output_recursive(parent)
+                blocks.extend(self.output_recursive(parent));
             }
         }
         if !block.txns.is_empty() {
             self.metrics.output_block_size += block.txns.len() as u64;
         }
-        let output_id = self.context.output(block);
-        self.executing.insert(output_id);
+        blocks.push(block);
+        blocks
     }
 
     pub fn on_output_response(&mut self, output_id: OutputId) {

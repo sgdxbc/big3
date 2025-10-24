@@ -26,7 +26,7 @@ async fn run(cluster: &Cluster) -> anyhow::Result<()> {
     let workload = run_workload(&cluster.servers[..num_nodes() as usize], &cluster.clients);
     let workload = async {
         let result = workload.await;
-        sleep(Duration::from_millis(1000)).await;
+        sleep(Duration::from_millis(2000)).await;
         result
     };
     try_join!(endpoints, workload)?;
@@ -74,7 +74,7 @@ async fn run_workload(
             num_faulty_nodes: NUM_FAULTY_NODES,
         },
         worker_config: big_schema::ClientWorkerConfig {
-            rate: 80_000.,
+            rate: 25_000.,
             num_keys: NUM_KEYS,
             read_ratio: READ_RATIO,
         },

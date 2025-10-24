@@ -4,8 +4,7 @@ use std::{
 };
 
 use bincode::{Decode, Encode};
-use log::{info, trace};
-use sha2::{Digest as _, Sha256};
+use log::info;
 use tokio::sync::oneshot;
 
 use crate::{
@@ -22,15 +21,11 @@ pub enum Op {
 #[derive(Encode, Decode)]
 pub enum Res {
     Put,
-    Get(Option<Vec<u8>>),
+    Get(Vec<u8>),
 }
 
 pub fn key(index: u64) -> String {
-    format!("key-{index:08}")
-}
-
-pub fn storage_key(key: &str) -> [u8; 32] {
-    Sha256::digest(key).into()
+    format!("key-{index:012}")
 }
 
 pub type FetchId = u64;
@@ -39,8 +34,8 @@ pub trait ExecuteContext {
     // network
     fn send(&mut self, id: ClientId, reply: Reply);
     // storage
-    fn fetch(&mut self, keys: Vec<[u8; 32]>) -> FetchId;
-    fn post(&mut self, updates: Vec<([u8; 32], Option<Vec<u8>>)>);
+    fn fetch(&mut self, keys: Vec<Vec<u8>>) -> FetchId;
+    fn post(&mut self, updates: Vec<(Vec<u8>, Option<Vec<u8>>)>);
 }
 
 pub struct Execute<C> {
@@ -48,7 +43,7 @@ pub struct Execute<C> {
     index: NodeIndex,
 
     working: Option<WorkingState>,
-    pending_blocks: VecDeque<(Block, oneshot::Sender<()>)>,
+    pending_blocks: VecDeque<(Vec<Block>, oneshot::Sender<()>)>,
 
     metrics: ExecuteMetrics,
 }
@@ -82,31 +77,31 @@ impl<C> Execute<C> {
 }
 
 impl<C: ExecuteContext> Execute<C> {
-    pub fn on_block(&mut self, block: Block, tx_response: oneshot::Sender<()>) {
-        trace!(
-            "node {} executing block ({}, {}) size {}",
-            self.index,
-            block.round,
-            block.node_index,
-            block.txns.len()
-        );
-        if block.txns.is_empty() {
-            let _ = tx_response.send(());
-            return;
-        }
+    pub fn on_block(&mut self, blocks: Vec<Block>, tx_response: oneshot::Sender<()>) {
+        // trace!(
+        //     "node {} executing block ({}, {}) size {}",
+        //     self.index,
+        //     blocks.round,
+        //     blocks.node_index,
+        //     blocks.txns.len()
+        // );
+        // if blocks.txns.is_empty() {
+        //     let _ = tx_response.send(());
+        //     return;
+        // }
 
         if self.working.is_some() {
-            self.pending_blocks.push_back((block, tx_response));
+            self.pending_blocks.push_back((blocks, tx_response));
             return;
         }
-        self.prepare_block(block, tx_response);
+        self.prepare_blocks(blocks, tx_response);
     }
 
     pub fn log_metrics(&self) {
         info!("execution work time: {:?}", self.metrics.work_time);
     }
 
-    fn prepare_block(&mut self, block: Block, tx_response: oneshot::Sender<()>) {
+    fn prepare_blocks(&mut self, blocks: Vec<Block>, tx_response: oneshot::Sender<()>) {
         self.metrics.start = Instant::now();
         assert!(self.working.is_none());
 
@@ -117,28 +112,26 @@ impl<C: ExecuteContext> Execute<C> {
             tx_response,
         };
         let mut fetching_keys = HashSet::new();
-        for request in block.txns {
-            let op = bincode::decode_from_slice(&request.command, bincode::config::standard())
-                .unwrap()
-                .0;
-            if let Op::Get(key) = &op {
-                fetching_keys.insert(key.clone());
+        for block in blocks {
+            for request in block.txns {
+                let op = bincode::decode_from_slice(&request.command, bincode::config::standard())
+                    .unwrap()
+                    .0;
+                if let Op::Get(key) = &op {
+                    fetching_keys.insert(key.clone());
+                }
+                working
+                    .requests
+                    .push((op, request.client_id, request.client_seq));
             }
-            working
-                .requests
-                .push((op, request.client_id, request.client_seq));
         }
 
-        // if fetching_keys.is_empty() {
-        //     self.commit_block(working, Default::default());
-        //     return;
-        // }
-        let mut keys = Vec::new();
-        for key in fetching_keys {
-            keys.push(storage_key(&key));
-            working.fetching.push(key);
-        }
-        // keys.sort_unstable();
+        working.fetching = fetching_keys.into_iter().collect();
+        let keys = working
+            .fetching
+            .iter()
+            .map(|k| k.as_bytes().to_vec())
+            .collect();
         working.fetch_id = self.context.fetch(keys);
         let replaced = self.working.replace(working);
         assert!(replaced.is_none());
@@ -149,10 +142,10 @@ impl<C: ExecuteContext> Execute<C> {
             return;
         };
         assert_eq!(working.fetch_id, fetch_id);
-        self.commit_block(working, values);
+        self.commit_blocks(working, values);
     }
 
-    fn commit_block(&mut self, working: WorkingState, values: Vec<Option<Vec<u8>>>) {
+    fn commit_blocks(&mut self, working: WorkingState, values: Vec<Option<Vec<u8>>>) {
         let mut state: HashMap<String, Option<Vec<u8>>> = working
             .fetching
             .into_iter()
@@ -162,14 +155,15 @@ impl<C: ExecuteContext> Execute<C> {
         for (op, client_id, client_seq) in working.requests {
             let op = match op {
                 Op::Put(key, value) => {
-                    let storage_key = storage_key(&key);
-                    updates.push((storage_key, Some(value.clone())));
+                    updates.push((key.as_bytes().to_vec(), Some(value.clone())));
                     state.insert(key, Some(value));
                     Res::Put
                 }
                 Op::Get(key) => {
-                    let value = state[&key].clone();
-                    Res::Get(value)
+                    let Some(value) = &state[&key] else {
+                        panic!("key not found");
+                    };
+                    Res::Get(value.clone())
                 }
             };
             let reply = Reply {
@@ -184,7 +178,7 @@ impl<C: ExecuteContext> Execute<C> {
         self.metrics.work_time += self.metrics.start.elapsed();
 
         if let Some((block, tx_response)) = self.pending_blocks.pop_front() {
-            self.prepare_block(block, tx_response);
+            self.prepare_blocks(block, tx_response);
         }
     }
 }
