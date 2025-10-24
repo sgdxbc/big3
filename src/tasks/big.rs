@@ -157,7 +157,7 @@ impl BigStorageContext for BigStorageTaskContext {
     }
 }
 
-pub struct ReplicaNodeTask {
+pub struct BigReplicaNodeTask {
     network_accept: NetworkAcceptTask,
     network_outgoing: NetworkOutgoingTask,
     network_connect_consensus: NetworkInterconnectTask,
@@ -168,7 +168,7 @@ pub struct ReplicaNodeTask {
     big_storage: BigStorageTask,
 }
 
-impl ReplicaNodeTask {
+impl BigReplicaNodeTask {
     pub async fn load(schema: schema::ReplicaTask) -> anyhow::Result<Self> {
         let network_outgoing_channels = NetworkOutgoingChannels::new();
         let consensus_channels = ConsensusChannels::new();

@@ -115,7 +115,7 @@ async fn run_workload(
                     num_faulty_nodes,
                 },
             };
-            (instance, Task::Replica(schema))
+            (instance, Task::Full(schema))
         });
     load_all(replica_items, control_client.clone()).await?;
 

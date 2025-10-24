@@ -286,15 +286,20 @@ impl<C: BigStorageContext> BigStorage<C> {
             return;
         }
 
+        // info!("all node states received for fetch");
         let fetching = self.fetching.take().unwrap();
         let mut values = Vec::new();
         let mut node_index = vec![0; self.config.num_nodes as usize];
         for key in fetching.keys {
             let shard = self.config.shard_of_key(&key);
-            let primary_node = self.config.primary_node_of_shard(shard);
-            let value =
-                fetching.node_states[&primary_node][node_index[primary_node as usize]].clone();
-            node_index[primary_node as usize] += 1;
+            let i =
+                if self.primary_shards.contains(&shard) || self.secondary_shards.contains(&shard) {
+                    self.node_index
+                } else {
+                    self.config.primary_node_of_shard(shard)
+                };
+            let value = fetching.node_states[&i][node_index[i as usize]].clone();
+            node_index[i as usize] += 1;
             values.push(value);
         }
         let _ = fetching.tx_response.send(values);

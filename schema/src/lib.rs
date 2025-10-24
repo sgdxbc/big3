@@ -5,7 +5,8 @@ use serde::{Deserialize, Serialize};
 // payload of `/load`
 #[derive(Clone, Serialize, Deserialize)]
 pub enum Task {
-    Replica(ReplicaTask),
+    Full(ReplicaTask),
+    Big(ReplicaTask),
     Client(ClientTask),
     Prefill(PrefillTask),
 }

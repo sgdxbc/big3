@@ -12,7 +12,7 @@ use super::{
     storage::PlainStorageTask,
 };
 
-pub struct ReplicaNodeTask {
+pub struct FullReplicaNodeTask {
     network_accept: NetworkAcceptTask,
     network_outgoing: NetworkOutgoingTask,
     network_connect: NetworkInterconnectTask,
@@ -21,7 +21,7 @@ pub struct ReplicaNodeTask {
     storage: PlainStorageTask,
 }
 
-impl ReplicaNodeTask {
+impl FullReplicaNodeTask {
     pub async fn load(schema: schema::ReplicaTask) -> anyhow::Result<Self> {
         let network_outgoing_channels = NetworkOutgoingChannels::new();
         let consensus_channels = ConsensusChannels::new();
