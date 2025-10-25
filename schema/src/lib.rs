@@ -63,7 +63,7 @@ pub struct ClientConfig {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ClientWorkerConfig {
-    pub rate: f64, // requests per second
+    pub num_concurrent: u64,
     pub num_keys: u64,
     pub read_ratio: f64,
 }

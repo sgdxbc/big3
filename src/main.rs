@@ -27,14 +27,10 @@ async fn main() -> anyhow::Result<()> {
     setrlimit(Resource::Nofile, rlimit)?;
 
     let (tx_command, rx_command) = channel(1);
-    let run_task = run(rx_command);
-
     let shutdown = CancellationToken::new();
-    let state = AppState {
-        shutdown: shutdown.clone(),
-        wait_load: CancellationToken::new(),
-        tx_command,
-    };
+    let run_task = run(rx_command, shutdown.clone());
+
+    let state = AppState { tx_command };
     let router = axum::Router::new()
         .route("/load", post(load))
         .route("/start", post(start))
@@ -54,18 +50,18 @@ async fn main() -> anyhow::Result<()> {
 }
 
 enum Command {
-    Load(schema::Task, CancellationToken),
+    Load(schema::Task, oneshot::Sender<()>),
     Start,
     Scrape(oneshot::Sender<schema::Scrape>),
     Stop(oneshot::Sender<schema::Stopped>),
 }
 
-async fn run(mut rx_command: Receiver<Command>) -> anyhow::Result<()> {
+async fn run(mut rx_command: Receiver<Command>, shutdown: CancellationToken) -> anyhow::Result<()> {
     let Some(Command::Load(task, tx)) = rx_command.recv().await else {
         anyhow::bail!("first command must be load");
     };
     let task = Task::load(task).await?;
-    tx.cancel();
+    let _ = tx.send(());
 
     match rx_command.recv().await {
         Some(Command::Stop(tx)) => {
@@ -75,7 +71,6 @@ async fn run(mut rx_command: Receiver<Command>) -> anyhow::Result<()> {
         Some(Command::Start) => {}
         _ => anyhow::bail!("second command must be start"),
     }
-    let stop = CancellationToken::new();
     let scrape_state = task.scrape_state();
     let watch = async {
         loop {
@@ -84,31 +79,30 @@ async fn run(mut rx_command: Receiver<Command>) -> anyhow::Result<()> {
                     let _ = tx_scrape.send(scrape_state.scrape()?);
                 }
                 Some(Command::Stop(tx_stopped)) => {
-                    stop.cancel();
+                    shutdown.cancel();
                     break Ok(tx_stopped);
                 }
                 _ => anyhow::bail!("unexpected command"),
             }
         }
     };
-    let (tx_stopped, stopped) = try_join!(watch, task.run(stop.clone()))?;
+    let (tx_stopped, stopped) = try_join!(watch, task.run(shutdown.clone()))?;
     let _ = tx_stopped.send(stopped);
     Ok(())
 }
 
 struct AppState {
-    shutdown: CancellationToken,
     tx_command: Sender<Command>,
-    wait_load: CancellationToken,
 }
 
 async fn load(State(state): State<Arc<AppState>>, Json(task): Json<schema::Task>) {
+    let (tx, rx) = oneshot::channel();
     state
         .tx_command
-        .send(Command::Load(task, state.wait_load.clone()))
+        .send(Command::Load(task, tx))
         .await
         .unwrap();
-    state.wait_load.cancelled().await;
+    rx.await.unwrap();
 }
 
 async fn start(State(state): State<Arc<AppState>>) {
@@ -122,7 +116,6 @@ async fn scrape(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 }
 
 async fn stop(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    state.shutdown.cancel();
     let (tx, rx) = oneshot::channel();
     state.tx_command.send(Command::Stop(tx)).await.unwrap();
     Json(rx.await.unwrap())

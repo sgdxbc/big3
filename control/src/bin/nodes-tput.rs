@@ -20,37 +20,40 @@ fn num_nodes(num_faulty_nodes: u16) -> u16 {
     3 * num_faulty_nodes + 1
 }
 
-const CLIENT_RATE: f64 = 25_000.0;
+#[derive(Debug, Clone, Copy)]
+enum Storage {
+    Full,
+    Big,
+}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cluster = Cluster::from_terraform().await?;
-    let agg_client_rate = CLIENT_RATE * cluster.clients.len() as f64;
 
-    let mut data = String::from("num_faulty_nodes,tput,p50,p95,p99,_notes\n");
+    let mut data = String::from("storage,num_faulty_nodes,tput,p50,p95,p99,_notes\n");
     writeln!(
         &mut data,
-        ",,,,,\"num of keys = {}, read ratio = {}\"",
+        ",,,,,,\"num of keys = {}, read ratio = {}\"",
         NUM_KEYS, READ_RATIO
     )?;
-    for num_faulty_nodes in [1, 3, 8, 13] {
-        println!("running with num_faulty_nodes = {}", num_faulty_nodes);
-        let run = run(&cluster, num_faulty_nodes).await?;
-        anyhow::ensure!(
-            run.tput < agg_client_rate * 0.8,
-            "throughput {} exceeds client rate {} * 0.8",
-            run.tput,
-            agg_client_rate
-        );
-        writeln!(
-            &mut data,
-            "{},{},{},{},{}",
-            num_faulty_nodes,
-            run.tput,
-            run.p50.as_secs_f64(),
-            run.p95.as_secs_f64(),
-            run.p99.as_secs_f64(),
-        )?;
+    for storage in [Storage::Full, Storage::Big] {
+        for num_faulty_nodes in [1, 3, 8, 13, 18, 23] {
+            println!(
+                "running {:?} with num_faulty_nodes = {}",
+                storage, num_faulty_nodes
+            );
+            let run = run(&cluster, storage, num_faulty_nodes).await?;
+            writeln!(
+                &mut data,
+                "{:?},{},{},{},{},{}",
+                storage,
+                num_faulty_nodes,
+                run.tput,
+                run.p50.as_secs_f64(),
+                run.p95.as_secs_f64(),
+                run.p99.as_secs_f64(),
+            )?;
+        }
     }
 
     create_dir_all("data").await?;
@@ -66,7 +69,7 @@ struct Run {
     p99: Duration,
 }
 
-async fn run(cluster: &Cluster, num_faulty_nodes: u16) -> anyhow::Result<Run> {
+async fn run(cluster: &Cluster, storage: Storage, num_faulty_nodes: u16) -> anyhow::Result<Run> {
     let endpoints = run_endpoints(
         [
             &cluster.servers[..num_nodes(num_faulty_nodes) as usize],
@@ -77,6 +80,7 @@ async fn run(cluster: &Cluster, num_faulty_nodes: u16) -> anyhow::Result<Run> {
     let workload = run_workload(
         &cluster.servers[..num_nodes(num_faulty_nodes) as usize],
         &cluster.clients,
+        storage,
         num_faulty_nodes,
     );
     let workload = async {
@@ -91,6 +95,7 @@ async fn run(cluster: &Cluster, num_faulty_nodes: u16) -> anyhow::Result<Run> {
 async fn run_workload(
     server_instances: &[Instance],
     client_instances: &[Instance],
+    storage: Storage,
     num_faulty_nodes: u16,
 ) -> anyhow::Result<Run> {
     let control_client = Client::new();
@@ -115,7 +120,13 @@ async fn run_workload(
                     num_faulty_nodes,
                 },
             };
-            (instance, Task::Full(schema))
+            (
+                instance,
+                match storage {
+                    Storage::Full => Task::Full(schema),
+                    Storage::Big => Task::Big(schema),
+                },
+            )
         });
     load_all(replica_items, control_client.clone()).await?;
 
@@ -130,7 +141,7 @@ async fn run_workload(
             num_faulty_nodes,
         },
         worker_config: big_schema::ClientWorkerConfig {
-            rate: CLIENT_RATE,
+            num_concurrent: 1,
             num_keys: NUM_KEYS,
             read_ratio: READ_RATIO,
         },
@@ -145,7 +156,7 @@ async fn run_workload(
     sleep(Duration::from_secs(10)).await;
     println!("scrape and discard warmup data");
     scrape_all(client_instances, control_client.clone()).await?;
-    sleep(Duration::from_secs(30)).await;
+    sleep(Duration::from_secs(10)).await;
     println!("scrape measured data");
     let run = scrape_all(client_instances, control_client.clone()).await?;
 

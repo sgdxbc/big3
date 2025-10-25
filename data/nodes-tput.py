@@ -9,12 +9,15 @@ df = (
 print(df)
 
 fig, ax = plt.subplots()
-ax.plot(
-    df["num_nodes"],
-    df["tput"],
-    marker="o",
-    label="Throughput",
-)
+for storage in df["storage"].unique():
+    storage_df = df.filter(pl.col("storage") == storage)
+    ax.plot(
+        storage_df["num_nodes"],
+        storage_df["tput"],
+        marker="o",
+        label=storage,
+    )
+ax.legend()
 ax.set_xlim(0, None)
 ax.set_ylim(0, None)
 ax.set_xlabel("Number of Nodes")

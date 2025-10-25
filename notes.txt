@@ -15,3 +15,25 @@ There are two approaches. One is to add the back pressure, the other is to switc
 For the first approach, I need the consensus to be aware of the progress of execution. I need to set up signals that "permit to execute more", and consensus decides the timing to propose blocks according to not only how itself is going but also how execution is going. Alternative to signal I can also just implement consensus and execution as one big state machine, so consensus can directly query execution's progress from the shared state, but that is a bad idea obviously.
 
 For the second approach, I need to implement "lossless" replication i.e. all transactions are executed without the need of retrying, so the latency will not be affected by the choice of retry timeout. This means the Bullshark implementation must commit every proposed blocks, without either giving up certify them or garbage collect the pending-delivery blocks (either certified or not). I have currently done this, but the first approach seems to make more sense after I came up with it. So I will need to try it instead.
+
+---
+
+To be verified, but one thing full-fledge replication different from atomic broadcast is f+1 replies collection. The client side is not just blind sender. The latency is not measured just until blocks are outputted. It is crucial to design correct clients as well as replicas so the latency of open loop system is not built up on client side either.
+
+Currently, the clients can generate 50k to even 100k of requests/second when working with 4 replicas, but can only safely generate 5k when working with 70 of them. The latency will constantly goes up if target rate is higher. Keep a 5k per client rate while increase the number of client does not increase latency, so it's client implementation problem.
+
+---
+
+The prefill of 100G state has been stuck for several times, while 1G demo state works well. The problem is that 2 replica instances out of 70 did not properly mount their 300G SSD to /tmp (because some mysterious device busy reason), so the /tmp folder remains mounted under system disk. The remaining space of the 8G system disk is sufficient for 1G state but exhausted and the prefilling silently stuck with 100G prefilling.
+
+---
+
+The problem when combining Narwhal, RocksDB and large number of nodes. RocksDB demands larger blocks, because that produces largely batched multi_get, results in higher (SSD read) concurrency and higher throughput. However, in Narwhal, the blocks come from every node. With more nodes, there must be more blocks. If you force same number of blocks, you must increase block time, results in unaffordable latency. As the throughput bottleneck-ed by the execution (i.e. RocksDB), it must substantially apply back pressure to Narwhal so that the ordering throughput (in the term of transactions/second) is capped at RocksDB's capacity as the number of nodes grows, or the latency will not converge. Bounded transactions/second + increasing blocks/second = smaller block => poorer RocksDB performance. Thus, performance is not scalable.
+
+---
+
+Now I start to consider sharded blockchain and cross shard transactions, which may inevitably force the whole system to go (back to) close loop. The root problem is that for any participant in a distributed transaction, it cannot locally figure out whether the participated transactions will be even finished (either committed or aborted) or not if the (client) coordinator may abandon the transaction orchestration at any point and the other participants may (or may not) discard the same transaction sent to them.
+
+I don't find a good way to deal with distributed transactions with current style of one-shot, never retry clients. Any potential solution involves some form of "lossless" where either clients or replicas (or both) would "insist" on the initiated transactions. If so, fixed sending rate will probably unfit, and we basically have to go close loop.
+
+On the other hand, going close loop, which requires replicas to commit every proposed blocks, could be easier than what I previously thought. The key is to shutdown f (faulty) nodes, so only minimum number of the blocks required to progress is proposed. I also need to adjust Bullshark's leader blocks to avoid long period without leader blocks. Other than that, we can only see what's going wrong.

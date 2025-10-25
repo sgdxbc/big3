@@ -1,9 +1,14 @@
-use std::net::IpAddr;
+use std::{collections::HashSet, net::IpAddr};
 
 use big_schema::{Stopped, Task};
 use reqwest::Client;
 use serde::{Deserialize, de::DeserializeOwned};
-use tokio::{fs, process::Command, task::JoinSet};
+use tokio::{
+    fs,
+    process::Command,
+    task::JoinSet,
+    time::{Instant, timeout_at},
+};
 
 pub mod configs;
 
@@ -110,13 +115,28 @@ pub async fn load_all(
     control_client: Client,
 ) -> anyhow::Result<()> {
     let mut tasks = JoinSet::new();
+    let mut loading_hosts = HashSet::new();
     for (instance, task) in items {
+        loading_hosts.insert(instance.public_dns.clone());
         let client = control_client.clone();
         let url = format!("http://{}:3000/load", instance.public_dns);
         tasks.spawn(async move { client.post(url).json(&task).send().await });
     }
-    while let Some(result) = tasks.join_next().await {
-        result??.error_for_status()?;
+    let mut deadline = Instant::now() + std::time::Duration::from_secs(60);
+    let mut i = 0;
+    loop {
+        match timeout_at(deadline, tasks.join_next()).await {
+            Ok(None) => break,
+            Ok(Some(result)) => {
+                let resp = result??.error_for_status()?;
+                loading_hosts.remove(resp.url().host_str().unwrap());
+            }
+            Err(_) => {
+                println!("still loading after {i} minutes: {loading_hosts:?}");
+                deadline += std::time::Duration::from_secs(60);
+                i += 1;
+            }
+        }
     }
     Ok(())
 }

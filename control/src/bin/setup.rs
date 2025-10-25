@@ -21,8 +21,8 @@ async fn main() -> anyhow::Result<()> {
 async fn setup_build(instance: &Instance) -> anyhow::Result<()> {
     let status = instance.ssh().arg([
         "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- --profile minimal -y",
-        "sudo apt-get update",
-        "sudo apt-get install -y clang make pkg-config liburing-dev"
+        "sudo apt-get -q update",
+        "sudo apt-get -q install -y clang make pkg-config liburing-dev"
     ].join(" && ")).status().await?;
     anyhow::ensure!(status.success());
     Ok(())
@@ -43,7 +43,11 @@ async fn setup_storage(instance: &Instance) -> anyhow::Result<()> {
             )
             .status()
             .await?;
-        anyhow::ensure!(status.success());
+        anyhow::ensure!(
+            status.success(),
+            "{} storage setup failed",
+            instance.public_dns
+        );
     }
     Ok(())
 }
@@ -51,7 +55,7 @@ async fn setup_storage(instance: &Instance) -> anyhow::Result<()> {
 async fn setup_deps(instance: &Instance) -> anyhow::Result<()> {
     let status = instance
         .ssh()
-        .arg("sudo apt-get update && sudo apt-get install -y liburing2")
+        .arg("sudo apt-get -qq update && sudo apt-get -qq install -y liburing2")
         .status()
         .await?;
     anyhow::ensure!(status.success());

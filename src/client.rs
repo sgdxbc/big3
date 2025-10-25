@@ -30,12 +30,12 @@ pub struct Client<C> {
     id: ClientId,
 
     seq: ClientSeq,
-    ongoing: BTreeMap<ClientSeq, Ongoing>,
+    inflights: BTreeMap<ClientSeq, Inflight>,
 
     metrics: ClientMetrics,
 }
 
-struct Ongoing {
+struct Inflight {
     replies: HashMap<NodeIndex, Vec<u8>>,
     tx_response: oneshot::Sender<Vec<u8>>,
     // save command if resending
@@ -53,12 +53,10 @@ impl<C> Client<C> {
             config,
             id,
             seq: 0,
-            ongoing: Default::default(),
+            inflights: Default::default(),
             metrics: Default::default(),
         }
     }
-
-    const SEQ_WINDOW: u64 = 1_000_000;
 }
 
 impl<C: ClientContext> Client<C> {
@@ -73,33 +71,31 @@ impl<C: ClientContext> Client<C> {
         self.context
             .send(rng().random_range(0..self.config.num_nodes), request);
 
-        self.ongoing.insert(
+        self.inflights.insert(
             self.seq,
-            Ongoing {
+            Inflight {
                 replies: Default::default(),
                 tx_response,
             },
         );
-        if self.seq >= Self::SEQ_WINDOW {
-            self.ongoing = self.ongoing.split_off(&(self.seq - Self::SEQ_WINDOW));
-        }
     }
 
     pub fn on_message(&mut self, message: Reply) {
-        let Some(ongoing) = self.ongoing.get_mut(&message.client_seq) else {
+        let Some(inflight) = self.inflights.get_mut(&message.client_seq) else {
             return;
         };
-        ongoing
+        inflight
             .replies
             .insert(message.node_index, message.res.clone());
-        if ongoing
-            .replies
-            .values()
-            .filter(|&res| res == &message.res)
-            .count()
-            == (self.config.num_faulty_nodes + 1) as usize
+        if inflight.replies.len() > self.config.num_faulty_nodes as usize
+            && inflight
+                .replies
+                .values()
+                .filter(|&res| res == &message.res)
+                .count()
+                == (self.config.num_faulty_nodes + 1) as usize
         {
-            let ongoing = self.ongoing.remove(&message.client_seq).unwrap();
+            let ongoing = self.inflights.remove(&message.client_seq).unwrap();
             let _ = ongoing.tx_response.send(message.res);
             self.metrics.commit_count += 1;
         }
@@ -121,10 +117,8 @@ pub struct ClientWorker<C> {
     pub context: C,
     config: ClientWorkerConfig,
 
-    start: Instant,
-    invoke_count: u64,
     zipfian: ScrambledZipfian,
-    ongoing: HashMap<InvokeId, Instant>,
+    inflights: HashMap<InvokeId, Instant>,
     pub records: Arc<Mutex<Records>>,
 }
 
@@ -139,10 +133,8 @@ impl<C> ClientWorker<C> {
         Self {
             context,
             config,
-            start: Instant::now(), // placeholder
-            invoke_count: 0,
             zipfian,
-            ongoing: Default::default(),
+            inflights: Default::default(),
             records: Arc::new(Mutex::new(Records {
                 start: Instant::now(),
                 latency_histogram: Histogram::new(3).unwrap(),
@@ -153,23 +145,17 @@ impl<C> ClientWorker<C> {
 
 impl<C: ClientWorkerContext> ClientWorker<C> {
     pub fn start(&mut self) {
-        self.start = Instant::now();
-    }
-
-    pub fn on_tick(&mut self) {
-        let elapsed = self.start.elapsed().as_secs_f64();
-        let target_invoke_count = (self.config.rate * elapsed).floor() as u64;
-        while self.invoke_count < target_invoke_count {
+        for _ in 0..self.config.num_concurrent {
             self.invoke();
-            self.invoke_count += 1;
         }
     }
 
     pub fn on_invoke_response(&mut self, invoke_id: InvokeId, _res: Vec<u8>) {
-        let Some(start) = self.ongoing.remove(&invoke_id) else {
+        let Some(start) = self.inflights.remove(&invoke_id) else {
             unimplemented!()
         };
         self.records.lock().unwrap().latency_histogram += start.elapsed().as_nanos() as u64;
+        self.invoke();
     }
 
     fn invoke(&mut self) {
@@ -185,6 +171,6 @@ impl<C: ClientWorkerContext> ClientWorker<C> {
         };
         let command = bincode::encode_to_vec(&op, bincode::config::standard()).unwrap();
         let invoke_id = self.context.invoke(command);
-        self.ongoing.insert(invoke_id, Instant::now());
+        self.inflights.insert(invoke_id, Instant::now());
     }
 }

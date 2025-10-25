@@ -97,7 +97,7 @@ impl ClientWorkerTask {
         loop {
             select! {
                 _ = ticker.tick() => {
-                    self.state.on_tick();
+                    // self.state.on_tick();
                 }
                 Some((seq, res)) = self.channels.rx_invoke_response.recv() => {
                     self.state.on_invoke_response(seq, res);
