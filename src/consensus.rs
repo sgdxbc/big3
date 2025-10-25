@@ -1,14 +1,13 @@
 use std::{
     collections::{HashMap, HashSet},
-    convert::identity,
     fmt::Debug,
     mem::take,
-    time::{Duration, Instant},
+    time::Instant,
 };
 
 use bincode::{Decode, Encode};
 use hdrhistogram::Histogram;
-use log::{debug, info, trace, warn};
+use log::{info, trace, warn};
 use sha2::{Digest as _, Sha256};
 
 use crate::types::{NodeIndex, Request};
@@ -52,7 +51,10 @@ impl From<&crate::schema::ReplicaConfig> for BullsharkConfig {
 
 impl BullsharkConfig {
     fn is_leader(&self, node_index: NodeIndex, round: Round) -> bool {
-        round % 2 == 0 && node_index == (round / 2 % self.num_node as Round) as NodeIndex
+        // round % 2 == 0 && node_index == (round / 2 % self.num_node as Round) as NodeIndex
+        // with 2f+1 nodes, the vanilla leader selection will result in long periods without leader,
+        // resulting in fluctuating load to execution layer
+        round % 2 == 0 && node_index == 0
     }
 }
 
@@ -176,8 +178,6 @@ impl<C> Bullshark<C> {
         }
     }
 
-    const MAX_POOL_SIZE: usize = 100_000;
-    const POOL_LATENCY_BUDGET: Duration = Duration::from_millis(100);
     const MAX_BLOCK_TXNS: usize = 5_000;
 }
 
@@ -188,17 +188,6 @@ impl<C: BullsharkContext> Bullshark<C> {
 
     pub fn on_request(&mut self, at: Instant, request: Request) {
         self.txn_pool.push((at, request));
-        if self.txn_pool.len() >= Self::MAX_POOL_SIZE {
-            self.prune_txn_pool();
-        }
-    }
-
-    fn prune_txn_pool(&mut self) {
-        let pos = self
-            .txn_pool
-            .binary_search_by_key(&(Instant::now() - Self::POOL_LATENCY_BUDGET), |&(at, _)| at)
-            .unwrap_or_else(identity);
-        self.txn_pool.drain(..pos);
     }
 
     pub fn on_message(&mut self, message: message::Message) {
@@ -289,7 +278,7 @@ impl<C: BullsharkContext> Bullshark<C> {
             self.txn_pool.len()
         );
         if let Some(block_hash) = self.block_hash {
-            debug!("[{}] interrupted proposal {block_hash:?}", self.node_index);
+            warn!("[{}] interrupted proposal {block_hash:?}", self.node_index);
             self.block_oks.clear()
         }
         let certs = if self.round == 0 {
@@ -298,19 +287,15 @@ impl<C: BullsharkContext> Bullshark<C> {
             self.certs.remove(&(self.round - 1)).unwrap()
         };
         assert!(certs.iter().all(|(_, cert)| cert.round == self.round - 1));
-        self.prune_txn_pool();
         let network_block = message::Block {
             round: self.round,
             creator_index: self.node_index,
             certs: certs.into_values().collect(),
-            txns: {
-                let skip_count = self.txn_pool.len().saturating_sub(Self::MAX_BLOCK_TXNS);
-                self.txn_pool
-                    .drain(..)
-                    .skip(skip_count)
-                    .map(|(_, req)| req)
-                    .collect()
-            },
+            txns: self
+                .txn_pool
+                .drain(..Self::MAX_BLOCK_TXNS.min(self.txn_pool.len()))
+                .map(|(_, req)| req)
+                .collect(),
         };
         if !network_block.txns.is_empty() {
             self.metrics.proposed_block_size += network_block.txns.len() as u64;
@@ -326,7 +311,7 @@ impl<C: BullsharkContext> Bullshark<C> {
 
     fn validate(&mut self, block: &Block) {
         if block.round < self.round {
-            trace!(
+            warn!(
                 "[{}] ignoring old block for round {} < {}",
                 self.node_index, block.round, self.round
             );

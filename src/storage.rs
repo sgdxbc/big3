@@ -102,6 +102,7 @@ pub trait BigStorageContext {
 
 pub struct BigStorageConfig {
     num_nodes: NodeIndex,
+    num_faulty_nodes: NodeIndex,
     num_stripes: u32,
     num_secondary_nodes: NodeIndex,
 }
@@ -110,6 +111,7 @@ impl From<&schema::ReplicaConfig> for BigStorageConfig {
     fn from(value: &schema::ReplicaConfig) -> Self {
         Self {
             num_nodes: value.num_nodes,
+            num_faulty_nodes: value.num_faulty_nodes,
             num_stripes: 100,
             num_secondary_nodes: 7,
         }
@@ -118,7 +120,7 @@ impl From<&schema::ReplicaConfig> for BigStorageConfig {
 
 impl BigStorageConfig {
     fn num_shards(&self) -> u32 {
-        self.num_stripes * self.num_nodes as u32
+        self.num_stripes * (self.num_nodes - self.num_faulty_nodes) as u32
     }
 
     fn shard_of_key(&self, key: &[u8]) -> u32 {
@@ -127,7 +129,7 @@ impl BigStorageConfig {
     }
 
     fn primary_node_of_shard(&self, shard: u32) -> NodeIndex {
-        (shard % self.num_nodes as u32) as _
+        (shard % (self.num_nodes - self.num_faulty_nodes) as u32) as _
     }
 
     fn secondary_nodes_of_shard(&self, shard: u32) -> impl Iterator<Item = NodeIndex> {
@@ -156,8 +158,8 @@ pub struct BigStorage<C> {
 }
 
 struct FetchingState {
-    keys: Vec<Vec<u8>>,
-    backend: Option<(FetchId, Vec<Vec<u8>>)>,
+    key_shards: Vec<u32>,
+    backend: Option<FetchId>,
     node_states: HashMap<NodeIndex, Values>,
     tx_response: oneshot::Sender<Vec<Option<Vec<u8>>>>,
 }
@@ -194,19 +196,25 @@ impl<C: BigStorageContext> BigStorage<C> {
     pub fn invoke(&mut self, op: StorageOp) {
         match op {
             StorageOp::Fetch(keys, tx_response) => {
-                let backend_keys = keys
+                let key_shards: Vec<u32> = keys
                     .iter()
-                    .filter(|key| {
-                        let shard = self.config.shard_of_key(key);
-                        self.primary_shards.contains(&shard)
-                            || self.secondary_shards.contains(&shard)
+                    .map(|key| self.config.shard_of_key(key))
+                    .collect();
+                let backend_keys = keys
+                    .into_iter()
+                    .zip(&key_shards)
+                    .filter_map(|(key, shard)| {
+                        if self.primary_shards.contains(shard) {
+                            Some(key)
+                        } else {
+                            None
+                        }
                     })
-                    .cloned()
-                    .collect::<Vec<_>>();
-                let fetch_id = self.context.fetch(backend_keys.clone());
+                    .collect();
+                let fetch_id = self.context.fetch(backend_keys);
                 let fetching = FetchingState {
-                    keys,
-                    backend: Some((fetch_id, backend_keys)),
+                    key_shards,
+                    backend: Some(fetch_id),
                     node_states: Default::default(),
                     tx_response,
                 };
@@ -215,12 +223,12 @@ impl<C: BigStorageContext> BigStorage<C> {
 
                 let mut reorder_inserts = Vec::new();
                 for (&node_index, queue) in &mut self.reordered_node_states {
-                    if let Some(state) = queue.pop_front() {
-                        reorder_inserts.push((node_index, state));
+                    if let Some(values) = queue.pop_front() {
+                        reorder_inserts.push((node_index, values));
                     }
                 }
-                for (node_index, state) in reorder_inserts {
-                    self.insert_state(node_index, state);
+                for (node_index, values) in reorder_inserts {
+                    self.insert_state(node_index, values);
                 }
             }
             StorageOp::Post(mut updates) => {
@@ -245,18 +253,11 @@ impl<C: BigStorageContext> BigStorage<C> {
         let Some(fetching) = &mut self.fetching else {
             unimplemented!()
         };
-        let (expected_fetch_id, keys) = fetching.backend.take().unwrap();
+        let expected_fetch_id = fetching.backend.take().unwrap();
         assert_eq!(fetch_id, expected_fetch_id);
 
-        let mut pushed_values = Vec::new();
-        for (key, value) in keys.iter().zip(&values) {
-            let shard = self.config.shard_of_key(key);
-            if self.primary_shards.contains(&shard) {
-                pushed_values.push(value.clone());
-            }
-        }
         let push_state = message::PushState {
-            values: pushed_values,
+            values: values.clone(),
             node_index: self.node_index,
         };
         self.context
@@ -282,7 +283,9 @@ impl<C: BigStorageContext> BigStorage<C> {
         }
 
         fetching.node_states.insert(node_index, values);
-        if fetching.node_states.len() != self.config.num_nodes as usize {
+        if fetching.node_states.len()
+            != (self.config.num_nodes - self.config.num_faulty_nodes) as usize
+        {
             return;
         }
 
@@ -290,14 +293,8 @@ impl<C: BigStorageContext> BigStorage<C> {
         let fetching = self.fetching.take().unwrap();
         let mut values = Vec::new();
         let mut node_index = vec![0; self.config.num_nodes as usize];
-        for key in fetching.keys {
-            let shard = self.config.shard_of_key(&key);
-            let i =
-                if self.primary_shards.contains(&shard) || self.secondary_shards.contains(&shard) {
-                    self.node_index
-                } else {
-                    self.config.primary_node_of_shard(shard)
-                };
+        for shard in fetching.key_shards {
+            let i = self.config.primary_node_of_shard(shard);
             let value = fetching.node_states[&i][node_index[i as usize]].clone();
             node_index[i as usize] += 1;
             values.push(value);

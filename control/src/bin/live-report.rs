@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use big_control::{
     Cluster, Instance,
-    configs::{NUM_FAULTY_NODES, NUM_KEYS, READ_RATIO, num_nodes},
+    configs::{NUM_FAULTY_NODES, NUM_KEYS, READ_RATIO, num_nodes, num_running_nodes},
     load_all, run_endpoints, stop_all,
 };
 use big_schema::{Scrape, Task};
@@ -21,9 +21,17 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn run(cluster: &Cluster) -> anyhow::Result<()> {
-    let endpoints =
-        run_endpoints([&cluster.servers[..num_nodes() as usize], &cluster.clients].concat());
-    let workload = run_workload(&cluster.servers[..num_nodes() as usize], &cluster.clients);
+    let endpoints = run_endpoints(
+        [
+            &cluster.servers[..num_running_nodes() as usize],
+            &cluster.clients,
+        ]
+        .concat(),
+    );
+    let workload = run_workload(
+        &cluster.servers[..num_running_nodes() as usize],
+        &cluster.clients,
+    );
     let workload = async {
         let result = workload.await;
         sleep(Duration::from_millis(2000)).await;

@@ -20,6 +20,10 @@ fn num_nodes(num_faulty_nodes: u16) -> u16 {
     3 * num_faulty_nodes + 1
 }
 
+fn num_running_nodes(num_faulty_nodes: u16) -> u16 {
+    2 * num_faulty_nodes + 1
+}
+
 #[derive(Debug, Clone, Copy)]
 enum Storage {
     Full,
@@ -72,13 +76,13 @@ struct Run {
 async fn run(cluster: &Cluster, storage: Storage, num_faulty_nodes: u16) -> anyhow::Result<Run> {
     let endpoints = run_endpoints(
         [
-            &cluster.servers[..num_nodes(num_faulty_nodes) as usize],
+            &cluster.servers[..num_running_nodes(num_faulty_nodes) as usize],
             &cluster.clients,
         ]
         .concat(),
     );
     let workload = run_workload(
-        &cluster.servers[..num_nodes(num_faulty_nodes) as usize],
+        &cluster.servers[..num_running_nodes(num_faulty_nodes) as usize],
         &cluster.clients,
         storage,
         num_faulty_nodes,
