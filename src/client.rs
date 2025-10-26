@@ -68,8 +68,10 @@ impl<C: ClientContext> Client<C> {
             client_seq: self.seq,
             command,
         };
-        self.context
-            .send(rng().random_range(0..self.config.num_nodes), request);
+        self.context.send(
+            rng().random_range(0..(self.config.num_nodes - self.config.num_faulty_nodes)),
+            request,
+        );
 
         self.inflights.insert(
             self.seq,

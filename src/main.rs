@@ -65,6 +65,7 @@ async fn run(mut rx_command: Receiver<Command>, shutdown: CancellationToken) -> 
 
     match rx_command.recv().await {
         Some(Command::Stop(tx)) => {
+            shutdown.cancel();
             let _ = tx.send(schema::Stopped::BeforeStart);
             return Ok(());
         }
