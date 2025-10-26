@@ -2,7 +2,10 @@ use std::time::Duration;
 
 use big_control::{
     Cluster, Instance,
-    configs::{NUM_FAULTY_NODES, NUM_KEYS, READ_RATIO, num_nodes, num_running_nodes},
+    configs::{
+        NUM_CONCURRENT, NUM_FAULTY_NODES, NUM_KEYS, READ_RATIO, STORAGE, Storage, num_nodes,
+        num_running_nodes,
+    },
     load_all, run_endpoints, stop_all,
 };
 use big_schema::{Scrape, Task};
@@ -67,8 +70,13 @@ async fn run_workload(
                     num_faulty_nodes: NUM_FAULTY_NODES,
                 },
             };
-            (instance, Task::Full(schema))
-            // (instance, Task::Big(schema))
+            (
+                instance,
+                match STORAGE {
+                    Storage::Full => Task::Full(schema),
+                    Storage::Big => Task::Big(schema),
+                },
+            )
         });
     load_all(replica_items, control_client.clone()).await?;
 
@@ -83,7 +91,7 @@ async fn run_workload(
             num_faulty_nodes: NUM_FAULTY_NODES,
         },
         worker_config: big_schema::ClientWorkerConfig {
-            num_concurrent: 50_000,
+            num_concurrent: NUM_CONCURRENT,
             num_keys: NUM_KEYS,
             read_ratio: READ_RATIO,
         },

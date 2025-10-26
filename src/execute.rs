@@ -78,18 +78,6 @@ impl<C> Execute<C> {
 
 impl<C: ExecuteContext> Execute<C> {
     pub fn on_block(&mut self, blocks: Vec<Block>, tx_response: oneshot::Sender<()>) {
-        // trace!(
-        //     "node {} executing block ({}, {}) size {}",
-        //     self.index,
-        //     blocks.round,
-        //     blocks.node_index,
-        //     blocks.txns.len()
-        // );
-        // if blocks.txns.is_empty() {
-        //     let _ = tx_response.send(());
-        //     return;
-        // }
-
         if self.working.is_some() {
             self.pending_blocks.push_back((blocks, tx_response));
             return;
@@ -127,6 +115,7 @@ impl<C: ExecuteContext> Execute<C> {
         }
 
         working.fetching = fetching_keys.into_iter().collect();
+        working.fetching.sort_unstable();
         let keys = working
             .fetching
             .iter()
@@ -135,6 +124,7 @@ impl<C: ExecuteContext> Execute<C> {
         working.fetch_id = self.context.fetch(keys);
         let replaced = self.working.replace(working);
         assert!(replaced.is_none());
+        // self.commit_blocks(working, Default::default())
     }
 
     pub fn on_fetch_response(&mut self, fetch_id: FetchId, values: Vec<Option<Vec<u8>>>) {

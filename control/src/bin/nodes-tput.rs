@@ -2,7 +2,7 @@ use std::{fmt::Write as _, time::Duration};
 
 use big_control::{
     Cluster, Instance,
-    configs::{NUM_KEYS, READ_RATIO},
+    configs::{NUM_KEYS, READ_RATIO, Storage},
     load_all, run_endpoints, stop_all,
 };
 use big_schema::{Scrape, Task};
@@ -24,12 +24,6 @@ fn num_running_nodes(num_faulty_nodes: u16) -> u16 {
     2 * num_faulty_nodes + 1
 }
 
-#[derive(Debug, Clone, Copy)]
-enum Storage {
-    Full,
-    Big,
-}
-
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cluster = Cluster::from_terraform().await?;
@@ -41,7 +35,7 @@ async fn main() -> anyhow::Result<()> {
         NUM_KEYS, READ_RATIO
     )?;
     for storage in [Storage::Full, Storage::Big] {
-        for num_faulty_nodes in [1, 3, 8, 13, 18, 23] {
+        for num_faulty_nodes in [1, 3, 8, 13, 18, 23, 28, 33] {
             println!(
                 "running {:?} with num_faulty_nodes = {}",
                 storage, num_faulty_nodes
@@ -145,7 +139,10 @@ async fn run_workload(
             num_faulty_nodes,
         },
         worker_config: big_schema::ClientWorkerConfig {
-            num_concurrent: 1,
+            num_concurrent: match storage {
+                Storage::Full => 5_000,
+                Storage::Big => 10_000,
+            },
             num_keys: NUM_KEYS,
             read_ratio: READ_RATIO,
         },
@@ -160,7 +157,7 @@ async fn run_workload(
     sleep(Duration::from_secs(10)).await;
     println!("scrape and discard warmup data");
     scrape_all(client_instances, control_client.clone()).await?;
-    sleep(Duration::from_secs(10)).await;
+    sleep(Duration::from_secs(30)).await;
     println!("scrape measured data");
     let run = scrape_all(client_instances, control_client.clone()).await?;
 

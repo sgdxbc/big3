@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{HashMap, HashSet},
     hash::{BuildHasher, BuildHasherDefault, DefaultHasher},
     time::Instant,
 };
@@ -91,11 +91,11 @@ impl PlainStorage {
     }
 }
 
-pub type FetchId = u64;
+pub type BackendFetchId = u64;
 
 pub trait BigStorageContext {
-    fn fetch(&mut self, keys: Vec<Vec<u8>>) -> FetchId;
-    fn post(&mut self, updates: Vec<(Vec<u8>, Option<Vec<u8>>)>);
+    fn backend_fetch(&mut self, keys: Vec<Vec<u8>>) -> BackendFetchId;
+    fn backend_post(&mut self, updates: Vec<(Vec<u8>, Option<Vec<u8>>)>);
 
     fn send_to_all(&mut self, message: message::Message);
 }
@@ -144,6 +144,7 @@ impl BigStorageConfig {
 }
 
 type Values = Vec<Option<Vec<u8>>>;
+type FetchSeq = u64;
 
 pub struct BigStorage<C> {
     context: C,
@@ -153,13 +154,14 @@ pub struct BigStorage<C> {
     primary_shards: HashSet<u32>,
     secondary_shards: HashSet<u32>,
 
+    fetch_seq: FetchSeq,
     fetching: Option<FetchingState>,
-    reordered_node_states: HashMap<NodeIndex, VecDeque<Values>>,
+    reordered_push_states: HashMap<FetchSeq, Vec<message::PushState>>,
 }
 
 struct FetchingState {
     key_shards: Vec<u32>,
-    backend: Option<FetchId>,
+    backend: Option<BackendFetchId>,
     node_states: HashMap<NodeIndex, Values>,
     tx_response: oneshot::Sender<Vec<Option<Vec<u8>>>>,
 }
@@ -186,7 +188,8 @@ impl<C> BigStorage<C> {
             node_index,
             primary_shards,
             secondary_shards,
-            reordered_node_states,
+            reordered_push_states: reordered_node_states,
+            fetch_seq: 0,
             fetching: None,
         }
     }
@@ -196,6 +199,9 @@ impl<C: BigStorageContext> BigStorage<C> {
     pub fn invoke(&mut self, op: StorageOp) {
         match op {
             StorageOp::Fetch(keys, tx_response) => {
+                self.fetch_seq += 1;
+
+                // keys.sort();
                 let key_shards: Vec<u32> = keys
                     .iter()
                     .map(|key| self.config.shard_of_key(key))
@@ -211,7 +217,7 @@ impl<C: BigStorageContext> BigStorage<C> {
                         }
                     })
                     .collect();
-                let fetch_id = self.context.fetch(backend_keys);
+                let fetch_id = self.context.backend_fetch(backend_keys);
                 let fetching = FetchingState {
                     key_shards,
                     backend: Some(fetch_id),
@@ -221,14 +227,10 @@ impl<C: BigStorageContext> BigStorage<C> {
                 let replaced = self.fetching.replace(fetching);
                 assert!(replaced.is_none(), "concurrent fetches are not supported");
 
-                let mut reorder_inserts = Vec::new();
-                for (&node_index, queue) in &mut self.reordered_node_states {
-                    if let Some(values) = queue.pop_front() {
-                        reorder_inserts.push((node_index, values));
+                if let Some(push_states) = self.reordered_push_states.remove(&self.fetch_seq) {
+                    for push_state in push_states {
+                        self.insert_state(push_state.node_index, push_state.values);
                     }
-                }
-                for (node_index, values) in reorder_inserts {
-                    self.insert_state(node_index, values);
                 }
             }
             StorageOp::Post(mut updates) => {
@@ -236,7 +238,7 @@ impl<C: BigStorageContext> BigStorage<C> {
                     let shard = self.config.shard_of_key(key);
                     self.primary_shards.contains(&shard) || self.secondary_shards.contains(&shard)
                 });
-                self.context.post(updates);
+                self.context.backend_post(updates);
             }
         }
     }
@@ -244,12 +246,21 @@ impl<C: BigStorageContext> BigStorage<C> {
     pub fn on_message(&mut self, message: message::Message) {
         match message {
             message::Message::PushState(push_state) => {
+                if push_state.fetch_seq > self.fetch_seq {
+                    self.reordered_push_states
+                        .entry(push_state.fetch_seq)
+                        .or_default()
+                        .push(push_state);
+                    return;
+                }
+                assert!(push_state.fetch_seq == self.fetch_seq);
+                assert!(self.fetching.is_some()); // not support duplicated push for now
                 self.insert_state(push_state.node_index, push_state.values);
             }
         }
     }
 
-    pub fn on_fetch_response(&mut self, fetch_id: FetchId, values: Vec<Option<Vec<u8>>>) {
+    pub fn on_fetch_response(&mut self, fetch_id: BackendFetchId, values: Vec<Option<Vec<u8>>>) {
         let Some(fetching) = &mut self.fetching else {
             unimplemented!()
         };
@@ -259,6 +270,7 @@ impl<C: BigStorageContext> BigStorage<C> {
         let push_state = message::PushState {
             values: values.clone(),
             node_index: self.node_index,
+            fetch_seq: self.fetch_seq,
         };
         self.context
             .send_to_all(message::Message::PushState(push_state));
@@ -267,21 +279,7 @@ impl<C: BigStorageContext> BigStorage<C> {
     }
 
     fn insert_state(&mut self, node_index: NodeIndex, values: Values) {
-        let Some(fetching) = &mut self.fetching else {
-            self.reordered_node_states
-                .entry(node_index)
-                .or_default()
-                .push_back(values);
-            return;
-        };
-        if fetching.node_states.contains_key(&node_index) {
-            self.reordered_node_states
-                .entry(node_index)
-                .or_default()
-                .push_back(values);
-            return;
-        }
-
+        let fetching = self.fetching.as_mut().unwrap();
         fetching.node_states.insert(node_index, values);
         if fetching.node_states.len()
             != (self.config.num_nodes - self.config.num_faulty_nodes) as usize
@@ -299,6 +297,12 @@ impl<C: BigStorageContext> BigStorage<C> {
             node_index[i as usize] += 1;
             values.push(value);
         }
+        assert!(
+            fetching
+                .node_states
+                .iter()
+                .all(|(i, values)| node_index[*i as usize] == values.len())
+        );
         let _ = fetching.tx_response.send(values);
     }
 }
@@ -309,7 +313,7 @@ mod message {
     use big_schema::NodeIndex;
     use bincode::{Decode, Encode};
 
-    use super::Values;
+    use super::{FetchSeq, Values};
 
     #[derive(Encode, Decode)]
     pub enum Message {
@@ -318,6 +322,7 @@ mod message {
 
     #[derive(Encode, Decode)]
     pub struct PushState {
+        pub fetch_seq: FetchSeq,
         pub values: Values,
         pub node_index: NodeIndex,
     }

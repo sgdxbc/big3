@@ -1,11 +1,11 @@
 use std::{
     collections::{BTreeMap, HashMap},
     sync::{Arc, Mutex},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use hdrhistogram::Histogram;
-use log::info;
+use log::{info, warn};
 use rand::{Rng, RngCore as _, rng};
 use tokio::sync::oneshot;
 
@@ -89,17 +89,23 @@ impl<C: ClientContext> Client<C> {
         inflight
             .replies
             .insert(message.node_index, message.res.clone());
-        if inflight.replies.len() > self.config.num_faulty_nodes as usize
-            && inflight
+        if inflight.replies.len() > self.config.num_faulty_nodes as usize {
+            if inflight
                 .replies
                 .values()
                 .filter(|&res| res == &message.res)
                 .count()
-                == (self.config.num_faulty_nodes + 1) as usize
-        {
-            let ongoing = self.inflights.remove(&message.client_seq).unwrap();
-            let _ = ongoing.tx_response.send(message.res);
-            self.metrics.commit_count += 1;
+                >= (self.config.num_faulty_nodes + 1) as usize
+            {
+                let ongoing = self.inflights.remove(&message.client_seq).unwrap();
+                let _ = ongoing.tx_response.send(message.res);
+                self.metrics.commit_count += 1;
+            } else {
+                warn!(
+                    "received non-matching replies for client_seq {}",
+                    message.client_seq
+                );
+            }
         }
     }
 
@@ -174,5 +180,19 @@ impl<C: ClientWorkerContext> ClientWorker<C> {
         let command = bincode::encode_to_vec(&op, bincode::config::standard()).unwrap();
         let invoke_id = self.context.invoke(command);
         self.inflights.insert(invoke_id, Instant::now());
+    }
+
+    pub fn log_metrics(&self) {
+        let inflight_latencies = self
+            .inflights
+            .values()
+            .map(|start| start.elapsed())
+            .collect::<Vec<_>>();
+        let mean = inflight_latencies.iter().sum::<Duration>() / (inflight_latencies.len() as u32);
+        info!(
+            "inflight count: {}, mean inflight latency: {:?}",
+            self.inflights.len(),
+            mean
+        );
     }
 }

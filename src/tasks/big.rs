@@ -3,7 +3,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     schema,
-    storage::{BigStorage, BigStorageContext, FetchId, StorageOp},
+    storage::{BigStorage, BigStorageContext, BackendFetchId, StorageOp},
 };
 
 use super::{
@@ -20,8 +20,8 @@ struct BigStorageChannels {
     tx_storage_op: UnboundedSender<StorageOp>,
     rx_storage_op: UnboundedReceiver<StorageOp>,
 
-    tx_fetch_response: Sender<(FetchId, Vec<Option<Vec<u8>>>)>,
-    rx_fetch_response: Receiver<(FetchId, Vec<Option<Vec<u8>>>)>,
+    tx_fetch_response: Sender<(BackendFetchId, Vec<Option<Vec<u8>>>)>,
+    rx_fetch_response: Receiver<(BackendFetchId, Vec<Option<Vec<u8>>>)>,
 
     tx_incoming_message: Sender<crate::storage::Message>,
     rx_incoming_message: Receiver<crate::storage::Message>,
@@ -31,13 +31,13 @@ struct BigStorageChannels {
 struct BigStorageHandle {
     storage: StorageHandle,
     receive: ReceiveHandle<crate::storage::Message>,
-    tx_fetch_response: Sender<(FetchId, Vec<Option<Vec<u8>>>)>,
+    tx_fetch_response: Sender<(BackendFetchId, Vec<Option<Vec<u8>>>)>,
 }
 
 impl BigStorageHandle {
     async fn fetch_response(
         &self,
-        fetch_id: FetchId,
+        fetch_id: BackendFetchId,
         response: Vec<Option<Vec<u8>>>,
     ) -> anyhow::Result<()> {
         self.tx_fetch_response.send((fetch_id, response)).await?;
@@ -116,7 +116,7 @@ struct BigStorageTaskContext {
     big: BigStorageHandle,
     network_interconnect: NetworkInterconnectHandle,
     storage: StorageHandle,
-    fetch_id: FetchId,
+    fetch_id: BackendFetchId,
 }
 
 impl BigStorageTaskContext {
@@ -135,7 +135,7 @@ impl BigStorageTaskContext {
 }
 
 impl BigStorageContext for BigStorageTaskContext {
-    fn fetch(&mut self, keys: Vec<Vec<u8>>) -> FetchId {
+    fn backend_fetch(&mut self, keys: Vec<Vec<u8>>) -> BackendFetchId {
         self.fetch_id += 1;
         let fetch_id = self.fetch_id;
         let big = self.big.clone();
@@ -148,7 +148,7 @@ impl BigStorageContext for BigStorageTaskContext {
         fetch_id
     }
 
-    fn post(&mut self, updates: Vec<(Vec<u8>, Option<Vec<u8>>)>) {
+    fn backend_post(&mut self, updates: Vec<(Vec<u8>, Option<Vec<u8>>)>) {
         let _ = self.storage.post(updates);
     }
 
