@@ -22,7 +22,7 @@ pub struct ReplicaTask {
 pub struct ClientTask {
     pub ips: Vec<IpAddr>,
     pub config: ClientConfig,
-    pub worker_config: ClientWorkerConfig,
+    pub workload_config: WorkloadConfig,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -62,7 +62,7 @@ pub struct ClientConfig {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-pub struct ClientWorkerConfig {
+pub struct WorkloadConfig {
     pub num_concurrent: u64,
     pub num_keys: u64,
     pub read_ratio: f64,

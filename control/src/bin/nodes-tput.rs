@@ -138,7 +138,7 @@ async fn run_workload(
             num_nodes: num_nodes(num_faulty_nodes),
             num_faulty_nodes,
         },
-        worker_config: big_schema::ClientWorkerConfig {
+        workload_config: big_schema::WorkloadConfig {
             num_concurrent: match storage {
                 Storage::Full => 5_000,
                 Storage::Big => 10_000,

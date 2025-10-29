@@ -7,3 +7,4 @@ pub mod execute;
 pub mod storage;
 pub mod tasks;
 pub mod types;
+pub mod workload;

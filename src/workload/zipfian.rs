@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use rand::Rng;
 
 /// Defaults from YCSB (precomputed zeta for fast path)
@@ -58,14 +59,6 @@ impl Zipfian {
         self.base
             + ((self.items as f64) * (self.eta * u - self.eta + 1.0).powf(self.alpha)).floor()
                 as u64
-    }
-
-    /// Accessors
-    pub fn items(&self) -> u64 {
-        self.items
-    }
-    pub fn base(&self) -> u64 {
-        self.base
     }
 }
 

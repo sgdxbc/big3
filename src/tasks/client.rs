@@ -1,18 +1,21 @@
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use bytes::Bytes;
+use hdrhistogram::{
+    Histogram,
+    serialization::{Serializer, V2Serializer},
+};
 use log::{debug, error};
 use quinn::{Connection, Endpoint};
-use rand::{Rng, rng};
+use rand::{Rng, rng, seq::IteratorRandom as _};
 use tokio::{
     select,
-    sync::{
-        mpsc::{Receiver, Sender, UnboundedReceiver, UnboundedSender, channel, unbounded_channel},
-        oneshot,
+    sync::mpsc::{
+        Receiver, Sender, UnboundedReceiver, UnboundedSender, channel, unbounded_channel,
     },
     task::JoinSet,
     time::{interval, sleep},
@@ -21,71 +24,58 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     cert::client_config,
-    client::{Client, ClientContext, ClientWorker, ClientWorkerContext, InvokeId, Records},
+    client::{Client, ClientContext},
     schema,
     types::{ClientId, NodeIndex, Reply, Request},
+    workload::{InvokeId, Workload, WorkloadContext},
 };
 
-struct ClientWorkerChannels {
-    tx_invoke_response: Sender<(InvokeId, Vec<u8>)>,
-    rx_invoke_response: Receiver<(InvokeId, Vec<u8>)>,
-}
+use super::{RequestContext, RequestId, ResponseContext};
 
-#[derive(Clone)]
-struct ClientWorkerHandle {
-    tx_invoke_response: Sender<(InvokeId, Vec<u8>)>,
+struct ClientWorkerChannels {
+    tx_invoke_response: UnboundedSender<(RequestId, Vec<u8>)>,
+    rx_invoke_response: UnboundedReceiver<(RequestId, Vec<u8>)>,
 }
 
 impl ClientWorkerChannels {
     fn new() -> Self {
-        let (tx_invoke_response, rx_invoke_response) = channel(100);
+        let (tx_invoke_response, rx_invoke_response) = unbounded_channel();
         Self {
             tx_invoke_response,
             rx_invoke_response,
         }
     }
 
-    fn handle(&self) -> ClientWorkerHandle {
-        ClientWorkerHandle {
-            tx_invoke_response: self.tx_invoke_response.clone(),
-        }
-    }
-}
-
-impl ClientWorkerHandle {
-    async fn invoke_response(&self, seq: InvokeId, res: Vec<u8>) -> anyhow::Result<()> {
-        self.tx_invoke_response.send((seq, res)).await?;
-        Ok(())
+    fn invoke_context(&self, client_handle: ClientHandle) -> RequestContext<Vec<u8>, Vec<u8>> {
+        RequestContext::new(client_handle.tx_invoke, self.tx_invoke_response.clone())
     }
 }
 
 pub struct ClientWorkerTask {
     channels: ClientWorkerChannels,
-    state: ClientWorker<ClientWorkerTaskContext>,
+    state: Workload<ClientWorkerTaskContext>,
 }
 
 impl ClientWorkerTask {
-    fn new(channels: ClientWorkerChannels, state: ClientWorker<ClientWorkerTaskContext>) -> Self {
+    fn new(channels: ClientWorkerChannels, state: Workload<ClientWorkerTaskContext>) -> Self {
         Self { channels, state }
     }
 
     fn load(
         client_worker_channels: ClientWorkerChannels,
         client: ClientHandle,
+        scrape_state: Arc<Mutex<ClientScrapeState>>,
         schema: &schema::ClientTask,
     ) -> anyhow::Result<Self> {
-        debug!("loading client worker task");
-        let context = ClientWorkerTaskContext::new(client_worker_channels.handle(), client);
-        debug!("client worker context created");
-        let state = ClientWorker::new(context, schema.worker_config.clone());
-        debug!("client worker state created");
+        let context = ClientWorkerTaskContext::new(client_worker_channels.invoke_context(client));
+        let state = Workload::new(context, (&schema.workload_config).into(), scrape_state);
         Ok(Self::new(client_worker_channels, state))
     }
 
     pub async fn run(mut self, stop: CancellationToken) -> anyhow::Result<()> {
         tokio::spawn(async move {
             stop.run_until_cancelled(self.run_inner()).await;
-            self.state.log_metrics();
+            // self.state.log_metrics();
         })
         .await?;
         Ok(())
@@ -112,38 +102,24 @@ impl ClientWorkerTask {
 }
 
 struct ClientWorkerTaskContext {
-    client: ClientHandle,
-    client_worker: ClientWorkerHandle,
-    invoke_id: InvokeId,
+    invoke: RequestContext<Vec<u8>, Vec<u8>>,
 }
 
 impl ClientWorkerTaskContext {
-    fn new(client_worker: ClientWorkerHandle, client: ClientHandle) -> Self {
-        Self {
-            client_worker,
-            client,
-            invoke_id: 0,
-        }
+    fn new(invoke: RequestContext<Vec<u8>, Vec<u8>>) -> Self {
+        Self { invoke }
     }
 }
 
-impl ClientWorkerContext for ClientWorkerTaskContext {
+impl WorkloadContext for ClientWorkerTaskContext {
     fn invoke(&mut self, command: Vec<u8>) -> InvokeId {
-        self.invoke_id += 1;
-        let invoke_id = self.invoke_id;
-        let client = self.client.clone();
-        let client_worker = self.client_worker.clone();
-        tokio::spawn(async move {
-            let res = client.invoke(command).await?;
-            client_worker.invoke_response(invoke_id, res).await
-        });
-        self.invoke_id
+        self.invoke.request(command)
     }
 }
 
 struct ClientChannels {
-    tx_invoke: UnboundedSender<(Vec<u8>, oneshot::Sender<Vec<u8>>)>,
-    rx_invoke: UnboundedReceiver<(Vec<u8>, oneshot::Sender<Vec<u8>>)>,
+    tx_invoke: UnboundedSender<(Vec<u8>, ResponseContext<Vec<u8>>)>,
+    rx_invoke: UnboundedReceiver<(Vec<u8>, ResponseContext<Vec<u8>>)>,
 
     tx_incoming_message: Sender<Reply>,
     rx_incoming_message: Receiver<Reply>,
@@ -151,7 +127,7 @@ struct ClientChannels {
 
 #[derive(Clone)]
 struct ClientHandle {
-    tx_invoke: UnboundedSender<(Vec<u8>, oneshot::Sender<Vec<u8>>)>,
+    tx_invoke: UnboundedSender<(Vec<u8>, ResponseContext<Vec<u8>>)>,
     tx_incoming_message: Sender<Reply>,
 }
 
@@ -176,13 +152,6 @@ impl ClientChannels {
 }
 
 impl ClientHandle {
-    async fn invoke(&self, command: Vec<u8>) -> anyhow::Result<Vec<u8>> {
-        let (tx_response, rx_response) = oneshot::channel();
-        self.tx_invoke.send((command, tx_response))?;
-        let res = rx_response.await?;
-        Ok(res)
-    }
-
     async fn incoming_message(&self, reply: Reply) -> anyhow::Result<()> {
         self.tx_incoming_message.send(reply).await?;
         Ok(())
@@ -238,9 +207,9 @@ struct ClientTaskContext {
 }
 
 impl ClientContext for ClientTaskContext {
-    fn send(&mut self, to: NodeIndex, request: Request) {
+    fn send(&mut self, request: Request) {
         let bytes = bincode::encode_to_vec(&request, bincode::config::standard()).unwrap();
-        let _ = self.network_connect.send(to, bytes.into());
+        let _ = self.network_connect.send(bytes.into());
     }
 }
 
@@ -254,8 +223,12 @@ struct NetworkConnectHandle {
 }
 
 impl NetworkConnectHandle {
-    fn send(&self, to: NodeIndex, bytes: Bytes) -> anyhow::Result<()> {
-        self.txs_outgoing_message[&to].send(bytes)?;
+    fn send(&self, bytes: Bytes) -> anyhow::Result<()> {
+        self.txs_outgoing_message
+            .values()
+            .choose(&mut rand::rng())
+            .unwrap()
+            .send(bytes)?;
         Ok(())
     }
 }
@@ -334,6 +307,11 @@ impl NetworkConnectTask {
 }
 
 pub struct ClientNodeTask {
+    scrape_state: Arc<Mutex<ClientScrapeState>>,
+    workload_clients: Vec<WorkloadClientTask>,
+}
+
+struct WorkloadClientTask {
     network_connect: NetworkConnectTask,
     client: ClientTask,
     client_worker: ClientWorkerTask,
@@ -342,42 +320,99 @@ pub struct ClientNodeTask {
 impl ClientNodeTask {
     pub async fn load(schema: schema::ClientTask) -> anyhow::Result<Self> {
         debug!("loading client node task");
-        let client_channels = ClientChannels::new();
-        let client_worker_channels = ClientWorkerChannels::new();
+        let scrape_state = Arc::new(Mutex::new(ClientScrapeState::now()));
 
-        let client_id = rand::random();
+        let mut tasks = JoinSet::new();
+        for _ in 0..schema.workload_config.num_concurrent {
+            let schema = schema.clone();
+            let scrape_state = scrape_state.clone();
+            tasks.spawn(async move {
+                let client_channels = ClientChannels::new();
+                let client_worker_channels = ClientWorkerChannels::new();
 
-        let network_connect =
-            NetworkConnectTask::load(client_channels.handle(), &schema, client_id).await?;
-        debug!("network connect loaded");
-        let client = ClientTask::load(
-            client_channels,
-            network_connect.handle(),
-            &schema,
-            client_id,
-        )
-        .await?;
-        debug!("client loaded");
-        let client_worker =
-            ClientWorkerTask::load(client_worker_channels, client.channels.handle(), &schema)?;
-        debug!("client worker loaded");
+                let client_id = rand::random();
+
+                let network_connect =
+                    NetworkConnectTask::load(client_channels.handle(), &schema, client_id).await?;
+                debug!("[{:08x}] network connect loaded", client_id);
+                let client = ClientTask::load(
+                    client_channels,
+                    network_connect.handle(),
+                    &schema,
+                    client_id,
+                )
+                .await?;
+                debug!("[{:08x}] client loaded", client_id);
+                let client_worker = ClientWorkerTask::load(
+                    client_worker_channels,
+                    client.channels.handle(),
+                    scrape_state.clone(),
+                    &schema,
+                )?;
+                debug!("[{:08x}] client worker loaded", client_id);
+                anyhow::Ok(WorkloadClientTask {
+                    network_connect,
+                    client,
+                    client_worker,
+                })
+            });
+        }
+        let mut workload_clients = Vec::new();
+        while let Some(res) = tasks.join_next().await {
+            workload_clients.push(res??);
+        }
+        debug!("client node task loaded");
+
         Ok(Self {
-            network_connect,
-            client,
-            client_worker,
+            scrape_state,
+            workload_clients,
         })
     }
 
-    pub fn scrape_state(&self) -> Arc<Mutex<Records>> {
-        Arc::clone(&self.client_worker.state.records)
+    pub fn scrape_state(&self) -> Arc<Mutex<ClientScrapeState>> {
+        self.scrape_state.clone()
     }
 
     pub async fn run(self, stop: CancellationToken) -> anyhow::Result<()> {
-        tokio::try_join!(
-            self.network_connect.run(stop.clone()),
-            self.client.run(stop.clone()),
-            self.client_worker.run(stop.clone())
-        )?;
+        let mut tasks = JoinSet::new();
+        for workload_client in self.workload_clients {
+            // TODO remove double layer spawn
+            tasks.spawn(workload_client.network_connect.run(stop.clone()));
+            tasks.spawn(workload_client.client.run(stop.clone()));
+            tasks.spawn(workload_client.client_worker.run(stop.clone()));
+        }
+        while let Some(res) = tasks.join_next().await {
+            res??;
+        }
         Ok(())
+    }
+}
+
+pub struct ClientScrapeState {
+    start: Instant,
+    pub latency_histogram: Histogram<u64>,
+}
+
+impl ClientScrapeState {
+    pub fn now() -> Self {
+        Self {
+            start: Instant::now(),
+            latency_histogram: Histogram::new(3).unwrap(),
+        }
+    }
+
+    pub fn scrape(&mut self) -> schema::Scrape {
+        let interval = self.start.elapsed();
+        self.start = Instant::now();
+        let mut serializer = V2Serializer::new();
+        let mut latency_histogram = Vec::new();
+        serializer
+            .serialize(&self.latency_histogram, &mut latency_histogram)
+            .unwrap();
+        self.latency_histogram.reset();
+        schema::Scrape {
+            interval,
+            latency_histogram,
+        }
     }
 }
