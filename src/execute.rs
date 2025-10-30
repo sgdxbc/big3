@@ -38,12 +38,26 @@ pub trait ExecuteContext {
     fn post(&mut self, updates: Vec<(Vec<u8>, Option<Vec<u8>>)>);
 }
 
+pub struct ExecuteConfig {
+    num_faulty_nodes: NodeIndex,
+}
+
+impl From<&crate::schema::ReplicaConfig> for ExecuteConfig {
+    fn from(config: &crate::schema::ReplicaConfig) -> Self {
+        Self {
+            num_faulty_nodes: config.num_faulty_nodes,
+        }
+    }
+}
+
 pub struct Execute<C> {
     pub context: C,
+    config: ExecuteConfig,
     index: NodeIndex,
 
     working: Option<WorkingState>,
     pending_blocks: VecDeque<(Vec<Block>, oneshot::Sender<()>)>,
+    executed_count: u64,
 
     metrics: ExecuteMetrics,
 }
@@ -61,13 +75,16 @@ struct ExecuteMetrics {
 }
 
 impl<C> Execute<C> {
-    pub fn new(context: C, index: NodeIndex) -> Self {
+    pub fn new(context: C, config: ExecuteConfig, index: NodeIndex) -> Self {
         Self {
             context,
+            config,
             index,
 
             working: None,
             pending_blocks: Default::default(),
+            executed_count: 0,
+
             metrics: ExecuteMetrics {
                 start: Instant::now(),
                 work_time: Duration::ZERO,
@@ -161,7 +178,14 @@ impl<C: ExecuteContext> Execute<C> {
                 res: bincode::encode_to_vec(&op, bincode::config::standard()).unwrap(),
                 node_index: self.index,
             };
-            self.context.send(client_id, reply);
+
+            if (self.executed_count..self.executed_count + self.config.num_faulty_nodes as u64 + 1)
+                .map(|i| (i % (self.config.num_faulty_nodes as u64 * 2 + 1)) as NodeIndex)
+                .any(|i| i == self.index)
+            {
+                self.context.send(client_id, reply);
+            }
+            self.executed_count += 1;
         }
         self.context.post(updates);
         let _ = working.tx_response.send(());

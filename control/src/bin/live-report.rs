@@ -104,7 +104,7 @@ async fn run_workload(
     start_all(client_instances, control_client.clone()).await?;
 
     let mut next_scrape = Instant::now() + Duration::from_secs(1);
-    for i in 0..10 {
+    for i in 0..20 {
         sleep_until(next_scrape).await;
         println!("scrape clients round {}", i + 1);
         scrape_all(client_instances, control_client.clone()).await?;

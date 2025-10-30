@@ -10,7 +10,7 @@ async fn main() -> anyhow::Result<()> {
         tasks.spawn(async move { setup_storage(&instance).await });
     }
     for instance in cluster.servers.into_iter().chain(cluster.clients) {
-        tasks.spawn(async move { setup_deps(&instance).await });
+        tasks.spawn(async move { setup_common(&instance).await });
     }
     while let Some(result) = tasks.join_next().await {
         result??;
@@ -52,10 +52,18 @@ async fn setup_storage(instance: &Instance) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn setup_deps(instance: &Instance) -> anyhow::Result<()> {
+async fn setup_common(instance: &Instance) -> anyhow::Result<()> {
     let status = instance
         .ssh()
-        .arg("sudo apt-get -qq update && sudo apt-get -qq install -y liburing2")
+        .arg(
+            [
+                "sudo apt-get -qq update",
+                "sudo apt-get -qq install -y liburing2",
+                "sudo sysctl -w net.core.rmem_max=7500000",
+                "sudo sysctl -w net.core.wmem_max=7500000",
+            ]
+            .join(" && "),
+        )
         .status()
         .await?;
     anyhow::ensure!(status.success());

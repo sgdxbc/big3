@@ -70,18 +70,18 @@ impl NetworkAcceptTask {
             let submit = self.submit.clone();
             let network_outgoing = self.network_outgoing.clone();
             let conn = incoming.await?;
-            // tokio::spawn(async move {
-            let mut client_id = [0; size_of::<ClientId>()];
-            conn.accept_uni().await?.read_exact(&mut client_id).await?;
+            tokio::spawn(async move {
+                let mut client_id = [0; size_of::<ClientId>()];
+                conn.accept_uni().await?.read_exact(&mut client_id).await?;
 
-            let (tx_outgoing, rx_outgoing) = unbounded_channel();
-            tokio::spawn(Self::run_connection_incoming(conn.clone(), submit.clone()));
-            tokio::spawn(Self::run_connection_outgoing(conn, rx_outgoing));
-            let _ = network_outgoing
-                .new_connection(ClientId::from_le_bytes(client_id), tx_outgoing)
-                .await;
-            //     anyhow::Ok(())
-            // });
+                let (tx_outgoing, rx_outgoing) = unbounded_channel();
+                tokio::spawn(Self::run_connection_incoming(conn.clone(), submit.clone()));
+                tokio::spawn(Self::run_connection_outgoing(conn, rx_outgoing));
+                let _ = network_outgoing
+                    .new_connection(ClientId::from_le_bytes(client_id), tx_outgoing)
+                    .await;
+                anyhow::Ok(())
+            });
         }
         Ok(())
     }

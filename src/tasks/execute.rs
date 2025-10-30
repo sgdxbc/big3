@@ -91,7 +91,7 @@ impl ExecuteTask {
         schema: &schema::ReplicaTask,
     ) -> anyhow::Result<Self> {
         let context = ExecuteTaskContext::new(channels.handle(), storage, network_outgoing);
-        let state = Execute::new(context, schema.node_index);
+        let state = Execute::new(context, (&schema.config).into(), schema.node_index);
         Ok(Self::new(channels, state))
     }
 
