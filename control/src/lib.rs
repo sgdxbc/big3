@@ -1,4 +1,4 @@
-use std::{collections::HashSet, net::IpAddr};
+use std::{collections::HashSet, net::IpAddr, time::Duration};
 
 use big_schema::{Stopped, Task};
 use reqwest::Client;
@@ -73,7 +73,7 @@ pub async fn run_endpoints(
             let output = instance
                 .ssh()
                 .arg("RUST_LOG=info ./big > big.log")
-                // .arg("RUST_LOG=info,big ./big > big.log")
+                // .arg("RUST_BACKTRACE=1 RUST_LOG=info,big ./big > big.log")
                 .output()
                 .await?;
             anyhow::Ok((instance.public_dns, output))
@@ -122,7 +122,8 @@ pub async fn load_all(
         let url = format!("http://{}:3000/load", instance.public_dns);
         tasks.spawn(async move { client.post(url).json(&task).send().await });
     }
-    let mut deadline = Instant::now() + std::time::Duration::from_secs(60);
+    let start = Instant::now();
+    let mut deadline = start + Duration::from_secs(60);
     let mut i = 0;
     loop {
         match timeout_at(deadline, tasks.join_next()).await {
@@ -132,12 +133,13 @@ pub async fn load_all(
                 loading_hosts.remove(resp.url().host_str().unwrap());
             }
             Err(_) => {
-                println!("still loading after {i} minutes: {loading_hosts:?}");
-                deadline += std::time::Duration::from_secs(60);
                 i += 1;
+                println!("still loading after {i} minutes: {loading_hosts:?}");
+                deadline += Duration::from_secs(60);
             }
         }
     }
+    println!("all loaded in {:?}", start.elapsed());
     Ok(())
 }
 

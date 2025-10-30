@@ -1,9 +1,9 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, time::Duration};
 
 use bincode::{Decode, Encode};
 use bytes::Bytes;
 use log::error;
-use quinn::{Connection, Endpoint};
+use quinn::{Connection, Endpoint, TransportConfig};
 use tokio::{
     sync::mpsc::{Sender, UnboundedReceiver, UnboundedSender, unbounded_channel},
     task::JoinSet,
@@ -78,7 +78,11 @@ impl NetworkInterconnectTask {
             server_config(),
             (schema.ips[schema.node_index as usize], port).into(),
         )?;
-        endpoint.set_default_client_config(client_config());
+        let mut transport_config = TransportConfig::default();
+        transport_config.keep_alive_interval(Duration::from_secs(10).into());
+        let mut config = client_config();
+        config.transport_config(transport_config.into());
+        endpoint.set_default_client_config(config);
 
         let connect = async {
             let mut txs = HashMap::new();

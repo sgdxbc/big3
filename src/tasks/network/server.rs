@@ -67,20 +67,21 @@ impl NetworkAcceptTask {
 
     async fn run_inner(&mut self) -> anyhow::Result<()> {
         while let Some(incoming) = self.endpoint.accept().await {
+            let submit = self.submit.clone();
+            let network_outgoing = self.network_outgoing.clone();
             let conn = incoming.await?;
+            // tokio::spawn(async move {
             let mut client_id = [0; size_of::<ClientId>()];
             conn.accept_uni().await?.read_exact(&mut client_id).await?;
 
             let (tx_outgoing, rx_outgoing) = unbounded_channel();
-            let _ = self
-                .network_outgoing
+            tokio::spawn(Self::run_connection_incoming(conn.clone(), submit.clone()));
+            tokio::spawn(Self::run_connection_outgoing(conn, rx_outgoing));
+            let _ = network_outgoing
                 .new_connection(ClientId::from_le_bytes(client_id), tx_outgoing)
                 .await;
-            tokio::spawn(Self::run_connection_incoming(
-                conn.clone(),
-                self.submit.clone(),
-            ));
-            tokio::spawn(Self::run_connection_outgoing(conn, rx_outgoing));
+            //     anyhow::Ok(())
+            // });
         }
         Ok(())
     }
@@ -96,9 +97,9 @@ impl NetworkAcceptTask {
 
     async fn run_connection_outgoing(
         conn: Connection,
-        mut tx_outgoing_message: UnboundedReceiver<Bytes>,
+        mut rx_outgoing_message: UnboundedReceiver<Bytes>,
     ) -> anyhow::Result<()> {
-        while let Some(bytes) = tx_outgoing_message.recv().await {
+        while let Some(bytes) = rx_outgoing_message.recv().await {
             let mut send = conn.open_uni().await?;
             send.write_all(&bytes).await?;
         }
@@ -114,6 +115,7 @@ pub struct NetworkOutgoingChannels {
     rx_outgoing_message: UnboundedReceiver<(ClientId, Reply)>,
 }
 
+#[derive(Clone)]
 pub struct NetworkOutgoingHandle {
     tx_connection: Sender<(ClientId, UnboundedSender<Bytes>)>,
     tx_outgoing_message: UnboundedSender<(ClientId, Reply)>,

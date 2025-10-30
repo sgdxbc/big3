@@ -10,8 +10,11 @@ use hdrhistogram::{
     serialization::{Serializer, V2Serializer},
 };
 use log::{debug, error};
-use quinn::{Connection, Endpoint};
-use rand::{Rng, rng, seq::IteratorRandom as _};
+use quinn::{Connection, Endpoint, TransportConfig};
+use rand::{
+    Rng, rng,
+    seq::{IteratorRandom as _, SliceRandom},
+};
 use tokio::{
     select,
     sync::mpsc::{
@@ -235,15 +238,17 @@ impl NetworkConnectHandle {
 
 impl NetworkConnectTask {
     async fn load(
+        endpoint: Endpoint,
         client: ClientHandle,
         schema: &schema::ClientTask,
         client_id: ClientId,
     ) -> anyhow::Result<Self> {
-        let mut endpoint = Endpoint::client(([0, 0, 0, 0], 0).into())?;
-        endpoint.set_default_client_config(client_config());
         let mut txs_outgoing_message = HashMap::new();
         let mut join_set = JoinSet::new();
-        for (i, &ip) in schema.ips.iter().enumerate() {
+
+        let mut ips = schema.ips.iter().enumerate().collect::<Vec<_>>();
+        ips.shuffle(&mut rand::rng());
+        for (i, &ip) in ips {
             let conn = endpoint
                 .connect((ip, 5000).into(), "server.example")?
                 .await?;
@@ -322,18 +327,31 @@ impl ClientNodeTask {
         debug!("loading client node task");
         let scrape_state = Arc::new(Mutex::new(ClientScrapeState::now()));
 
+        let mut endpoint = Endpoint::client(([0, 0, 0, 0], 0).into())?;
+        let mut transport_config = TransportConfig::default();
+        transport_config.keep_alive_interval(Duration::from_secs(10).into());
+        let mut config = client_config();
+        config.transport_config(transport_config.into());
+        endpoint.set_default_client_config(config);
+
         let mut tasks = JoinSet::new();
         for _ in 0..schema.workload_config.num_concurrent {
             let schema = schema.clone();
             let scrape_state = scrape_state.clone();
+            let endpoint = endpoint.clone();
             tasks.spawn(async move {
                 let client_channels = ClientChannels::new();
                 let client_worker_channels = ClientWorkerChannels::new();
 
                 let client_id = rand::random();
 
-                let network_connect =
-                    NetworkConnectTask::load(client_channels.handle(), &schema, client_id).await?;
+                let network_connect = NetworkConnectTask::load(
+                    endpoint,
+                    client_channels.handle(),
+                    &schema,
+                    client_id,
+                )
+                .await?;
                 debug!("[{:08x}] network connect loaded", client_id);
                 let client = ClientTask::load(
                     client_channels,

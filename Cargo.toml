@@ -6,6 +6,9 @@ name = "big"
 version = "0.1.0"
 edition = "2024"
 
+[profile.release]
+# debug = true
+
 [dependencies]
 anyhow = { version = "1.0.100", features = ["backtrace"] }
 axum = "0.8.6"

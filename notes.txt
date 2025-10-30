@@ -51,3 +51,7 @@ I will need to increase the number of clients per instance. One client worker th
 Client worker needs to manage state. Currently it is just latency recording, but soon I should impelement multi-stage transactions and client worker will need to keep track on their progress as well. By the way, I borrow the name "client worker" from DSLabs where each client worker operates one client. Now the thing is different as discussed, I think I should switch the name to e.g. "workload".
 
 Essentially, there are three components. There are (dumb) clients who work with opaque requests and replies and never interprete them (except check whether the replies match). They perform the "send one receive N" loops and deal with the network. There are workloads who drive the transactions by invoking the clients. They are specific to the transactions, so I will need to implement several workloads for all combinations of YCSB-T/UTXO and sharded/unsharded. Finally, there is a controller that issue transactions to and collect latencies from the workloads. Under the close loop setting, I can simplify by letting the workloads to self-issue, virtually collect latencies with a shared mutable state, and the controller only needs to schedule concurrent workload tasks at the task layer.
+
+----
+
+Connect 10k clients from one instance is fine, but connect 2k clients from each of the 5 instances will time out. I don't even know where the timeout is reported, I have added keep alive to the connections.
