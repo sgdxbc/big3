@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, hash_map::Entry};
 
 use log::warn;
 
@@ -18,8 +18,12 @@ pub struct Client<C> {
     id: ClientId,
 
     seq: ClientSeq,
+    working_states: HashMap<ClientSeq, WorkingState>,
+}
+
+struct WorkingState {
     replies: HashMap<NodeIndex, Vec<u8>>,
-    tx_response: Option<ResponseContext<Vec<u8>>>,
+    context: ResponseContext<Vec<u8>>,
 }
 
 impl<C> Client<C> {
@@ -29,15 +33,13 @@ impl<C> Client<C> {
             config,
             id,
             seq: 0,
-            replies: Default::default(),
-            tx_response: None,
+            working_states: Default::default(),
         }
     }
 }
 
 impl<C: ClientContext> Client<C> {
-    pub fn invoke(&mut self, command: Vec<u8>, tx_response: ResponseContext<Vec<u8>>) {
-        assert!(self.tx_response.is_none());
+    pub fn invoke(&mut self, command: Vec<u8>, context: ResponseContext<Vec<u8>>) {
         self.seq += 1;
 
         let request = Request {
@@ -47,30 +49,39 @@ impl<C: ClientContext> Client<C> {
         };
         self.context.send(request);
 
-        self.tx_response = Some(tx_response);
-        self.replies.clear();
+        self.working_states.insert(
+            self.seq,
+            WorkingState {
+                replies: Default::default(),
+                context,
+            },
+        );
     }
 
     pub fn on_message(&mut self, message: Reply) {
         assert!(message.client_seq <= self.seq);
-        if message.client_seq < self.seq || self.tx_response.is_none() {
-            // warn!(
-            //     "stale reply for client_seq {} (current {})",
-            //     message.client_seq, self.seq
-            // );
+        let Entry::Occupied(mut state) = self.working_states.entry(message.client_seq) else {
+            warn!(
+                "stale reply for client_seq {} (no working state)",
+                message.client_seq
+            );
             return;
-        }
+        };
 
-        self.replies.insert(message.node_index, message.res.clone());
-        if self.replies.len() > self.config.num_faulty_nodes as usize {
-            if self
+        state
+            .get_mut()
+            .replies
+            .insert(message.node_index, message.res.clone());
+        if state.get().replies.len() > self.config.num_faulty_nodes as usize {
+            if state
+                .get()
                 .replies
                 .values()
                 .filter(|&res| res == &message.res)
                 .count()
                 >= (self.config.num_faulty_nodes + 1) as usize
             {
-                self.tx_response.take().unwrap().respond(message.res);
+                state.remove().context.respond(message.res);
             } else {
                 warn!(
                     "received non-matching replies for client_seq {}",

@@ -54,12 +54,12 @@ impl ClientWorkerChannels {
     }
 }
 
-pub struct ClientWorkerTask {
+pub struct WorkloadTask {
     channels: ClientWorkerChannels,
     state: Workload<ClientWorkerTaskContext>,
 }
 
-impl ClientWorkerTask {
+impl WorkloadTask {
     fn new(channels: ClientWorkerChannels, state: Workload<ClientWorkerTaskContext>) -> Self {
         Self { channels, state }
     }
@@ -313,13 +313,13 @@ impl NetworkConnectTask {
 
 pub struct ClientNodeTask {
     scrape_state: Arc<Mutex<ClientScrapeState>>,
-    workload_clients: Vec<WorkloadClientTask>,
+    connected_clients: Vec<ConnectedClientTask>,
+    workloads: Vec<WorkloadTask>,
 }
 
-struct WorkloadClientTask {
+struct ConnectedClientTask {
     network_connect: NetworkConnectTask,
     client: ClientTask,
-    client_worker: ClientWorkerTask,
 }
 
 impl ClientNodeTask {
@@ -332,61 +332,56 @@ impl ClientNodeTask {
         let mut config = client_config();
         config.transport_config(transport_config.into());
 
-        let mut workload_clients = Vec::new();
-        while workload_clients.len() < schema.workload_config.num_concurrent as usize {
-            let mut tasks = JoinSet::new();
-            for _ in
-                0..40.min(schema.workload_config.num_concurrent as usize - workload_clients.len())
+        let mut connected_clients = Vec::new();
+        let mut workloads = Vec::new();
+        let num_group = 4;
+        for group_index in 0..num_group {
+            let mut endpoint = Endpoint::client(([0, 0, 0, 0], 0).into())?;
+            endpoint.set_default_client_config(config.clone());
+
+            let client_channels = ClientChannels::new();
+
+            let client_id = rand::random();
+
+            let network_connect =
+                NetworkConnectTask::load(endpoint, client_channels.handle(), &schema, client_id)
+                    .await?;
+            debug!("[{:08x}] network connect loaded", client_id);
+            let client = ClientTask::load(
+                client_channels,
+                network_connect.handle(),
+                &schema,
+                client_id,
+            )
+            .await?;
+            debug!("[{:08x}] client loaded", client_id);
+
+            for _ in 0..(schema.workload_config.num_concurrent / num_group
+                + (group_index < schema.workload_config.num_concurrent % num_group) as u64)
             {
-                let schema = schema.clone();
                 let scrape_state = scrape_state.clone();
-                let mut endpoint = Endpoint::client(([0, 0, 0, 0], 0).into())?;
-                endpoint.set_default_client_config(config.clone());
-                tasks.spawn(async move {
-                    let client_channels = ClientChannels::new();
-                    let client_worker_channels = ClientWorkerChannels::new();
 
-                    let client_id = rand::random();
+                let client_worker_channels = ClientWorkerChannels::new();
+                let client_worker = WorkloadTask::load(
+                    client_worker_channels,
+                    client.channels.handle(),
+                    scrape_state.clone(),
+                    &schema,
+                )?;
+                workloads.push(client_worker);
+            }
+            debug!("client node task loaded");
 
-                    let network_connect = NetworkConnectTask::load(
-                        endpoint,
-                        client_channels.handle(),
-                        &schema,
-                        client_id,
-                    )
-                    .await?;
-                    debug!("[{:08x}] network connect loaded", client_id);
-                    let client = ClientTask::load(
-                        client_channels,
-                        network_connect.handle(),
-                        &schema,
-                        client_id,
-                    )
-                    .await?;
-                    debug!("[{:08x}] client loaded", client_id);
-                    let client_worker = ClientWorkerTask::load(
-                        client_worker_channels,
-                        client.channels.handle(),
-                        scrape_state.clone(),
-                        &schema,
-                    )?;
-                    debug!("[{:08x}] client worker loaded", client_id);
-                    anyhow::Ok(WorkloadClientTask {
-                        network_connect,
-                        client,
-                        client_worker,
-                    })
-                });
-            }
-            while let Some(res) = tasks.join_next().await {
-                workload_clients.push(res??);
-            }
+            connected_clients.push(ConnectedClientTask {
+                network_connect,
+                client,
+            });
         }
-        debug!("client node task loaded");
 
         Ok(Self {
             scrape_state,
-            workload_clients,
+            connected_clients,
+            workloads,
         })
     }
 
@@ -396,11 +391,17 @@ impl ClientNodeTask {
 
     pub async fn run(self, stop: CancellationToken) -> anyhow::Result<()> {
         let mut tasks = JoinSet::new();
-        for workload_client in self.workload_clients {
-            // TODO remove double layer spawn
-            tasks.spawn(workload_client.network_connect.run(stop.clone()));
-            tasks.spawn(workload_client.client.run(stop.clone()));
-            tasks.spawn(workload_client.client_worker.run(stop.clone()));
+        // TODO remove double layer spawn
+        for ConnectedClientTask {
+            network_connect,
+            client,
+        } in self.connected_clients
+        {
+            tasks.spawn(network_connect.run(stop.clone()));
+            tasks.spawn(client.run(stop.clone()));
+        }
+        for workload in self.workloads {
+            tasks.spawn(workload.run(stop.clone()));
         }
         while let Some(res) = tasks.join_next().await {
             res??;

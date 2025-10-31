@@ -117,10 +117,28 @@ pub async fn load_all(
     let mut tasks = JoinSet::new();
     let mut loading_hosts = HashSet::new();
     for (instance, task) in items {
-        loading_hosts.insert(instance.public_dns.clone());
+        let public_dns = instance.public_dns.clone();
+        loading_hosts.insert(public_dns.clone());
         let client = control_client.clone();
-        let url = format!("http://{}:3000/load", instance.public_dns);
-        tasks.spawn(async move { client.post(url).json(&task).send().await });
+        let url = format!("http://{}:3000/load", public_dns);
+        tasks.spawn(async move {
+            let mut retry = 3;
+            loop {
+                match client.post(&url).json(&task).send().await {
+                    Ok(resp) => {
+                        break anyhow::Ok(resp);
+                    }
+                    Err(err) if err.is_request() && retry > 0 => {
+                        println!(
+                            "load request to {} failed: {}. retrying...",
+                            public_dns, err
+                        );
+                        retry -= 1;
+                    }
+                    Err(err) => Err(err)?,
+                }
+            }
+        });
     }
     let start = Instant::now();
     let mut deadline = start + Duration::from_secs(60);

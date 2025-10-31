@@ -19,19 +19,25 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn setup_build(instance: &Instance) -> anyhow::Result<()> {
-    let status = instance.ssh().arg([
+    let output = instance.ssh().arg([
         "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- --profile minimal -y",
         "sudo apt-get -q update",
         "sudo apt-get -q install -y clang make pkg-config liburing-dev"
-    ].join(" && ")).status().await?;
-    anyhow::ensure!(status.success());
+    ].join(" && ")).output().await?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "{} build setup failed: {}",
+            instance.public_dns,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
     Ok(())
 }
 
 async fn setup_storage(instance: &Instance) -> anyhow::Result<()> {
     let status = instance.ssh().arg("mount | grep /tmp").status().await?;
     if !status.success() {
-        let status = instance
+        let output = instance
             .ssh()
             .arg(
                 [
@@ -41,19 +47,21 @@ async fn setup_storage(instance: &Instance) -> anyhow::Result<()> {
                 ]
                 .join(" && "),
             )
-            .status()
+            .output()
             .await?;
-        anyhow::ensure!(
-            status.success(),
-            "{} storage setup failed",
-            instance.public_dns
-        );
+        if !output.status.success() {
+            anyhow::bail!(
+                "{} storage setup failed: {}",
+                instance.public_dns,
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
     }
     Ok(())
 }
 
 async fn setup_common(instance: &Instance) -> anyhow::Result<()> {
-    let status = instance
+    let output = instance
         .ssh()
         .arg(
             [
@@ -64,8 +72,14 @@ async fn setup_common(instance: &Instance) -> anyhow::Result<()> {
             ]
             .join(" && "),
         )
-        .status()
+        .output()
         .await?;
-    anyhow::ensure!(status.success());
+    if !output.status.success() {
+        anyhow::bail!(
+            "{} common setup failed: {}",
+            instance.public_dns,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
     Ok(())
 }

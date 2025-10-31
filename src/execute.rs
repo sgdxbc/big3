@@ -171,6 +171,7 @@ impl<C: ExecuteContext> Execute<C> {
                         panic!("key not found");
                     };
                     Res::Get(value.clone())
+                    // Res::Get(vec![0; 68])
                 }
             };
             let reply = Reply {
@@ -187,7 +188,7 @@ impl<C: ExecuteContext> Execute<C> {
             }
             self.executed_count += 1;
         }
-        self.context.post(updates);
+        // self.context.post(updates);
         let _ = working.tx_response.send(());
         self.metrics.work_time += self.metrics.start.elapsed();
 
