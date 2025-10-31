@@ -1,8 +1,7 @@
 use tokio::{
     select,
-    sync::{
-        mpsc::{Receiver, Sender, channel},
-        oneshot,
+    sync::mpsc::{
+        Receiver, Sender, UnboundedReceiver, UnboundedSender, channel, unbounded_channel,
     },
 };
 use tokio_util::sync::CancellationToken;
@@ -14,11 +13,11 @@ use crate::{
     types::{ClientId, Reply},
 };
 
-use super::{network::server::NetworkOutgoingHandle, storage::StorageHandle};
+use super::{ResponseContext, network::server::NetworkOutgoingHandle, storage::StorageHandle};
 
 pub struct ExecuteChannels {
-    tx_blocks: Sender<(Vec<Block>, oneshot::Sender<()>)>,
-    rx_blocks: Receiver<(Vec<Block>, oneshot::Sender<()>)>,
+    tx_blocks: UnboundedSender<(Vec<Block>, ResponseContext<()>)>,
+    rx_blocks: UnboundedReceiver<(Vec<Block>, ResponseContext<()>)>,
 
     tx_fetch_response: Sender<(FetchId, Vec<Option<Vec<u8>>>)>,
     rx_fetch_response: Receiver<(FetchId, Vec<Option<Vec<u8>>>)>,
@@ -26,7 +25,7 @@ pub struct ExecuteChannels {
 
 #[derive(Clone)]
 pub struct ExecuteHandle {
-    tx_block: Sender<(Vec<Block>, oneshot::Sender<()>)>,
+    pub tx_blocks: UnboundedSender<(Vec<Block>, ResponseContext<()>)>,
     tx_fetch_response: Sender<(FetchId, Vec<Option<Vec<u8>>>)>,
 }
 
@@ -38,11 +37,11 @@ impl Default for ExecuteChannels {
 
 impl ExecuteChannels {
     pub fn new() -> Self {
-        let (tx_block, rx_block) = channel(100);
+        let (tx_blocks, rx_blocks) = unbounded_channel();
         let (tx_fetch_response, rx_fetch_response) = channel(100);
         Self {
-            tx_blocks: tx_block,
-            rx_blocks: rx_block,
+            tx_blocks,
+            rx_blocks,
             tx_fetch_response,
             rx_fetch_response,
         }
@@ -50,20 +49,13 @@ impl ExecuteChannels {
 
     pub fn handle(&self) -> ExecuteHandle {
         ExecuteHandle {
-            tx_block: self.tx_blocks.clone(),
+            tx_blocks: self.tx_blocks.clone(),
             tx_fetch_response: self.tx_fetch_response.clone(),
         }
     }
 }
 
 impl ExecuteHandle {
-    pub async fn execute(&self, blocks: Vec<Block>) -> anyhow::Result<()> {
-        let (tx_response, rx_response) = oneshot::channel();
-        self.tx_block.send((blocks, tx_response)).await?;
-        rx_response.await?;
-        anyhow::Ok(())
-    }
-
     pub async fn fetch_response(
         &self,
         fetch_id: FetchId,

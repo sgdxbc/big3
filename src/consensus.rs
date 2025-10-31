@@ -10,7 +10,10 @@ use hdrhistogram::Histogram;
 use log::{info, trace, warn};
 use sha2::{Digest as _, Sha256};
 
-use crate::types::{NodeIndex, Request};
+use crate::{
+    tasks::RequestId,
+    types::{NodeIndex, Request},
+};
 
 pub type Round = u64;
 
@@ -98,7 +101,7 @@ pub trait BullsharkContext {
     fn output(&mut self, blocks: Vec<Block>) -> OutputId;
 }
 
-pub type OutputId = u64;
+pub type OutputId = RequestId;
 
 pub struct Bullshark<C> {
     context: C,

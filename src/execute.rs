@@ -5,10 +5,10 @@ use std::{
 
 use bincode::{Decode, Encode};
 use log::info;
-use tokio::sync::oneshot;
 
 use crate::{
     consensus::Block,
+    tasks::ResponseContext,
     types::{ClientId, ClientSeq, NodeIndex, Reply},
 };
 
@@ -56,7 +56,7 @@ pub struct Execute<C> {
     index: NodeIndex,
 
     working: Option<WorkingState>,
-    pending_blocks: VecDeque<(Vec<Block>, oneshot::Sender<()>)>,
+    pending_blocks: VecDeque<(Vec<Block>, ResponseContext<()>)>,
     executed_count: u64,
 
     metrics: ExecuteMetrics,
@@ -66,7 +66,7 @@ struct WorkingState {
     requests: Vec<(Op, ClientId, ClientSeq)>,
     fetch_id: FetchId,
     fetching: Vec<String>,
-    tx_response: oneshot::Sender<()>,
+    context: ResponseContext<()>,
 }
 
 struct ExecuteMetrics {
@@ -94,19 +94,19 @@ impl<C> Execute<C> {
 }
 
 impl<C: ExecuteContext> Execute<C> {
-    pub fn on_block(&mut self, blocks: Vec<Block>, tx_response: oneshot::Sender<()>) {
+    pub fn on_block(&mut self, blocks: Vec<Block>, context: ResponseContext<()>) {
         if self.working.is_some() {
-            self.pending_blocks.push_back((blocks, tx_response));
+            self.pending_blocks.push_back((blocks, context));
             return;
         }
-        self.prepare_blocks(blocks, tx_response);
+        self.prepare_blocks(blocks, context);
     }
 
     pub fn log_metrics(&self) {
         info!("execution work time: {:?}", self.metrics.work_time);
     }
 
-    fn prepare_blocks(&mut self, blocks: Vec<Block>, tx_response: oneshot::Sender<()>) {
+    fn prepare_blocks(&mut self, blocks: Vec<Block>, context: ResponseContext<()>) {
         self.metrics.start = Instant::now();
         assert!(self.working.is_none());
 
@@ -114,7 +114,7 @@ impl<C: ExecuteContext> Execute<C> {
             requests: Default::default(),
             fetch_id: 0,
             fetching: Default::default(),
-            tx_response,
+            context,
         };
         let mut fetching_keys = HashSet::new();
         for block in blocks {
@@ -188,8 +188,8 @@ impl<C: ExecuteContext> Execute<C> {
             }
             self.executed_count += 1;
         }
-        // self.context.post(updates);
-        let _ = working.tx_response.send(());
+        self.context.post(updates);
+        working.context.respond(());
         self.metrics.work_time += self.metrics.start.elapsed();
 
         if let Some((block, tx_response)) = self.pending_blocks.pop_front() {

@@ -2,7 +2,9 @@ use std::time::Instant;
 
 use tokio::{
     select,
-    sync::mpsc::{Receiver, Sender, channel},
+    sync::mpsc::{
+        Receiver, Sender, UnboundedReceiver, UnboundedSender, channel, unbounded_channel,
+    },
 };
 use tokio_util::sync::CancellationToken;
 
@@ -13,6 +15,7 @@ use crate::{
 };
 
 use super::{
+    RequestContext,
     execute::ExecuteHandle,
     network::{
         interconnect::{NetworkInterconnectHandle, ReceiveHandle},
@@ -27,15 +30,14 @@ pub struct ConsensusChannels {
     tx_incoming_message: Sender<crate::consensus::message::Message>,
     rx_incoming_message: Receiver<crate::consensus::message::Message>,
 
-    tx_output_response: Sender<OutputId>,
-    rx_output_response: Receiver<OutputId>,
+    tx_output_response: UnboundedSender<(OutputId, ())>,
+    rx_output_response: UnboundedReceiver<(OutputId, ())>,
 }
 
 #[derive(Clone)]
 pub struct ConsensusHandle {
     pub receive: ReceiveHandle<crate::consensus::message::Message>,
     pub submit: SubmitHandle,
-    tx_output_response: Sender<OutputId>,
 }
 
 impl Default for ConsensusChannels {
@@ -48,7 +50,7 @@ impl ConsensusChannels {
     pub fn new() -> Self {
         let (tx_request, rx_request) = channel(100);
         let (tx_incoming_message, rx_incoming_message) = channel(100);
-        let (tx_output_response, rx_output_response) = channel(100);
+        let (tx_output_response, rx_output_response) = unbounded_channel();
         Self {
             tx_request,
             rx_request,
@@ -63,15 +65,11 @@ impl ConsensusChannels {
         ConsensusHandle {
             receive: ReceiveHandle::new(self.tx_incoming_message.clone()),
             submit: SubmitHandle::new(self.tx_request.clone()),
-            tx_output_response: self.tx_output_response.clone(),
         }
     }
-}
 
-impl ConsensusHandle {
-    pub async fn output_response(&self, output_id: OutputId) -> anyhow::Result<()> {
-        self.tx_output_response.send(output_id).await?;
-        anyhow::Ok(())
+    pub fn execute_context(&self, execute: ExecuteHandle) -> RequestContext<Vec<Block>, ()> {
+        RequestContext::new(execute.tx_blocks.clone(), self.tx_output_response.clone())
     }
 }
 
@@ -91,7 +89,7 @@ impl ConsensusTask {
         network_connect: NetworkInterconnectHandle,
         schema: &schema::ReplicaTask,
     ) -> anyhow::Result<Self> {
-        let context = ConsensusTaskContext::new(channels.handle(), execute, network_connect);
+        let context = ConsensusTaskContext::new(channels.execute_context(execute), network_connect);
         let state = Bullshark::new(context, (&schema.config).into(), schema.node_index);
         Ok(Self::new(channels, state))
     }
@@ -115,7 +113,7 @@ impl ConsensusTask {
                 Some((at, request)) = self.channels.rx_request.recv() => {
                     self.state.on_request(at, request);
                 }
-                Some(output_id) = self.channels.rx_output_response.recv() => {
+                Some((output_id, ())) = self.channels.rx_output_response.recv() => {
                     self.state.on_output_response(output_id);
                 }
             }
@@ -124,39 +122,25 @@ impl ConsensusTask {
 }
 
 struct ConsensusTaskContext {
-    consensus: ConsensusHandle,
-    execute: ExecuteHandle,
+    execute: RequestContext<Vec<Block>, ()>,
     network_connect: NetworkInterconnectHandle,
-    output_id: OutputId,
 }
 
 impl ConsensusTaskContext {
     fn new(
-        consensus: ConsensusHandle,
-        execute: ExecuteHandle,
+        execute: RequestContext<Vec<Block>, ()>,
         network_connect: NetworkInterconnectHandle,
     ) -> Self {
         Self {
-            consensus,
             execute,
             network_connect,
-            output_id: 0,
         }
     }
 }
 
 impl BullsharkContext for ConsensusTaskContext {
     fn output(&mut self, blocks: Vec<Block>) -> OutputId {
-        self.output_id += 1;
-        let output_id = self.output_id;
-        let execute = self.execute.clone();
-        let consensus = self.consensus.clone();
-        tokio::spawn(async move {
-            execute.execute(blocks).await?;
-            consensus.output_response(output_id).await?;
-            anyhow::Ok(())
-        });
-        output_id
+        self.execute.request(blocks)
     }
 
     fn send(&mut self, node_index: NodeIndex, message: crate::consensus::message::Message) {
