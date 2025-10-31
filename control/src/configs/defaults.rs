@@ -9,3 +9,4 @@ pub enum Storage {
     Big,
 }
 pub const STORAGE: Storage = Storage::Full;
+pub const NUM_SHARDS: u8 = 1;

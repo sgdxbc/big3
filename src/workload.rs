@@ -16,14 +16,16 @@ use self::zipfian::ScrambledZipfian;
 mod zipfian;
 
 pub type InvokeId = RequestId;
+pub type ShardIndex = crate::schema::ShardIndex;
 
 pub trait WorkloadContext {
-    fn invoke(&mut self, command: Vec<u8>) -> InvokeId;
+    fn invoke(&mut self, shard: ShardIndex, command: Vec<u8>) -> InvokeId;
 }
 
 pub struct WorkloadConfig {
     num_keys: u64,
     read_ratio: f64,
+    num_shards: ShardIndex,
 }
 
 impl From<&schema::WorkloadConfig> for WorkloadConfig {
@@ -31,7 +33,14 @@ impl From<&schema::WorkloadConfig> for WorkloadConfig {
         Self {
             num_keys: config.num_keys,
             read_ratio: config.read_ratio,
+            num_shards: config.num_shards,
         }
+    }
+}
+
+impl WorkloadConfig {
+    fn shard_of_key(&self, index: u64) -> ShardIndex {
+        (index % self.num_shards as u64) as _
     }
 }
 
@@ -85,11 +94,15 @@ impl<C: WorkloadContext> Workload<C> {
     }
 
     fn invoke(&mut self) {
-        let key = execute::key(self.zipfian.next_u64(&mut rng()));
+        let key_index = self.zipfian.next_u64(&mut rng());
+        // let key_index = rng().random_range(0..self.config.num_keys);
+        let key = execute::key(key_index);
         if rng().random_bool(self.config.read_ratio) {
             let op = Op::Get(key);
             let command = bincode::encode_to_vec(&op, bincode::config::standard()).unwrap();
-            let invoke_id = self.context.invoke(command);
+            let invoke_id = self
+                .context
+                .invoke(self.config.shard_of_key(key_index), command);
             self.working = Some(WorkingState {
                 start: Instant::now(),
                 invoke_id,

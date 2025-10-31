@@ -129,10 +129,7 @@ pub async fn load_all(
                         break anyhow::Ok(resp);
                     }
                     Err(err) if err.is_request() && retry > 0 => {
-                        println!(
-                            "load request to {} failed: {}. retrying...",
-                            public_dns, err
-                        );
+                        println!("load request failed: {}. retrying...", err);
                         retry -= 1;
                     }
                     Err(err) => Err(err)?,

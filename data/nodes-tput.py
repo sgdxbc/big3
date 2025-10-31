@@ -1,21 +1,17 @@
 import polars as pl
 import matplotlib.pyplot as plt
 
-df = (
-    pl.read_csv("data/nodes-tput.csv")
-    .filter(pl.col("_notes").is_null())
-    .with_columns((pl.col("num_faulty_nodes") * 3 + 1).alias("num_nodes"))
-)
+df = pl.read_csv("data/nodes-tput.csv").filter(pl.col("_notes").is_null())
 print(df)
 
 fig, ax = plt.subplots()
-for storage in df["storage"].unique():
-    storage_df = df.filter(pl.col("storage") == storage)
+for setting in df["setting"].unique():
+    setting_df = df.filter(pl.col("setting") == setting)
     ax.plot(
-        storage_df["num_nodes"],
-        storage_df["tput"],
+        setting_df["num_nodes"],
+        setting_df["tput"],
         marker="o",
-        label=storage,
+        label=setting,
     )
 ax.legend()
 ax.set_xlim(0, None)

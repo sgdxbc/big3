@@ -3,8 +3,8 @@ use std::time::Duration;
 use big_control::{
     Cluster, Instance,
     configs::{
-        NUM_CONCURRENT, NUM_FAULTY_NODES, NUM_KEYS, READ_RATIO, STORAGE, Storage, num_nodes,
-        num_running_nodes,
+        NUM_CONCURRENT, NUM_FAULTY_NODES, NUM_KEYS, NUM_SHARDS, READ_RATIO, STORAGE, Storage,
+        num_nodes,
     },
     load_all, run_endpoints, stop_all,
 };
@@ -24,15 +24,17 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn run(cluster: &Cluster) -> anyhow::Result<()> {
+    let num_running_nodes = (2 * NUM_FAULTY_NODES + 1) * NUM_SHARDS as u16;
+
     let endpoints = run_endpoints(
         [
-            &cluster.servers[..num_running_nodes() as usize],
+            &cluster.servers[..num_running_nodes as usize],
             &cluster.clients,
         ]
         .concat(),
     );
     let workload = run_workload(
-        &cluster.servers[..num_running_nodes() as usize],
+        &cluster.servers[..num_running_nodes as usize],
         &cluster.clients,
     );
     let workload = async {
@@ -52,32 +54,33 @@ async fn run_workload(
     println!("wait for servers to boot");
     sleep(Duration::from_millis(2000)).await;
 
+    let shard_size = 2 * NUM_FAULTY_NODES + 1;
     let ips = server_instances
         .iter()
         .map(|instance| instance.private_ip)
+        .collect::<Vec<_>>()
+        .chunks_exact(shard_size as _)
+        .map(|chunk| chunk.to_vec())
         .collect::<Vec<_>>();
 
     println!("load servers");
-    let replica_items = server_instances
-        .iter()
-        .enumerate()
-        .map(|(node_index, instance)| {
-            let schema = big_schema::ReplicaTask {
-                node_index: node_index as _,
-                ips: ips.clone(),
-                config: big_schema::ReplicaConfig {
-                    num_nodes: num_nodes(),
-                    num_faulty_nodes: NUM_FAULTY_NODES,
-                },
-            };
-            (
-                instance,
-                match STORAGE {
-                    Storage::Full => Task::Full(schema),
-                    Storage::Big => Task::Big(schema),
-                },
-            )
-        });
+    let replica_items = server_instances.iter().enumerate().map(|(i, instance)| {
+        let schema = big_schema::ReplicaTask {
+            node_index: (i % shard_size as usize) as _,
+            ips: ips[i / shard_size as usize].clone(),
+            config: big_schema::ReplicaConfig {
+                num_nodes: num_nodes(),
+                num_faulty_nodes: NUM_FAULTY_NODES,
+            },
+        };
+        (
+            instance,
+            match STORAGE {
+                Storage::Full => Task::Full(schema),
+                Storage::Big => Task::Big(schema),
+            },
+        )
+    });
     load_all(replica_items, control_client.clone()).await?;
 
     println!("start servers");
@@ -94,6 +97,7 @@ async fn run_workload(
             num_concurrent: NUM_CONCURRENT,
             num_keys: NUM_KEYS,
             read_ratio: READ_RATIO,
+            num_shards: NUM_SHARDS,
         },
     };
     let client_items = client_instances

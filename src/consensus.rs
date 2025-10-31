@@ -54,7 +54,7 @@ impl BullsharkConfig {
         // round % 2 == 0 && node_index == (round / 2 % self.num_node as Round) as NodeIndex
         // with 2f+1 nodes, the vanilla leader selection will result in long periods without leader,
         // resulting in fluctuating load to execution layer
-        round % 2 == 0 && node_index == 0
+        round.is_multiple_of(2) && node_index == 0
     }
 }
 

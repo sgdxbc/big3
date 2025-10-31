@@ -11,10 +11,7 @@ use hdrhistogram::{
 };
 use log::{debug, error};
 use quinn::{Connection, Endpoint, TransportConfig};
-use rand::{
-    Rng, rng,
-    seq::{IteratorRandom as _, SliceRandom},
-};
+use rand::{Rng, rng, seq::IteratorRandom as _};
 use tokio::{
     select,
     sync::mpsc::{
@@ -30,7 +27,7 @@ use crate::{
     client::{Client, ClientContext},
     schema,
     types::{ClientId, NodeIndex, Reply, Request},
-    workload::{InvokeId, Workload, WorkloadContext},
+    workload::{InvokeId, ShardIndex, Workload, WorkloadContext},
 };
 
 use super::{RequestContext, RequestId, ResponseContext};
@@ -49,8 +46,13 @@ impl ClientWorkerChannels {
         }
     }
 
-    fn invoke_context(&self, client_handle: ClientHandle) -> RequestContext<Vec<u8>, Vec<u8>> {
-        RequestContext::new(client_handle.tx_invoke, self.tx_invoke_response.clone())
+    fn invoke_contexts(&self, clients: Vec<ClientHandle>) -> Vec<RequestContext<Vec<u8>, Vec<u8>>> {
+        clients
+            .into_iter()
+            .map(|client_handle| {
+                RequestContext::new(client_handle.tx_invoke, self.tx_invoke_response.clone())
+            })
+            .collect()
     }
 }
 
@@ -66,11 +68,11 @@ impl WorkloadTask {
 
     fn load(
         client_worker_channels: ClientWorkerChannels,
-        client: ClientHandle,
+        clients: Vec<ClientHandle>,
         scrape_state: Arc<Mutex<ClientScrapeState>>,
         schema: &schema::ClientTask,
     ) -> anyhow::Result<Self> {
-        let context = ClientWorkerTaskContext::new(client_worker_channels.invoke_context(client));
+        let context = ClientWorkerTaskContext::new(client_worker_channels.invoke_contexts(clients));
         let state = Workload::new(context, (&schema.workload_config).into(), scrape_state);
         Ok(Self::new(client_worker_channels, state))
     }
@@ -105,18 +107,18 @@ impl WorkloadTask {
 }
 
 struct ClientWorkerTaskContext {
-    invoke: RequestContext<Vec<u8>, Vec<u8>>,
+    invokes: Vec<RequestContext<Vec<u8>, Vec<u8>>>,
 }
 
 impl ClientWorkerTaskContext {
-    fn new(invoke: RequestContext<Vec<u8>, Vec<u8>>) -> Self {
-        Self { invoke }
+    fn new(invokes: Vec<RequestContext<Vec<u8>, Vec<u8>>>) -> Self {
+        Self { invokes }
     }
 }
 
 impl WorkloadContext for ClientWorkerTaskContext {
-    fn invoke(&mut self, command: Vec<u8>) -> InvokeId {
-        self.invoke.request(command)
+    fn invoke(&mut self, shard: ShardIndex, command: Vec<u8>) -> InvokeId {
+        self.invokes[shard as usize].request(command)
     }
 }
 
@@ -241,14 +243,13 @@ impl NetworkConnectTask {
         endpoint: Endpoint,
         client: ClientHandle,
         schema: &schema::ClientTask,
+        shard_index: ShardIndex,
         client_id: ClientId,
     ) -> anyhow::Result<Self> {
         let mut txs_outgoing_message = HashMap::new();
         let mut join_set = JoinSet::new();
 
-        let mut ips = schema.ips.iter().enumerate().collect::<Vec<_>>();
-        ips.shuffle(&mut rand::rng());
-        for (i, &ip) in ips {
+        for (i, &ip) in schema.ips[shard_index as usize].iter().enumerate() {
             let conn = endpoint
                 .connect((ip, 5000).into(), "server.example")?
                 .await?;
@@ -339,22 +340,36 @@ impl ClientNodeTask {
             let mut endpoint = Endpoint::client(([0, 0, 0, 0], 0).into())?;
             endpoint.set_default_client_config(config.clone());
 
-            let client_channels = ClientChannels::new();
+            let mut client_handles = Vec::new();
+            for shard in 0..schema.ips.len() {
+                let client_channels = ClientChannels::new();
 
-            let client_id = rand::random();
+                let client_id = rand::random();
 
-            let network_connect =
-                NetworkConnectTask::load(endpoint, client_channels.handle(), &schema, client_id)
-                    .await?;
-            debug!("[{:08x}] network connect loaded", client_id);
-            let client = ClientTask::load(
-                client_channels,
-                network_connect.handle(),
-                &schema,
-                client_id,
-            )
-            .await?;
-            debug!("[{:08x}] client loaded", client_id);
+                let network_connect = NetworkConnectTask::load(
+                    endpoint.clone(),
+                    client_channels.handle(),
+                    &schema,
+                    shard as _,
+                    client_id,
+                )
+                .await?;
+                debug!("[{:08x}] network connect loaded", client_id);
+                let client = ClientTask::load(
+                    client_channels,
+                    network_connect.handle(),
+                    &schema,
+                    client_id,
+                )
+                .await?;
+                debug!("[{:08x}] client loaded", client_id);
+
+                client_handles.push(client.channels.handle());
+                connected_clients.push(ConnectedClientTask {
+                    network_connect,
+                    client,
+                });
+            }
 
             for _ in 0..(schema.workload_config.num_concurrent / num_group
                 + (group_index < schema.workload_config.num_concurrent % num_group) as u64)
@@ -364,18 +379,13 @@ impl ClientNodeTask {
                 let client_worker_channels = ClientWorkerChannels::new();
                 let client_worker = WorkloadTask::load(
                     client_worker_channels,
-                    client.channels.handle(),
+                    client_handles.clone(),
                     scrape_state.clone(),
                     &schema,
                 )?;
                 workloads.push(client_worker);
             }
             debug!("client node task loaded");
-
-            connected_clients.push(ConnectedClientTask {
-                network_connect,
-                client,
-            });
         }
 
         Ok(Self {
