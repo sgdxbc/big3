@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     hash::{BuildHasher, BuildHasherDefault, DefaultHasher},
     time::Instant,
 };
@@ -157,6 +157,7 @@ pub struct BigStorage<C> {
     primary_shards: HashSet<u32>,
     secondary_shards: HashSet<u32>,
 
+    pending_fetches: VecDeque<(Vec<Vec<u8>>, ResponseContext<Vec<Option<Vec<u8>>>>)>,
     fetch_seq: FetchSeq,
     fetching: Option<FetchingState>,
     reordered_push_states: HashMap<FetchSeq, Vec<message::PushState>>,
@@ -184,14 +185,15 @@ impl<C> BigStorage<C> {
                 secondary_shards.insert(shard);
             }
         }
-        let (reordered_node_states,) = Default::default();
+        let (reordered_push_states, pending_fetches) = Default::default();
         Self {
             context,
             config,
             node_index,
             primary_shards,
             secondary_shards,
-            reordered_push_states: reordered_node_states,
+            reordered_push_states,
+            pending_fetches,
             fetch_seq: 0,
             fetching: None,
         }
@@ -202,39 +204,12 @@ impl<C: BigStorageContext> BigStorage<C> {
     pub fn invoke(&mut self, op: StorageOp) {
         match op {
             StorageOp::Fetch(keys, context) => {
-                self.fetch_seq += 1;
-
-                // keys.sort();
-                let key_shards: Vec<u32> = keys
-                    .iter()
-                    .map(|key| self.config.shard_of_key(key))
-                    .collect();
-                let backend_keys = keys
-                    .into_iter()
-                    .zip(&key_shards)
-                    .filter_map(|(key, shard)| {
-                        if self.primary_shards.contains(shard) {
-                            Some(key)
-                        } else {
-                            None
-                        }
-                    })
-                    .collect();
-                let fetch_id = self.context.backend_fetch(backend_keys);
-                let fetching = FetchingState {
-                    key_shards,
-                    backend: Some(fetch_id),
-                    node_states: Default::default(),
-                    context,
-                };
-                let replaced = self.fetching.replace(fetching);
-                assert!(replaced.is_none(), "concurrent fetches are not supported");
-
-                if let Some(push_states) = self.reordered_push_states.remove(&self.fetch_seq) {
-                    for push_state in push_states {
-                        self.insert_state(push_state.node_index, push_state.values);
-                    }
+                if self.fetching.is_some() {
+                    self.pending_fetches.push_back((keys, context));
+                    return;
                 }
+
+                self.start_fetch(keys, context);
             }
             StorageOp::Post(mut updates) => {
                 updates.retain(|(key, _)| {
@@ -242,6 +217,40 @@ impl<C: BigStorageContext> BigStorage<C> {
                     self.primary_shards.contains(&shard) || self.secondary_shards.contains(&shard)
                 });
                 self.context.backend_post(updates);
+            }
+        }
+    }
+
+    fn start_fetch(&mut self, keys: Vec<Vec<u8>>, context: ResponseContext<Vec<Option<Vec<u8>>>>) {
+        self.fetch_seq += 1;
+        let key_shards: Vec<u32> = keys
+            .iter()
+            .map(|key| self.config.shard_of_key(key))
+            .collect();
+        let backend_keys = keys
+            .into_iter()
+            .zip(&key_shards)
+            .filter_map(|(key, shard)| {
+                if self.primary_shards.contains(shard) {
+                    Some(key)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        let fetch_id = self.context.backend_fetch(backend_keys);
+        let fetching = FetchingState {
+            key_shards,
+            backend: Some(fetch_id),
+            node_states: Default::default(),
+            context,
+        };
+        let replaced = self.fetching.replace(fetching);
+        assert!(replaced.is_none());
+
+        if let Some(push_states) = self.reordered_push_states.remove(&self.fetch_seq) {
+            for push_state in push_states {
+                self.insert_state(push_state.node_index, push_state.values);
             }
         }
     }
@@ -307,6 +316,10 @@ impl<C: BigStorageContext> BigStorage<C> {
                 .all(|(i, values)| node_index[*i as usize] == values.len())
         );
         fetching.context.respond(values);
+
+        if let Some((keys, context)) = self.pending_fetches.pop_front() {
+            self.start_fetch(keys, context);
+        }
     }
 }
 
