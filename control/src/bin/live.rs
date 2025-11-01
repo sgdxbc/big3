@@ -3,8 +3,8 @@ use std::time::Duration;
 use big_control::{
     Cluster, Instance,
     configs::{
-        NUM_CONCURRENT, NUM_FAULTY_NODES, NUM_KEYS, NUM_SHARDS, READ_RATIO, STORAGE, Storage,
-        num_nodes,
+        LIVE_DURATION, NUM_CONCURRENT, NUM_FAULTY_NODES, NUM_KEYS, NUM_SHARDS, READ_RATIO, STORAGE,
+        Storage, num_nodes,
     },
     load_all, run_endpoints, stop_all,
 };
@@ -108,7 +108,7 @@ async fn run_workload(
     start_all(client_instances, control_client.clone()).await?;
 
     let mut next_scrape = Instant::now() + Duration::from_secs(1);
-    for i in 0..10 {
+    for i in 0..LIVE_DURATION.as_secs() {
         sleep_until(next_scrape).await;
         println!("scrape clients round {}", i + 1);
         scrape_all(client_instances, control_client.clone()).await?;

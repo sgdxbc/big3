@@ -1,10 +1,11 @@
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::VecDeque,
     time::{Duration, Instant},
 };
 
 use bincode::{Decode, Encode};
 use log::info;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::{
     consensus::Block,
@@ -70,8 +71,9 @@ struct WorkingState {
 }
 
 struct ExecuteMetrics {
-    start: Instant,
     work_time: Duration,
+    fetch_start: Instant,
+    fetch_time: Duration,
 }
 
 impl<C> Execute<C> {
@@ -86,8 +88,9 @@ impl<C> Execute<C> {
             executed_count: 0,
 
             metrics: ExecuteMetrics {
-                start: Instant::now(),
                 work_time: Duration::ZERO,
+                fetch_start: Instant::now(),
+                fetch_time: Duration::ZERO,
             },
         }
     }
@@ -103,12 +106,15 @@ impl<C: ExecuteContext> Execute<C> {
     }
 
     pub fn log_metrics(&self) {
-        info!("execution work time: {:?}", self.metrics.work_time);
+        info!(
+            "execution work time: {:?}, fetch time: {:?}",
+            self.metrics.work_time, self.metrics.fetch_time
+        );
     }
 
     fn prepare_blocks(&mut self, blocks: Vec<Block>, context: ResponseContext<()>) {
-        self.metrics.start = Instant::now();
         assert!(self.working.is_none());
+        let start = Instant::now();
 
         let mut working = WorkingState {
             requests: Default::default(),
@@ -116,7 +122,7 @@ impl<C: ExecuteContext> Execute<C> {
             fetching: Default::default(),
             context,
         };
-        let mut fetching_keys = HashSet::new();
+        let mut fetching_keys = FxHashSet::default();
         for block in blocks {
             for request in block.txns {
                 let op = bincode::decode_from_slice(&request.command, bincode::config::standard())
@@ -142,6 +148,9 @@ impl<C: ExecuteContext> Execute<C> {
         let replaced = self.working.replace(working);
         assert!(replaced.is_none());
         // self.commit_blocks(working, Default::default())
+
+        self.metrics.work_time += start.elapsed();
+        self.metrics.fetch_start = Instant::now();
     }
 
     pub fn on_fetch_response(&mut self, fetch_id: FetchId, values: Vec<Option<Vec<u8>>>) {
@@ -149,15 +158,18 @@ impl<C: ExecuteContext> Execute<C> {
             return;
         };
         assert_eq!(working.fetch_id, fetch_id);
+        self.metrics.fetch_time += self.metrics.fetch_start.elapsed();
         self.commit_blocks(working, values);
     }
 
     fn commit_blocks(&mut self, working: WorkingState, values: Vec<Option<Vec<u8>>>) {
-        let mut state: HashMap<String, Option<Vec<u8>>> = working
+        let start = Instant::now();
+
+        let mut state = working
             .fetching
             .into_iter()
             .zip(values)
-            .collect::<HashMap<_, _>>();
+            .collect::<FxHashMap<_, _>>();
         let mut updates = Vec::new();
         for (op, client_id, client_seq) in working.requests {
             let op = match op {
@@ -190,7 +202,8 @@ impl<C: ExecuteContext> Execute<C> {
         }
         self.context.post(updates);
         working.context.respond(());
-        self.metrics.work_time += self.metrics.start.elapsed();
+
+        self.metrics.work_time += start.elapsed();
 
         if let Some((block, tx_response)) = self.pending_blocks.pop_front() {
             self.prepare_blocks(block, tx_response);

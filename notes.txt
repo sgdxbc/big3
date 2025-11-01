@@ -63,3 +63,17 @@ Just realize I made a mistake. The only thing that is consistent across the repl
 Ok, well, I probably _can_ issue the RocksDB multi_get with keys gathered from multiple blocks, but I will need to split the get results back to block level and push them per block.
 
 Well, I can also just ignore this with current settings. Because of the settings the DAG shape is highly constraint: it's always a fully-connected mesh, with 2f+1 vertices per round. So that for each committed leader block, its causally-dependent subgraph will be consistent on every node. It is impossible to have one node committing a batch of nodes while the other node is not (and only committing the batch as part of the next batch), because if the other node does not commit this batch, the next batch, whose commitment depends on the next block proposed by the other node which depends on the node collecting all blocks of this batch, cannot be committed. This reasoning is very subtle, but I will accept it for now. This work's focus has never been the consensus part.
+
+----
+
+Now the prefetch. While full replication does not require prefetch, I still need to implement prefetch at execution instead of inside Big storage because prefetch requires execution to explicitly issue ahead fetching, e.g. fetch #2 before post #1, fetch #3 before post #2, etc.
+
+Just realize that it is different between fetching concurrently to executing and concurrent fetches. Currently only one of the execution and storage proceeds at any time. The blocks come in (to execution), execution prepares the fetching key list, then execution pauses and storage starts to work on the keys' values. After storage responds with the values the execution resumes and the storage is idle waiting for the next fetching batch.
+
+By simply (and statically) offset the fetch requests by 1 (or more presicely, -1), as my example above, the execution and storage can already proceed concurrently. Firstly execution works on #1 and storage works on #2 at the same time, then execution works on #2 and storage works on #3 at the same time, etc. The faster of the two will need to wait for the slower one, but the slower one can work for all the time instead of waiting for the faster one as current.
+
+What I have been thinking for a long time is to further parellelize storage (assuming it is the slower one of the two) (hopefully is since parallelize execution would be much more harder) (through parallelize storage is not too easy neither). So that the faster of the two will also be working for all the time. As it turns out, this is not a must for improving performance based on current level.
+
+If execution is dominating the work time, then anything regards to storage will not be significant. On the other hand, if storage is dominating the work time, then concurrently fetching would be necessary because execution takes no time would not be significant if it is already taking minor time.
+
+However, the current status is that execution is ~8s and storage is ~11s. So simply overlapping the two may actually yield a big improvement (and consume the majority of optimization space). Seems lucky but I should not feel lucky for getting to know my work instead of not needing to work.
