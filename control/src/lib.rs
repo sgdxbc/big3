@@ -1,6 +1,7 @@
 use std::{collections::HashSet, net::IpAddr, time::Duration};
 
-use big_schema::{Stopped, Task};
+use big_schema::{Scrape, Stopped, Task};
+use hdrhistogram::serialization::Deserializer;
 use reqwest::Client;
 use serde::{Deserialize, de::DeserializeOwned};
 use tokio::{
@@ -173,4 +174,50 @@ pub async fn stop_all(
         results.push(result??.error_for_status()?.json::<Stopped>().await?);
     }
     Ok(results)
+}
+
+pub struct PerformanceMetrics {
+    pub tput: f64,
+    pub p50: Duration,
+    pub p95: Duration,
+    pub p99: Duration,
+}
+
+pub async fn scrape_all(
+    instances: impl IntoIterator<Item = &Instance>,
+    control_client: Client,
+) -> anyhow::Result<PerformanceMetrics> {
+    let mut tasks = JoinSet::new();
+    for instance in instances {
+        let client = control_client.clone();
+        let url = format!("http://{}:3000/scrape", instance.public_dns);
+        tasks.spawn(async move { client.post(url).send().await });
+    }
+    let mut agg_throughput = 0.;
+    let mut agg_histogram = hdrhistogram::Histogram::<u64>::new(3).unwrap();
+    while let Some(result) = tasks.join_next().await {
+        let scrape = result??.error_for_status()?.json::<Scrape>().await?;
+        let latency_histogram =
+            Deserializer::new().deserialize::<u64, _>(&mut &*scrape.latency_histogram)?;
+        let throughput = latency_histogram.len() as f64 / scrape.interval.as_secs_f64();
+        let p50 = Duration::from_nanos(latency_histogram.value_at_quantile(0.5));
+        let p99 = Duration::from_nanos(latency_histogram.value_at_quantile(0.99));
+        println!(
+            "interval {:12?}, throughput {throughput:.0} req/s, p50 {p50:?}, p99 {p99:?}",
+            scrape.interval
+        );
+
+        agg_throughput += throughput;
+        agg_histogram += latency_histogram;
+    }
+    let agg_p50 = Duration::from_nanos(agg_histogram.value_at_quantile(0.5));
+    let agg_p95 = Duration::from_nanos(agg_histogram.value_at_quantile(0.95));
+    let agg_p99 = Duration::from_nanos(agg_histogram.value_at_quantile(0.99));
+    println!("AGGREGATE: throughput {agg_throughput:.0} req/s, p50 {agg_p50:?}, p99 {agg_p99:?}",);
+    Ok(PerformanceMetrics {
+        tput: agg_throughput,
+        p50: agg_p50,
+        p95: agg_p95,
+        p99: agg_p99,
+    })
 }

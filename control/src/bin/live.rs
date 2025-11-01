@@ -6,10 +6,9 @@ use big_control::{
         LIVE_DURATION, NUM_CONCURRENT, NUM_FAULTY_NODES, NUM_KEYS, NUM_SHARDS, READ_RATIO, STORAGE,
         Storage, num_nodes,
     },
-    load_all, run_endpoints, stop_all,
+    load_all, run_endpoints, scrape_all, stop_all,
 };
-use big_schema::{Scrape, Task};
-use hdrhistogram::serialization::Deserializer;
+use big_schema::Task;
 use reqwest::Client;
 use tokio::{
     task::JoinSet,
@@ -137,41 +136,4 @@ async fn start_all(
         result??.error_for_status()?;
     }
     Ok(())
-}
-
-async fn scrape_all(
-    instances: impl IntoIterator<Item = &Instance>,
-    control_client: Client,
-) -> anyhow::Result<(f64, Duration, Duration, Duration)> {
-    let mut tasks = JoinSet::new();
-    for instance in instances {
-        let client = control_client.clone();
-        let url = format!("http://{}:3000/scrape", instance.public_dns);
-        tasks.spawn(async move { client.post(url).send().await });
-    }
-    let mut agg_throughput = 0.;
-    let mut agg_histogram = hdrhistogram::Histogram::<u64>::new(3).unwrap();
-    while let Some(result) = tasks.join_next().await {
-        let scrape = result??.error_for_status()?.json::<Scrape>().await?;
-        let latency_histogram =
-            Deserializer::new().deserialize::<u64, _>(&mut &*scrape.latency_histogram)?;
-        let throughput = latency_histogram.len() as f64 / scrape.interval.as_secs_f64();
-        let p50 = Duration::from_nanos(latency_histogram.value_at_quantile(0.5));
-        let p95 = Duration::from_nanos(latency_histogram.value_at_quantile(0.95));
-        let p99 = Duration::from_nanos(latency_histogram.value_at_quantile(0.99));
-        println!(
-            "interval {:12?}, throughput {throughput:.0} req/s, p50 {p50:?}, p95 {p95:?}, p99 {p99:?}",
-            scrape.interval
-        );
-
-        agg_throughput += throughput;
-        agg_histogram += latency_histogram;
-    }
-    let agg_p50 = Duration::from_nanos(agg_histogram.value_at_quantile(0.5));
-    let agg_p95 = Duration::from_nanos(agg_histogram.value_at_quantile(0.95));
-    let agg_p99 = Duration::from_nanos(agg_histogram.value_at_quantile(0.99));
-    println!(
-        "AGGREGATE: throughput {agg_throughput:.0} req/s, p50 {agg_p50:?}, p95 {agg_p95:?}, p99 {agg_p99:?}",
-    );
-    Ok((agg_throughput, agg_p50, agg_p95, agg_p99))
 }
