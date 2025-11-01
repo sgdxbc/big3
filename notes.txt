@@ -76,4 +76,4 @@ What I have been thinking for a long time is to further parellelize storage (ass
 
 If execution is dominating the work time, then anything regards to storage will not be significant. On the other hand, if storage is dominating the work time, then concurrently fetching would be necessary because execution takes no time would not be significant if it is already taking minor time.
 
-However, the current status is that execution is ~8s and storage is ~11s. (Ceveat that when doing this profiling I forgot to replace the HashMap in execution with FxHashMap, only replaced the HashSet.) So simply overlapping the two may actually yield a big improvement (and consume the majority of optimization space). Seems lucky but I should not feel lucky for getting to know my work instead of not needing to work.
+However, the current status is that when execution takes ~7s in a run storage takes ~12s, so simply overlapping the two may actually yield a big improvement (and consume the majority of optimization space). Seems lucky but I should not feel lucky for getting to know my work instead of not needing to work.

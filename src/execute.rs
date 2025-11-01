@@ -56,22 +56,29 @@ pub struct Execute<C> {
     config: ExecuteConfig,
     index: NodeIndex,
 
-    working: Option<WorkingState>,
-    pending_blocks: VecDeque<(Vec<Block>, ResponseContext<()>)>,
+    fetching: Option<FetchingState>,
+    pending_blocks: VecDeque<WillFetchState>,
     executed_count: u64,
 
     metrics: ExecuteMetrics,
 }
 
-struct WorkingState {
+struct FetchingState {
     requests: Vec<(Op, ClientId, ClientSeq)>,
     fetch_id: FetchId,
-    fetching: Vec<String>,
+    fetch_keys: Vec<String>,
+    context: ResponseContext<()>,
+}
+
+struct WillFetchState {
+    requests: Vec<(Op, ClientId, ClientSeq)>,
+    fetch_keys: Vec<String>,
     context: ResponseContext<()>,
 }
 
 struct ExecuteMetrics {
-    work_time: Duration,
+    prepare_time: Duration,
+    execute_time: Duration,
     fetch_start: Instant,
     fetch_time: Duration,
 }
@@ -83,12 +90,13 @@ impl<C> Execute<C> {
             config,
             index,
 
-            working: None,
+            fetching: None,
             pending_blocks: Default::default(),
             executed_count: 0,
 
             metrics: ExecuteMetrics {
-                work_time: Duration::ZERO,
+                prepare_time: Duration::ZERO,
+                execute_time: Duration::ZERO,
                 fetch_start: Instant::now(),
                 fetch_time: Duration::ZERO,
             },
@@ -98,28 +106,22 @@ impl<C> Execute<C> {
 
 impl<C: ExecuteContext> Execute<C> {
     pub fn on_block(&mut self, blocks: Vec<Block>, context: ResponseContext<()>) {
-        if self.working.is_some() {
-            self.pending_blocks.push_back((blocks, context));
-            return;
-        }
         self.prepare_blocks(blocks, context);
     }
 
     pub fn log_metrics(&self) {
         info!(
-            "execution work time: {:?}, fetch time: {:?}",
-            self.metrics.work_time, self.metrics.fetch_time
+            "execution prepare time: {:?}, execute time: {:?}, fetch time: {:?}",
+            self.metrics.prepare_time, self.metrics.execute_time, self.metrics.fetch_time
         );
     }
 
     fn prepare_blocks(&mut self, blocks: Vec<Block>, context: ResponseContext<()>) {
-        assert!(self.working.is_none());
         let start = Instant::now();
 
-        let mut working = WorkingState {
+        let mut working = WillFetchState {
             requests: Default::default(),
-            fetch_id: 0,
-            fetching: Default::default(),
+            fetch_keys: Default::default(),
             context,
         };
         let mut fetching_keys = FxHashSet::default();
@@ -137,36 +139,50 @@ impl<C: ExecuteContext> Execute<C> {
             }
         }
 
-        working.fetching = fetching_keys.into_iter().collect();
-        working.fetching.sort_unstable();
-        let keys = working
-            .fetching
-            .iter()
-            .map(|k| k.as_bytes().to_vec())
-            .collect();
-        working.fetch_id = self.context.fetch(keys);
-        let replaced = self.working.replace(working);
-        assert!(replaced.is_none());
-        // self.commit_blocks(working, Default::default())
+        working.fetch_keys = fetching_keys.into_iter().collect();
+        working.fetch_keys.sort_unstable();
 
-        self.metrics.work_time += start.elapsed();
+        self.metrics.prepare_time += start.elapsed();
+
+        if self.fetching.is_none() {
+            self.fetch_for_blocks(working);
+        } else {
+            self.pending_blocks.push_back(working);
+        }
+    }
+
+    fn fetch_for_blocks(&mut self, working: WillFetchState) {
+        assert!(self.fetching.is_none());
+        let fetch_id = self.context.fetch(
+            working
+                .fetch_keys
+                .iter()
+                .map(|k| k.as_bytes().to_vec())
+                .collect(),
+        );
         self.metrics.fetch_start = Instant::now();
+        self.fetching = Some(FetchingState {
+            requests: working.requests,
+            fetch_id,
+            fetch_keys: working.fetch_keys,
+            context: working.context,
+        });
     }
 
     pub fn on_fetch_response(&mut self, fetch_id: FetchId, values: Vec<Option<Vec<u8>>>) {
-        let Some(working) = self.working.take() else {
-            return;
+        let Some(working) = self.fetching.take() else {
+            unimplemented!()
         };
         assert_eq!(working.fetch_id, fetch_id);
         self.metrics.fetch_time += self.metrics.fetch_start.elapsed();
-        self.commit_blocks(working, values);
+        self.execute_blocks(working, values);
     }
 
-    fn commit_blocks(&mut self, working: WorkingState, values: Vec<Option<Vec<u8>>>) {
+    fn execute_blocks(&mut self, working: FetchingState, values: Vec<Option<Vec<u8>>>) {
         let start = Instant::now();
 
         let mut state = working
-            .fetching
+            .fetch_keys
             .into_iter()
             .zip(values)
             .collect::<FxHashMap<_, _>>();
@@ -203,10 +219,10 @@ impl<C: ExecuteContext> Execute<C> {
         self.context.post(updates);
         working.context.respond(());
 
-        self.metrics.work_time += start.elapsed();
+        self.metrics.execute_time += start.elapsed();
 
-        if let Some((block, tx_response)) = self.pending_blocks.pop_front() {
-            self.prepare_blocks(block, tx_response);
+        if let Some(state) = self.pending_blocks.pop_front() {
+            self.fetch_for_blocks(state);
         }
     }
 }

@@ -264,10 +264,10 @@ impl<C: BullsharkContext> Bullshark<C> {
             && self.certs.get(&(self.round - 1)).is_some_and(|certs| {
                 certs.len() >= (self.config.num_node - self.config.num_faulty_node) as usize
             })
-            // allow one inflight output to enable concurrent execution and consensus
-            // with sufficient large request rate, the execution of that one output will finish
-            // after this proposal is outputted
-            && self.executing.len() <= 1
+            // allow two inflight outputs to enable concurrent consensus, execution and storage
+            // when execution works on #1 state, storage can work on preparing #2 state, and
+            // consensus should start to propose #3
+            && self.executing.len() <= 2
         {
             self.propose();
         }
