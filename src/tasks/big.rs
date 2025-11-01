@@ -3,7 +3,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     schema,
-    storage::{BigStorage, BigStorageContext, BackendFetchId, StorageOp},
+    storage::{BackendFetchId, BigStorage, BigStorageContext, StorageOp},
 };
 
 use super::{
@@ -13,15 +13,15 @@ use super::{
         interconnect::{NetworkInterconnectHandle, NetworkInterconnectTask, ReceiveHandle},
         server::{NetworkAcceptTask, NetworkOutgoingChannels, NetworkOutgoingTask},
     },
-    storage::{PlainStorageChannels, PlainStorageTask, StorageHandle},
+    storage::{PlainStorageChannels, PlainStorageTask, StorageContext, StorageHandle},
 };
 
 struct BigStorageChannels {
     tx_storage_op: UnboundedSender<StorageOp>,
     rx_storage_op: UnboundedReceiver<StorageOp>,
 
-    tx_fetch_response: Sender<(BackendFetchId, Vec<Option<Vec<u8>>>)>,
-    rx_fetch_response: Receiver<(BackendFetchId, Vec<Option<Vec<u8>>>)>,
+    tx_fetch_response: UnboundedSender<(BackendFetchId, Vec<Option<Vec<u8>>>)>,
+    rx_fetch_response: UnboundedReceiver<(BackendFetchId, Vec<Option<Vec<u8>>>)>,
 
     tx_incoming_message: Sender<crate::storage::Message>,
     rx_incoming_message: Receiver<crate::storage::Message>,
@@ -31,24 +31,12 @@ struct BigStorageChannels {
 struct BigStorageHandle {
     storage: StorageHandle,
     receive: ReceiveHandle<crate::storage::Message>,
-    tx_fetch_response: Sender<(BackendFetchId, Vec<Option<Vec<u8>>>)>,
-}
-
-impl BigStorageHandle {
-    async fn fetch_response(
-        &self,
-        fetch_id: BackendFetchId,
-        response: Vec<Option<Vec<u8>>>,
-    ) -> anyhow::Result<()> {
-        self.tx_fetch_response.send((fetch_id, response)).await?;
-        Ok(())
-    }
 }
 
 impl BigStorageChannels {
     fn new() -> Self {
         let (tx_storage_op, rx_storage_op) = tokio::sync::mpsc::unbounded_channel();
-        let (tx_fetch_response, rx_fetch_response) = tokio::sync::mpsc::channel(100);
+        let (tx_fetch_response, rx_fetch_response) = tokio::sync::mpsc::unbounded_channel();
         let (tx_incoming_message, rx_incoming_message) = tokio::sync::mpsc::channel(100);
         Self {
             tx_storage_op,
@@ -64,8 +52,11 @@ impl BigStorageChannels {
         BigStorageHandle {
             storage: StorageHandle::new(self.tx_storage_op.clone()),
             receive: ReceiveHandle::new(self.tx_incoming_message.clone()),
-            tx_fetch_response: self.tx_fetch_response.clone(),
         }
+    }
+
+    fn backend_storage_context(&self, storage: StorageHandle) -> StorageContext {
+        StorageContext::new(storage, self.tx_fetch_response.clone())
     }
 }
 
@@ -85,7 +76,10 @@ impl BigStorageTask {
         storage: StorageHandle,
         schema: &schema::ReplicaTask,
     ) -> anyhow::Result<Self> {
-        let context = BigStorageTaskContext::new(channels.handle(), network_interconnect, storage);
+        let context = BigStorageTaskContext::new(
+            network_interconnect,
+            channels.backend_storage_context(storage),
+        );
         let state = BigStorage::new(context, (&schema.config).into(), schema.node_index);
         Ok(Self::new(channels, state))
     }
@@ -113,43 +107,26 @@ impl BigStorageTask {
 }
 
 struct BigStorageTaskContext {
-    big: BigStorageHandle,
     network_interconnect: NetworkInterconnectHandle,
-    storage: StorageHandle,
-    fetch_id: BackendFetchId,
+    storage: StorageContext,
 }
 
 impl BigStorageTaskContext {
-    fn new(
-        big: BigStorageHandle,
-        network_interconnect: NetworkInterconnectHandle,
-        storage: StorageHandle,
-    ) -> Self {
+    fn new(network_interconnect: NetworkInterconnectHandle, storage: StorageContext) -> Self {
         Self {
-            big,
             network_interconnect,
             storage,
-            fetch_id: 0,
         }
     }
 }
 
 impl BigStorageContext for BigStorageTaskContext {
     fn backend_fetch(&mut self, keys: Vec<Vec<u8>>) -> BackendFetchId {
-        self.fetch_id += 1;
-        let fetch_id = self.fetch_id;
-        let big = self.big.clone();
-        let storage = self.storage.clone();
-        tokio::spawn(async move {
-            let response = storage.fetch(keys).await?;
-            big.fetch_response(fetch_id, response).await?;
-            anyhow::Ok(())
-        });
-        fetch_id
+        self.storage.fetch(keys)
     }
 
     fn backend_post(&mut self, updates: Vec<(Vec<u8>, Option<Vec<u8>>)>) {
-        let _ = self.storage.post(updates);
+        self.storage.post(updates);
     }
 
     fn send_to_all(&mut self, message: crate::storage::Message) {

@@ -2,10 +2,7 @@ use rocksdb::DB;
 use tempfile::{TempDir, tempdir};
 use tokio::{
     process::Command,
-    sync::{
-        mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel},
-        oneshot,
-    },
+    sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel},
 };
 use tokio_util::sync::CancellationToken;
 
@@ -13,6 +10,8 @@ use crate::{
     storage::{PlainStorage, StorageOp},
     tasks::PREFILL_PATH,
 };
+
+use super::{RequestId, ResponseContext};
 
 #[derive(Clone)]
 pub struct StorageHandle {
@@ -24,17 +23,40 @@ impl StorageHandle {
         Self { tx_storage_op }
     }
 
-    pub async fn fetch(&self, keys: Vec<Vec<u8>>) -> anyhow::Result<Vec<Option<Vec<u8>>>> {
-        let (tx_response, rx_response) = oneshot::channel();
-        self.tx_storage_op
-            .send(StorageOp::Fetch(keys, tx_response))?;
-        let res = rx_response.await?;
-        anyhow::Ok(res)
-    }
-
     pub fn post(&self, updates: Vec<(Vec<u8>, Option<Vec<u8>>)>) -> anyhow::Result<()> {
         self.tx_storage_op.send(StorageOp::Post(updates))?;
         anyhow::Ok(())
+    }
+}
+
+pub struct StorageContext {
+    storage: StorageHandle,
+    tx_fetch_response: UnboundedSender<(RequestId, Vec<Option<Vec<u8>>>)>,
+    fetch_id: RequestId,
+}
+
+impl StorageContext {
+    pub fn new(
+        storage: StorageHandle,
+        tx_fetch_response: UnboundedSender<(RequestId, Vec<Option<Vec<u8>>>)>,
+    ) -> Self {
+        Self {
+            storage,
+            tx_fetch_response,
+            fetch_id: 0,
+        }
+    }
+
+    pub fn fetch(&mut self, keys: Vec<Vec<u8>>) -> RequestId {
+        self.fetch_id += 1;
+        let context = ResponseContext::new(self.fetch_id, self.tx_fetch_response.clone());
+        let op = StorageOp::Fetch(keys, context);
+        let _ = self.storage.tx_storage_op.send(op);
+        self.fetch_id
+    }
+
+    pub fn post(&self, updates: Vec<(Vec<u8>, Option<Vec<u8>>)>) {
+        let _ = self.storage.post(updates);
     }
 }
 

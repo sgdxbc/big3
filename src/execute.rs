@@ -9,7 +9,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::{
     consensus::Block,
-    tasks::ResponseContext,
+    tasks::{RequestId, ResponseContext},
     types::{ClientId, ClientSeq, NodeIndex, Reply},
 };
 
@@ -29,7 +29,7 @@ pub fn key(index: u64) -> String {
     format!("key-{index:012}")
 }
 
-pub type FetchId = u64;
+pub type FetchId = RequestId;
 
 pub trait ExecuteContext {
     // network

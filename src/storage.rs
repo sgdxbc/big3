@@ -8,12 +8,15 @@ use hdrhistogram::Histogram;
 use log::info;
 use rand::{SeedableRng, rngs::StdRng, seq::IteratorRandom};
 use rocksdb::{DB, WriteBatch};
-use tokio::sync::oneshot;
 
-use crate::{schema, types::NodeIndex};
+use crate::{
+    schema,
+    tasks::{RequestId, ResponseContext},
+    types::NodeIndex,
+};
 
 pub enum StorageOp {
-    Fetch(Vec<Vec<u8>>, oneshot::Sender<Vec<Option<Vec<u8>>>>),
+    Fetch(Vec<Vec<u8>>, ResponseContext<Vec<Option<Vec<u8>>>>),
     Post(Vec<(Vec<u8>, Option<Vec<u8>>)>),
 }
 
@@ -58,7 +61,7 @@ impl PlainStorage {
 
     pub fn invoke(&mut self, op: StorageOp) -> anyhow::Result<()> {
         match op {
-            StorageOp::Fetch(keys, tx_response) => {
+            StorageOp::Fetch(keys, context) => {
                 let res = if !keys.is_empty() {
                     let start = Instant::now();
                     let res = self
@@ -74,7 +77,7 @@ impl PlainStorage {
                 } else {
                     Default::default()
                 };
-                let _ = tx_response.send(res);
+                context.respond(res);
             }
             StorageOp::Post(kvs) => {
                 let mut batch = WriteBatch::new();
@@ -91,7 +94,7 @@ impl PlainStorage {
     }
 }
 
-pub type BackendFetchId = u64;
+pub type BackendFetchId = RequestId;
 
 pub trait BigStorageContext {
     fn backend_fetch(&mut self, keys: Vec<Vec<u8>>) -> BackendFetchId;
@@ -163,7 +166,7 @@ struct FetchingState {
     key_shards: Vec<u32>,
     backend: Option<BackendFetchId>,
     node_states: HashMap<NodeIndex, Values>,
-    tx_response: oneshot::Sender<Vec<Option<Vec<u8>>>>,
+    context: ResponseContext<Vec<Option<Vec<u8>>>>,
 }
 
 impl<C> BigStorage<C> {
@@ -198,7 +201,7 @@ impl<C> BigStorage<C> {
 impl<C: BigStorageContext> BigStorage<C> {
     pub fn invoke(&mut self, op: StorageOp) {
         match op {
-            StorageOp::Fetch(keys, tx_response) => {
+            StorageOp::Fetch(keys, context) => {
                 self.fetch_seq += 1;
 
                 // keys.sort();
@@ -222,7 +225,7 @@ impl<C: BigStorageContext> BigStorage<C> {
                     key_shards,
                     backend: Some(fetch_id),
                     node_states: Default::default(),
-                    tx_response,
+                    context,
                 };
                 let replaced = self.fetching.replace(fetching);
                 assert!(replaced.is_none(), "concurrent fetches are not supported");
@@ -303,7 +306,7 @@ impl<C: BigStorageContext> BigStorage<C> {
                 .iter()
                 .all(|(i, values)| node_index[*i as usize] == values.len())
         );
-        let _ = fetching.tx_response.send(values);
+        fetching.context.respond(values);
     }
 }
 

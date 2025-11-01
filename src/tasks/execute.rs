@@ -1,8 +1,6 @@
 use tokio::{
     select,
-    sync::mpsc::{
-        Receiver, Sender, UnboundedReceiver, UnboundedSender, channel, unbounded_channel,
-    },
+    sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel},
 };
 use tokio_util::sync::CancellationToken;
 
@@ -13,20 +11,23 @@ use crate::{
     types::{ClientId, Reply},
 };
 
-use super::{ResponseContext, network::server::NetworkOutgoingHandle, storage::StorageHandle};
+use super::{
+    ResponseContext,
+    network::server::NetworkOutgoingHandle,
+    storage::{StorageContext, StorageHandle},
+};
 
 pub struct ExecuteChannels {
     tx_blocks: UnboundedSender<(Vec<Block>, ResponseContext<()>)>,
     rx_blocks: UnboundedReceiver<(Vec<Block>, ResponseContext<()>)>,
 
-    tx_fetch_response: Sender<(FetchId, Vec<Option<Vec<u8>>>)>,
-    rx_fetch_response: Receiver<(FetchId, Vec<Option<Vec<u8>>>)>,
+    tx_fetch_response: UnboundedSender<(FetchId, Vec<Option<Vec<u8>>>)>,
+    rx_fetch_response: UnboundedReceiver<(FetchId, Vec<Option<Vec<u8>>>)>,
 }
 
 #[derive(Clone)]
 pub struct ExecuteHandle {
     pub tx_blocks: UnboundedSender<(Vec<Block>, ResponseContext<()>)>,
-    tx_fetch_response: Sender<(FetchId, Vec<Option<Vec<u8>>>)>,
 }
 
 impl Default for ExecuteChannels {
@@ -38,7 +39,7 @@ impl Default for ExecuteChannels {
 impl ExecuteChannels {
     pub fn new() -> Self {
         let (tx_blocks, rx_blocks) = unbounded_channel();
-        let (tx_fetch_response, rx_fetch_response) = channel(100);
+        let (tx_fetch_response, rx_fetch_response) = unbounded_channel();
         Self {
             tx_blocks,
             rx_blocks,
@@ -50,19 +51,11 @@ impl ExecuteChannels {
     pub fn handle(&self) -> ExecuteHandle {
         ExecuteHandle {
             tx_blocks: self.tx_blocks.clone(),
-            tx_fetch_response: self.tx_fetch_response.clone(),
         }
     }
-}
 
-impl ExecuteHandle {
-    pub async fn fetch_response(
-        &self,
-        fetch_id: FetchId,
-        values: Vec<Option<Vec<u8>>>,
-    ) -> anyhow::Result<()> {
-        self.tx_fetch_response.send((fetch_id, values)).await?;
-        anyhow::Ok(())
+    fn storage_context(&self, storage: StorageHandle) -> StorageContext {
+        StorageContext::new(storage, self.tx_fetch_response.clone())
     }
 }
 
@@ -82,7 +75,7 @@ impl ExecuteTask {
         network_outgoing: NetworkOutgoingHandle,
         schema: &schema::ReplicaTask,
     ) -> anyhow::Result<Self> {
-        let context = ExecuteTaskContext::new(channels.handle(), storage, network_outgoing);
+        let context = ExecuteTaskContext::new(channels.storage_context(storage), network_outgoing);
         let state = Execute::new(context, (&schema.config).into(), schema.node_index);
         Ok(Self::new(channels, state))
     }
@@ -111,23 +104,15 @@ impl ExecuteTask {
 }
 
 struct ExecuteTaskContext {
-    execute: ExecuteHandle,
-    storage: StorageHandle,
+    storage: StorageContext,
     network_outgoing: NetworkOutgoingHandle,
-    fetch_id: FetchId,
 }
 
 impl ExecuteTaskContext {
-    fn new(
-        execute: ExecuteHandle,
-        storage: StorageHandle,
-        network_outgoing: NetworkOutgoingHandle,
-    ) -> Self {
+    fn new(storage: StorageContext, network_outgoing: NetworkOutgoingHandle) -> Self {
         Self {
-            execute,
             storage,
             network_outgoing,
-            fetch_id: 0,
         }
     }
 }
@@ -138,19 +123,10 @@ impl ExecuteContext for ExecuteTaskContext {
     }
 
     fn fetch(&mut self, keys: Vec<Vec<u8>>) -> FetchId {
-        self.fetch_id += 1;
-        let fetch_id = self.fetch_id;
-        let execute = self.execute.clone();
-        let storage = self.storage.clone();
-        tokio::spawn(async move {
-            let response = storage.fetch(keys).await?;
-            execute.fetch_response(fetch_id, response).await?;
-            anyhow::Ok(())
-        });
-        fetch_id
+        self.storage.fetch(keys)
     }
 
     fn post(&mut self, updates: Vec<(Vec<u8>, Option<Vec<u8>>)>) {
-        let _ = self.storage.post(updates);
+        self.storage.post(updates);
     }
 }

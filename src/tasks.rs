@@ -126,6 +126,10 @@ pub struct ResponseContext<T> {
 }
 
 impl<T> ResponseContext<T> {
+    pub fn new(id: RequestId, tx: UnboundedSender<(RequestId, T)>) -> Self {
+        Self { id, tx }
+    }
+
     pub fn respond(self, response: T) {
         let _ = self.tx.send((self.id, response));
     }
