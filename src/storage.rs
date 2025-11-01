@@ -162,9 +162,9 @@ pub struct BigStorage<C> {
     primary_shards: HashSet<u32>,
     secondary_shards: HashSet<u32>,
 
-    pending_fetches: VecDeque<(Vec<Vec<u8>>, ResponseContext<Vec<Option<Vec<u8>>>>)>,
     fetch_seq: FetchSeq,
-    fetching: Option<FetchingState>,
+    fetching: VecDeque<BackendFetchingState>,
+    querying: HashMap<FetchSeq, QueryingState>,
     reordered_push_states: HashMap<FetchSeq, Vec<message::PushState>>,
 
     metrics: BigStorageMetrics,
@@ -175,9 +175,16 @@ struct BigStorageMetrics {
     network_time: Duration,
 }
 
-struct FetchingState {
+struct BackendFetchingState {
+    seq: FetchSeq,
     key_shards: Vec<u32>,
-    backend: Option<BackendFetchId>,
+    context: ResponseContext<Vec<Option<Vec<u8>>>>,
+    // only for sanity check
+    backend: BackendFetchId,
+}
+
+struct QueryingState {
+    key_shards: Vec<u32>,
     node_states: HashMap<NodeIndex, Values>,
     context: ResponseContext<Vec<Option<Vec<u8>>>>,
 }
@@ -197,7 +204,7 @@ impl<C> BigStorage<C> {
                 secondary_shards.insert(shard);
             }
         }
-        let (reordered_push_states, pending_fetches) = Default::default();
+        let (reordered_push_states, fetching, querying) = Default::default();
         Self {
             context,
             config,
@@ -205,9 +212,9 @@ impl<C> BigStorage<C> {
             primary_shards,
             secondary_shards,
             reordered_push_states,
-            pending_fetches,
             fetch_seq: 0,
-            fetching: None,
+            fetching,
+            querying,
             metrics: BigStorageMetrics {
                 network_start: Instant::now(),
                 network_time: Duration::ZERO,
@@ -227,11 +234,6 @@ impl<C: BigStorageContext> BigStorage<C> {
     pub fn invoke(&mut self, op: StorageOp) {
         match op {
             StorageOp::Fetch(keys, context) => {
-                if self.fetching.is_some() {
-                    self.pending_fetches.push_back((keys, context));
-                    return;
-                }
-
                 self.start_fetch(keys, context);
             }
             StorageOp::Post(mut updates) => {
@@ -262,89 +264,91 @@ impl<C: BigStorageContext> BigStorage<C> {
             })
             .collect();
         let fetch_id = self.context.backend_fetch(backend_keys);
-        let fetching = FetchingState {
+        let fetching = BackendFetchingState {
+            seq: self.fetch_seq,
             key_shards,
-            backend: Some(fetch_id),
-            node_states: Default::default(),
             context,
+            backend: fetch_id,
         };
-        let replaced = self.fetching.replace(fetching);
-        assert!(replaced.is_none());
-
-        if let Some(push_states) = self.reordered_push_states.remove(&self.fetch_seq) {
-            for push_state in push_states {
-                self.insert_state(push_state.node_index, push_state.values);
-            }
-        }
+        self.fetching.push_back(fetching);
     }
 
     pub fn on_message(&mut self, message: message::Message) {
         match message {
             message::Message::PushState(push_state) => {
-                if push_state.fetch_seq > self.fetch_seq {
-                    self.reordered_push_states
-                        .entry(push_state.fetch_seq)
-                        .or_default()
-                        .push(push_state);
-                    return;
-                }
-                assert!(push_state.fetch_seq == self.fetch_seq);
-                assert!(self.fetching.is_some()); // not support duplicated push for now
-                self.insert_state(push_state.node_index, push_state.values);
+                self.insert_state(push_state);
             }
         }
     }
 
     pub fn on_fetch_response(&mut self, fetch_id: BackendFetchId, values: Vec<Option<Vec<u8>>>) {
-        let Some(fetching) = &mut self.fetching else {
+        let Some(fetching) = self.fetching.pop_front() else {
             unimplemented!()
         };
-        let expected_fetch_id = fetching.backend.take().unwrap();
-        assert_eq!(fetch_id, expected_fetch_id);
+        assert_eq!(fetch_id, fetching.backend);
 
         let push_state = message::PushState {
             values: values.clone(),
             node_index: self.node_index,
-            fetch_seq: self.fetch_seq,
+            fetch_seq: fetching.seq,
         };
         self.context
-            .send_to_all(message::Message::PushState(push_state));
+            .send_to_all(Message::PushState(push_state.clone()));
 
         self.metrics.network_start = Instant::now();
-        self.insert_state(self.node_index, values);
+        self.querying.insert(
+            fetching.seq,
+            QueryingState {
+                key_shards: fetching.key_shards,
+                node_states: Default::default(),
+                context: fetching.context,
+            },
+        );
+        self.insert_state(push_state);
+        if let Some(reordered) = self.reordered_push_states.remove(&fetching.seq) {
+            for push_state in reordered {
+                self.insert_state(push_state);
+            }
+        }
     }
 
-    fn insert_state(&mut self, node_index: NodeIndex, values: Values) {
-        let fetching = self.fetching.as_mut().unwrap();
-        fetching.node_states.insert(node_index, values);
-        if fetching.node_states.len()
+    fn insert_state(&mut self, push_state: message::PushState) {
+        let Some(querying) = self.querying.get_mut(&push_state.fetch_seq) else {
+            // TODO assert that fetch_seq is in the future
+            self.reordered_push_states
+                .entry(push_state.fetch_seq)
+                .or_default()
+                .push(push_state);
+            return;
+        };
+
+        querying
+            .node_states
+            .insert(push_state.node_index, push_state.values);
+        if querying.node_states.len()
             != (self.config.num_nodes - self.config.num_faulty_nodes) as usize
         {
             return;
         }
 
         // info!("all node states received for fetch");
-        let fetching = self.fetching.take().unwrap();
+        let querying = self.querying.remove(&push_state.fetch_seq).unwrap();
         let mut values = Vec::new();
         let mut node_index = vec![0; self.config.num_nodes as usize];
-        for shard in fetching.key_shards {
+        for shard in querying.key_shards {
             let i = self.config.primary_node_of_shard(shard);
-            let value = fetching.node_states[&i][node_index[i as usize]].clone();
+            let value = querying.node_states[&i][node_index[i as usize]].clone();
             node_index[i as usize] += 1;
             values.push(value);
         }
         assert!(
-            fetching
+            querying
                 .node_states
                 .iter()
                 .all(|(i, values)| node_index[*i as usize] == values.len())
         );
-        fetching.context.respond(values);
+        querying.context.respond(values);
         self.metrics.network_time += self.metrics.network_start.elapsed();
-
-        if let Some((keys, context)) = self.pending_fetches.pop_front() {
-            self.start_fetch(keys, context);
-        }
     }
 }
 
@@ -361,7 +365,7 @@ mod message {
         PushState(PushState),
     }
 
-    #[derive(Encode, Decode)]
+    #[derive(Encode, Decode, Clone)]
     pub struct PushState {
         pub fetch_seq: FetchSeq,
         pub values: Values,
