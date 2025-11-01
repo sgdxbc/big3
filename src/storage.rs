@@ -1,13 +1,14 @@
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::VecDeque,
     hash::{BuildHasher, BuildHasherDefault, DefaultHasher},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use hdrhistogram::Histogram;
 use log::info;
 use rand::{SeedableRng, rngs::StdRng, seq::IteratorRandom};
 use rocksdb::{DB, WriteBatch};
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 use crate::{
     schema,
@@ -28,6 +29,7 @@ pub struct PlainStorage {
 struct PlainStorageMetrics {
     multi_get_size: Histogram<u64>,
     multi_get_tput: Histogram<u64>,
+    fetch_time: Duration,
 }
 
 impl Default for PlainStorageMetrics {
@@ -35,6 +37,7 @@ impl Default for PlainStorageMetrics {
         Self {
             multi_get_size: Histogram::<u64>::new(3).unwrap(),
             multi_get_tput: Histogram::<u64>::new(3).unwrap(),
+            fetch_time: Duration::ZERO,
         }
     }
 }
@@ -49,13 +52,14 @@ impl PlainStorage {
 
     pub fn log_metrics(&self) {
         info!(
-            "PlainStorage\n\tmulti_get_size: mean {:.2} p50 {:.2} p99 {:.2}\n\tmulti_get_tput: mean {:.2} p50 {:.2} p99 {:.2}",
+            "PlainStorage\n\tmulti_get_size: mean {:.2} p50 {:.2} p99 {:.2}\n\tmulti_get_tput: mean {:.2} p50 {:.2} p99 {:.2}\n\tfetch_time: {:.2?}",
             self.metrics.multi_get_size.mean(),
             self.metrics.multi_get_size.value_at_percentile(50.0),
             self.metrics.multi_get_size.value_at_percentile(99.0),
             self.metrics.multi_get_tput.mean(),
             self.metrics.multi_get_tput.value_at_percentile(50.0),
             self.metrics.multi_get_tput.value_at_percentile(99.0),
+            self.metrics.fetch_time,
         );
     }
 
@@ -70,6 +74,7 @@ impl PlainStorage {
                         .into_iter()
                         .collect::<Result<_, _>>()?;
                     let latency = start.elapsed();
+                    self.metrics.fetch_time += latency;
                     self.metrics.multi_get_size += keys.len() as u64;
                     self.metrics.multi_get_tput +=
                         (keys.len() as f64 / latency.as_secs_f64()) as u64;
@@ -161,6 +166,13 @@ pub struct BigStorage<C> {
     fetch_seq: FetchSeq,
     fetching: Option<FetchingState>,
     reordered_push_states: HashMap<FetchSeq, Vec<message::PushState>>,
+
+    metrics: BigStorageMetrics,
+}
+
+struct BigStorageMetrics {
+    network_start: Instant,
+    network_time: Duration,
 }
 
 struct FetchingState {
@@ -172,8 +184,8 @@ struct FetchingState {
 
 impl<C> BigStorage<C> {
     pub fn new(context: C, config: BigStorageConfig, node_index: NodeIndex) -> Self {
-        let mut primary_shards = HashSet::new();
-        let mut secondary_shards = HashSet::new();
+        let mut primary_shards = HashSet::default();
+        let mut secondary_shards = HashSet::default();
         for shard in 0..config.num_shards() {
             if config.primary_node_of_shard(shard) == node_index {
                 primary_shards.insert(shard);
@@ -196,7 +208,18 @@ impl<C> BigStorage<C> {
             pending_fetches,
             fetch_seq: 0,
             fetching: None,
+            metrics: BigStorageMetrics {
+                network_start: Instant::now(),
+                network_time: Duration::ZERO,
+            },
         }
+    }
+
+    pub fn log_metrics(&self) {
+        info!(
+            "BigStorage\n\tnetwork_time: {:.2?}",
+            self.metrics.network_time,
+        );
     }
 }
 
@@ -287,6 +310,7 @@ impl<C: BigStorageContext> BigStorage<C> {
         self.context
             .send_to_all(message::Message::PushState(push_state));
 
+        self.metrics.network_start = Instant::now();
         self.insert_state(self.node_index, values);
     }
 
@@ -316,6 +340,7 @@ impl<C: BigStorageContext> BigStorage<C> {
                 .all(|(i, values)| node_index[*i as usize] == values.len())
         );
         fetching.context.respond(values);
+        self.metrics.network_time += self.metrics.network_start.elapsed();
 
         if let Some((keys, context)) = self.pending_fetches.pop_front() {
             self.start_fetch(keys, context);

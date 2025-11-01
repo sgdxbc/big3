@@ -77,3 +77,7 @@ What I have been thinking for a long time is to further parellelize storage (ass
 If execution is dominating the work time, then anything regards to storage will not be significant. On the other hand, if storage is dominating the work time, then concurrently fetching would be necessary because execution takes no time would not be significant if it is already taking minor time.
 
 However, the current status is that when execution takes ~7s in a run storage takes ~12s, so simply overlapping the two may actually yield a big improvement (and consume the majority of optimization space). Seems lucky but I should not feel lucky for getting to know my work instead of not needing to work.
+
+----
+
+Well, when there are many nodes, network time is much larger than local storage read time (9.3s vs 4.1s, for example). I will have to build a storage that can concurrently collect remote states from network messages while locally read from storage for the following fetches. Essentially, that is a storage that perform concurrent fetches.

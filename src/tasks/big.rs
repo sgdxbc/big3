@@ -84,12 +84,16 @@ impl BigStorageTask {
         Ok(Self::new(channels, state))
     }
 
-    async fn run(self, stop: CancellationToken) -> anyhow::Result<()> {
-        tokio::spawn(async move { stop.run_until_cancelled(self.run_inner()).await }).await?;
+    async fn run(mut self, stop: CancellationToken) -> anyhow::Result<()> {
+        tokio::spawn(async move {
+            stop.run_until_cancelled(self.run_inner()).await;
+            self.state.log_metrics()
+        })
+        .await?;
         Ok(())
     }
 
-    async fn run_inner(mut self) {
+    async fn run_inner(&mut self) {
         loop {
             tokio::select! {
                 Some(op) = self.channels.rx_storage_op.recv() => {
