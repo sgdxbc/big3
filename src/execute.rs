@@ -1,7 +1,4 @@
-use std::{
-    collections::VecDeque,
-    time::{Duration, Instant},
-};
+use std::{collections::VecDeque, time::Instant};
 
 use bincode::{Decode, Encode};
 use log::info;
@@ -9,6 +6,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::{
     consensus::Block,
+    metrics::Latency,
     tasks::{RequestId, ResponseContext},
     types::{ClientId, ClientSeq, NodeIndex, Reply},
 };
@@ -77,10 +75,11 @@ struct WillFetchState {
     context: ResponseContext<()>,
 }
 
+#[derive(Default)]
 struct ExecuteMetrics {
-    prepare_time: Duration,
-    execute_time: Duration,
-    fetch_time: Duration,
+    prepare_time: Latency,
+    execute_time: Latency,
+    fetch_time: Latency,
 }
 
 impl<C> Execute<C> {
@@ -94,17 +93,13 @@ impl<C> Execute<C> {
             fetching: Default::default(),
             executed_count: 0,
 
-            metrics: ExecuteMetrics {
-                prepare_time: Duration::ZERO,
-                execute_time: Duration::ZERO,
-                fetch_time: Duration::ZERO,
-            },
+            metrics: Default::default(),
         }
     }
 
     pub fn log_metrics(&self) {
         info!(
-            "\nprepare time: {:?}\nexecute time: {:?}\nfetch time: {:?}",
+            "\nprepare time: {}\nexecute time: {}\nfetch time: {}",
             self.metrics.prepare_time, self.metrics.execute_time, self.metrics.fetch_time,
         );
     }

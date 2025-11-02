@@ -1,7 +1,7 @@
 use std::{
     collections::VecDeque,
     hash::{BuildHasher, BuildHasherDefault, DefaultHasher},
-    time::{Duration, Instant},
+    time::Instant,
 };
 
 use hdrhistogram::Histogram;
@@ -11,6 +11,7 @@ use rocksdb::{DB, WriteBatch};
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 use crate::{
+    metrics::Latency,
     schema,
     tasks::{RequestId, ResponseContext},
     types::NodeIndex,
@@ -29,7 +30,7 @@ pub struct PlainStorage {
 struct PlainStorageMetrics {
     multi_get_size: Histogram<u64>,
     multi_get_tput: Histogram<u64>,
-    fetch_time: Duration,
+    fetch_time: Latency,
 }
 
 impl Default for PlainStorageMetrics {
@@ -37,7 +38,7 @@ impl Default for PlainStorageMetrics {
         Self {
             multi_get_size: Histogram::<u64>::new(3).unwrap(),
             multi_get_tput: Histogram::<u64>::new(3).unwrap(),
-            fetch_time: Duration::ZERO,
+            fetch_time: Default::default(),
         }
     }
 }
@@ -52,7 +53,7 @@ impl PlainStorage {
 
     pub fn log_metrics(&self) {
         info!(
-            "PlainStorage\n\tmulti_get_size: mean {:.2} p50 {:.2} p99 {:.2}\n\tmulti_get_tput: mean {:.2} p50 {:.2} p99 {:.2}\n\tfetch_time: {:.2?}",
+            "PlainStorage\n\tmulti_get_size: mean {:.2} p50 {:.2} p99 {:.2}\n\tmulti_get_tput: mean {:.2} p50 {:.2} p99 {:.2}\n\tfetch_time: {}",
             self.metrics.multi_get_size.mean(),
             self.metrics.multi_get_size.value_at_percentile(50.0),
             self.metrics.multi_get_size.value_at_percentile(99.0),
@@ -172,8 +173,7 @@ pub struct BigStorage<C> {
 }
 
 struct BigStorageMetrics {
-    network_start: Instant,
-    network_time: Duration,
+    network_time: Latency,
 }
 
 struct BackendFetchingState {
@@ -196,6 +196,8 @@ struct QueryingState {
     key_shards: Vec<u32>,
     node_states: HashMap<NodeIndex, Values>,
     context: ResponseContext<Values>,
+
+    start: Instant,
 }
 
 impl<C> BigStorage<C> {
@@ -226,17 +228,13 @@ impl<C> BigStorage<C> {
             pending_query,
             querying: None,
             metrics: BigStorageMetrics {
-                network_start: Instant::now(),
-                network_time: Duration::ZERO,
+                network_time: Default::default(),
             },
         }
     }
 
     pub fn log_metrics(&self) {
-        info!(
-            "BigStorage\n\tnetwork_time: {:.2?}",
-            self.metrics.network_time,
-        );
+        info!("BigStorage\nnetwork_time: {}", self.metrics.network_time);
     }
 }
 
@@ -327,6 +325,7 @@ impl<C: BigStorageContext> BigStorage<C> {
             key_shards: state.key_shards,
             node_states: Default::default(),
             context: state.context,
+            start: Instant::now(),
         });
         assert!(replaced.is_none());
 
@@ -379,6 +378,7 @@ impl<C: BigStorageContext> BigStorage<C> {
                 .all(|(i, values)| node_index[*i as usize] == values.len())
         );
         querying.context.respond(values);
+        self.metrics.network_time += querying.start.elapsed();
 
         if let Some(state) = self.pending_query.pop_front() {
             self.start_query(state);

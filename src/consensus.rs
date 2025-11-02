@@ -11,6 +11,7 @@ use log::{info, trace, warn};
 use sha2::{Digest as _, Sha256};
 
 use crate::{
+    metrics::Latency,
     tasks::RequestId,
     types::{NodeIndex, Request},
 };
@@ -131,6 +132,8 @@ pub struct Bullshark<C> {
 struct BullsharkMetrics {
     proposed_block_size: Histogram<u64>,
     output_block_size: Histogram<u64>,
+    throttle_start: Option<Instant>,
+    throttle: Latency,
 }
 
 impl Default for BullsharkMetrics {
@@ -138,6 +141,8 @@ impl Default for BullsharkMetrics {
         Self {
             proposed_block_size: Histogram::new(3).unwrap(),
             output_block_size: Histogram::new(3).unwrap(),
+            throttle_start: None,
+            throttle: Latency::new(),
         }
     }
 }
@@ -260,14 +265,23 @@ impl<C: BullsharkContext> Bullshark<C> {
     }
 
     fn may_propose(&mut self) {
+        // allow one inflight execution to overlap consensus latency with execution
+        // execution releases this backpressure right after issuing fetch (instead of finishing
+        // the whole execution), so this single permit does not prevent concurrent fetches
+        if self.executing.len() > 1 {
+            if self.metrics.throttle_start.is_none() {
+                self.metrics.throttle_start = Some(Instant::now());
+            }
+            return;
+        }
+        if let Some(start) = self.metrics.throttle_start.take() {
+            self.metrics.throttle += start.elapsed();
+        }
+
         if self.round > 0
             && self.certs.get(&(self.round - 1)).is_some_and(|certs| {
                 certs.len() >= (self.config.num_node - self.config.num_faulty_node) as usize
             })
-            // allow one inflight execution to overlap consensus latency with execution
-            // execution releases this backpressure right after issuing fetch (instead of finishing
-            // the whole execution), so this single permit does not prevent concurrent fetches
-            && self.executing.len() <= 1
         {
             self.propose();
         }
