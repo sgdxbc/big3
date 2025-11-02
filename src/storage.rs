@@ -295,7 +295,9 @@ impl<C: BigStorageContext> BigStorage<C> {
         self.context
             .send_to_all(Message::PushState(push_state.clone()));
 
-        self.metrics.network_start = Instant::now();
+        if self.querying.is_empty() {
+            self.metrics.network_start = Instant::now();
+        }
         self.querying.insert(
             fetching.seq,
             QueryingState {
@@ -348,7 +350,9 @@ impl<C: BigStorageContext> BigStorage<C> {
                 .all(|(i, values)| node_index[*i as usize] == values.len())
         );
         querying.context.respond(values);
-        self.metrics.network_time += self.metrics.network_start.elapsed();
+        if self.querying.is_empty() {
+            self.metrics.network_time += self.metrics.network_start.elapsed();
+        }
     }
 }
 

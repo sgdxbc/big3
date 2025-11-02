@@ -107,10 +107,16 @@ async fn run_workload(
     start_all(client_instances, control_client.clone()).await?;
 
     let mut next_scrape = Instant::now() + Duration::from_secs(1);
+    let mut sec_tputs = Vec::new();
     for i in 0..LIVE_DURATION.as_secs() {
         sleep_until(next_scrape).await;
         println!("scrape clients round {}", i + 1);
-        scrape_all(client_instances, control_client.clone()).await?;
+        let metrics = scrape_all(client_instances, control_client.clone()).await?;
+        sec_tputs.push(metrics.tput);
+        println!(
+            "last 5 sec avg tput: {}",
+            sec_tputs.iter().rev().take(5).sum::<f64>() / 5.
+        );
         next_scrape += Duration::from_secs(1);
     }
 

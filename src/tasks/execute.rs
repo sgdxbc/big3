@@ -96,7 +96,7 @@ impl ExecuteTask {
                     self.state.on_fetch_response(fetch_id, values);
                 }
                 Some((block, tx_response)) = self.channels.rx_blocks.recv() => {
-                    self.state.on_block(block, tx_response);
+                    self.state.on_blocks(block, tx_response);
                 }
             }
         }

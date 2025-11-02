@@ -57,8 +57,7 @@ pub struct Execute<C> {
     index: NodeIndex,
 
     pending_blocks: VecDeque<WillFetchState>,
-    fetching: Option<FetchingState>,
-    pending_post: Option<Vec<(Vec<u8>, Option<Vec<u8>>)>>,
+    fetching: VecDeque<FetchingState>,
     executed_count: u64,
 
     metrics: ExecuteMetrics,
@@ -68,6 +67,8 @@ struct FetchingState {
     requests: Vec<(Op, ClientId, ClientSeq)>,
     fetch_id: FetchId,
     fetch_keys: Vec<String>,
+
+    start: Instant,
 }
 
 struct WillFetchState {
@@ -79,9 +80,7 @@ struct WillFetchState {
 struct ExecuteMetrics {
     prepare_time: Duration,
     execute_time: Duration,
-    fetch_start: Instant,
     fetch_time: Duration,
-    pending_post_count: u64,
 }
 
 impl<C> Execute<C> {
@@ -92,34 +91,30 @@ impl<C> Execute<C> {
             index,
 
             pending_blocks: Default::default(),
-            fetching: None,
-            pending_post: None,
+            fetching: Default::default(),
             executed_count: 0,
 
             metrics: ExecuteMetrics {
                 prepare_time: Duration::ZERO,
                 execute_time: Duration::ZERO,
-                fetch_start: Instant::now(),
                 fetch_time: Duration::ZERO,
-                pending_post_count: 0,
             },
         }
-    }
-}
-
-impl<C: ExecuteContext> Execute<C> {
-    pub fn on_block(&mut self, blocks: Vec<Block>, context: ResponseContext<()>) {
-        self.prepare_blocks(blocks, context);
     }
 
     pub fn log_metrics(&self) {
         info!(
-            "\nprepare time: {:?}\nexecute time: {:?}\nfetch time: {:?}\npending post count: {:?}",
-            self.metrics.prepare_time,
-            self.metrics.execute_time,
-            self.metrics.fetch_time,
-            self.metrics.pending_post_count
+            "\nprepare time: {:?}\nexecute time: {:?}\nfetch time: {:?}",
+            self.metrics.prepare_time, self.metrics.execute_time, self.metrics.fetch_time,
         );
+    }
+
+    const NUM_MAX_CONCURRENT_FETCHES: usize = 20;
+}
+
+impl<C: ExecuteContext> Execute<C> {
+    pub fn on_blocks(&mut self, blocks: Vec<Block>, context: ResponseContext<()>) {
+        self.prepare_blocks(blocks, context);
     }
 
     fn prepare_blocks(&mut self, blocks: Vec<Block>, context: ResponseContext<()>) {
@@ -150,7 +145,7 @@ impl<C: ExecuteContext> Execute<C> {
 
         self.metrics.prepare_time += start.elapsed();
 
-        if self.fetching.is_none() {
+        if self.fetching.len() < Self::NUM_MAX_CONCURRENT_FETCHES {
             self.fetch_for_blocks(working);
         } else {
             self.pending_blocks.push_back(working);
@@ -158,7 +153,7 @@ impl<C: ExecuteContext> Execute<C> {
     }
 
     fn fetch_for_blocks(&mut self, working: WillFetchState) {
-        assert!(self.fetching.is_none());
+        assert!(self.fetching.len() < Self::NUM_MAX_CONCURRENT_FETCHES);
         let fetch_id = self.context.fetch(
             working
                 .fetch_keys
@@ -166,25 +161,21 @@ impl<C: ExecuteContext> Execute<C> {
                 .map(|k| k.as_bytes().to_vec())
                 .collect(),
         );
-        self.metrics.fetch_start = Instant::now();
-        self.fetching = Some(FetchingState {
+        self.fetching.push_back(FetchingState {
             requests: working.requests,
             fetch_id,
             fetch_keys: working.fetch_keys,
+            start: Instant::now(),
         });
         working.context.respond(());
-
-        if let Some(updates) = self.pending_post.take() {
-            self.context.post(updates);
-        }
     }
 
     pub fn on_fetch_response(&mut self, fetch_id: FetchId, values: Vec<Option<Vec<u8>>>) {
-        let Some(working) = self.fetching.take() else {
+        let Some(working) = self.fetching.pop_front() else {
             unimplemented!()
         };
         assert_eq!(working.fetch_id, fetch_id);
-        self.metrics.fetch_time += self.metrics.fetch_start.elapsed();
+        self.metrics.fetch_time += working.start.elapsed();
 
         if let Some(state) = self.pending_blocks.pop_front() {
             self.fetch_for_blocks(state);
@@ -233,14 +224,6 @@ impl<C: ExecuteContext> Execute<C> {
 
         self.metrics.execute_time += start.elapsed();
 
-        if self.fetching.is_some() {
-            self.context.post(updates);
-        } else {
-            // post must be issued _after_ the next fetch
-            // usually this naturally be the case because there are always arriving blocks pending
-            // for fetching
-            self.pending_post = Some(updates);
-            self.metrics.pending_post_count += 1;
-        }
+        self.context.post(updates);
     }
 }
