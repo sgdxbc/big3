@@ -265,6 +265,8 @@ impl<C: BullsharkContext> Bullshark<C> {
                 certs.len() >= (self.config.num_node - self.config.num_faulty_node) as usize
             })
             // allow one inflight execution to overlap consensus latency with execution
+            // execution releases this backpressure right after issuing fetch (instead of finishing
+            // the whole execution), so this single permit does not prevent concurrent fetches
             && self.executing.len() <= 1
         {
             self.propose();

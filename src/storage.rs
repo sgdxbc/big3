@@ -164,8 +164,9 @@ pub struct BigStorage<C> {
 
     fetch_seq: FetchSeq,
     fetching: VecDeque<BackendFetchingState>,
-    querying: HashMap<FetchSeq, QueryingState>,
-    reordered_push_states: HashMap<FetchSeq, Vec<message::PushState>>,
+    pending_query: VecDeque<BackendFetchedState>,
+    querying: Option<QueryingState>,
+    reordered_push_states: HashMap<FetchSeq, Vec<(NodeIndex, Values)>>,
 
     metrics: BigStorageMetrics,
 }
@@ -178,15 +179,23 @@ struct BigStorageMetrics {
 struct BackendFetchingState {
     seq: FetchSeq,
     key_shards: Vec<u32>,
-    context: ResponseContext<Vec<Option<Vec<u8>>>>,
+    context: ResponseContext<Values>,
     // only for sanity check
     backend: BackendFetchId,
 }
 
+struct BackendFetchedState {
+    seq: FetchSeq,
+    key_shards: Vec<u32>,
+    values: Values,
+    context: ResponseContext<Values>,
+}
+
 struct QueryingState {
+    seq: FetchSeq,
     key_shards: Vec<u32>,
     node_states: HashMap<NodeIndex, Values>,
-    context: ResponseContext<Vec<Option<Vec<u8>>>>,
+    context: ResponseContext<Values>,
 }
 
 impl<C> BigStorage<C> {
@@ -204,7 +213,7 @@ impl<C> BigStorage<C> {
                 secondary_shards.insert(shard);
             }
         }
-        let (reordered_push_states, fetching, querying) = Default::default();
+        let (reordered_push_states, fetching, pending_query) = Default::default();
         Self {
             context,
             config,
@@ -214,7 +223,8 @@ impl<C> BigStorage<C> {
             reordered_push_states,
             fetch_seq: 0,
             fetching,
-            querying,
+            pending_query,
+            querying: None,
             metrics: BigStorageMetrics {
                 network_start: Instant::now(),
                 network_time: Duration::ZERO,
@@ -276,7 +286,11 @@ impl<C: BigStorageContext> BigStorage<C> {
     pub fn on_message(&mut self, message: message::Message) {
         match message {
             message::Message::PushState(push_state) => {
-                self.insert_state(push_state);
+                self.insert_state(
+                    push_state.fetch_seq,
+                    push_state.node_index,
+                    push_state.values,
+                );
             }
         }
     }
@@ -292,41 +306,56 @@ impl<C: BigStorageContext> BigStorage<C> {
             node_index: self.node_index,
             fetch_seq: fetching.seq,
         };
-        self.context
-            .send_to_all(Message::PushState(push_state.clone()));
+        self.context.send_to_all(Message::PushState(push_state));
 
-        if self.querying.is_empty() {
-            self.metrics.network_start = Instant::now();
+        let state = BackendFetchedState {
+            seq: fetching.seq,
+            key_shards: fetching.key_shards,
+            values,
+            context: fetching.context,
+        };
+        if self.querying.is_some() {
+            self.pending_query.push_back(state);
+            return;
         }
-        self.querying.insert(
-            fetching.seq,
-            QueryingState {
-                key_shards: fetching.key_shards,
-                node_states: Default::default(),
-                context: fetching.context,
-            },
-        );
-        self.insert_state(push_state);
-        if let Some(reordered) = self.reordered_push_states.remove(&fetching.seq) {
-            for push_state in reordered {
-                self.insert_state(push_state);
+        self.start_query(state);
+    }
+
+    fn start_query(&mut self, state: BackendFetchedState) {
+        let replaced = self.querying.replace(QueryingState {
+            seq: state.seq,
+            key_shards: state.key_shards,
+            node_states: Default::default(),
+            context: state.context,
+        });
+        assert!(replaced.is_none());
+
+        self.insert_state(state.seq, self.node_index, state.values);
+        if let Some(reordered) = self.reordered_push_states.remove(&state.seq) {
+            for (node_index, values) in reordered {
+                self.insert_state(state.seq, node_index, values);
             }
         }
     }
 
-    fn insert_state(&mut self, push_state: message::PushState) {
-        let Some(querying) = self.querying.get_mut(&push_state.fetch_seq) else {
-            // TODO assert that fetch_seq is in the future
+    fn insert_state(&mut self, seq: FetchSeq, node_index: NodeIndex, values: Values) {
+        let Some(querying) = &mut self.querying else {
             self.reordered_push_states
-                .entry(push_state.fetch_seq)
+                .entry(seq)
                 .or_default()
-                .push(push_state);
+                .push((node_index, values));
             return;
         };
+        assert!(seq >= querying.seq);
+        if seq != querying.seq {
+            self.reordered_push_states
+                .entry(seq)
+                .or_default()
+                .push((node_index, values));
+            return;
+        }
 
-        querying
-            .node_states
-            .insert(push_state.node_index, push_state.values);
+        querying.node_states.insert(node_index, values);
         if querying.node_states.len()
             != (self.config.num_nodes - self.config.num_faulty_nodes) as usize
         {
@@ -334,7 +363,7 @@ impl<C: BigStorageContext> BigStorage<C> {
         }
 
         // info!("all node states received for fetch");
-        let querying = self.querying.remove(&push_state.fetch_seq).unwrap();
+        let querying = self.querying.take().unwrap();
         let mut values = Vec::new();
         let mut node_index = vec![0; self.config.num_nodes as usize];
         for shard in querying.key_shards {
@@ -350,8 +379,9 @@ impl<C: BigStorageContext> BigStorage<C> {
                 .all(|(i, values)| node_index[*i as usize] == values.len())
         );
         querying.context.respond(values);
-        if self.querying.is_empty() {
-            self.metrics.network_time += self.metrics.network_start.elapsed();
+
+        if let Some(state) = self.pending_query.pop_front() {
+            self.start_query(state);
         }
     }
 }

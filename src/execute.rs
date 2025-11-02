@@ -139,6 +139,12 @@ impl<C: ExecuteContext> Execute<C> {
                     .push((op, request.client_id, request.client_seq));
             }
         }
+        // besides performance optimization, this also prevents no-op fetches (and posts) to pollute
+        // metrics of execution and storage
+        if working.requests.is_empty() {
+            working.context.respond(());
+            return;
+        }
 
         working.fetch_keys = fetching_keys.into_iter().collect();
         working.fetch_keys.sort_unstable();
