@@ -1,3 +1,18 @@
+// a (highly) simplified implementation of Bullshark consensus
+// this implementation assumes exactly 2f+1 operational nodes. in each round,
+// every node proposes a block, collect and broadcast quorum certificates for
+// the block, and can only proceed to the next round after collecting quorum
+// certificates for _all_ (other) nodes' blocks
+// some noticeable characteristics:
+// * all blocks are committed in a deterministic way. basically, at round 1,
+//   the leader block of round 0 is committed; at round 3, the leader block of
+//   round 2 and every (remaining block) at round 0 and 1 at committed, etc.
+//   there will be no stalled blocks at all, and every transaction that has been
+//   included in a proposed block will be committed (soon), and the garbage
+//   collection can be omitted
+// * the back pressure is global. if any node apply back pressure to consensus
+//   (probably due to slow storage), all nodes cannot proceed to the next round
+
 use std::{
     collections::{HashMap, HashSet},
     fmt::Debug,
@@ -37,10 +52,6 @@ impl Debug for BlockHash {
 pub struct BullsharkConfig {
     num_node: NodeIndex,
     num_faulty_node: NodeIndex,
-    // we adopt a simplified garbage collection rule of the Bullshark paper
-    // when the leader (anchor) is delivered at round r, garbage collect up to round
-    // r - garbage_collection_depth
-    garbage_collection_depth: Option<Round>,
 }
 
 impl From<&crate::schema::ReplicaConfig> for BullsharkConfig {
@@ -48,7 +59,6 @@ impl From<&crate::schema::ReplicaConfig> for BullsharkConfig {
         Self {
             num_node: config.num_nodes,
             num_faulty_node: config.num_faulty_nodes,
-            garbage_collection_depth: Some(10),
         }
     }
 }
@@ -109,22 +119,18 @@ pub struct Bullshark<C> {
     config: BullsharkConfig,
     node_index: NodeIndex,
 
+    // propose states
     round: Round,
-    // Some(bh): proposed & wait for certified, None: certified & wait for other certified for next
-    // proposal
-    block_hash: Option<BlockHash>,
-    txn_pool: Vec<(Instant, Request)>,
+    txn_pool: Vec<Request>,
     block_oks: HashMap<NodeIndex, message::BlockOk>,
-    certs: HashMap<Round, HashMap<NodeIndex, message::Cert>>,
-    reorder_validate: HashMap<Round, Vec<(NodeIndex, BlockHash)>>,
+    certs: HashMap<NodeIndex, message::Cert>,
 
-    certifying_blocks: HashMap<BlockHash, Block>,
-    delivered: HashMap<Round, HashSet<BlockHash>>,
-    reorder_blocks: HashMap<BlockHash, Vec<Block>>, // missing parent -> children
-    reorder_certified: HashSet<BlockHash>,
+    // deliver states
+    certifying: HashMap<BlockHash, Block>,
+    committing: HashMap<Round, HashSet<BlockHash>>,
 
-    reorder_delivered: HashMap<BlockHash, Block>,
     executing: HashSet<OutputId>,
+    execute_backpressured: bool,
 
     metrics: BullsharkMetrics,
 }
@@ -132,7 +138,7 @@ pub struct Bullshark<C> {
 struct BullsharkMetrics {
     proposed_block_size: Histogram<u64>,
     output_block_size: Histogram<u64>,
-    throttle_start: Option<Instant>,
+    back_pressure_start: Option<Instant>,
     throttle: Latency,
 }
 
@@ -141,7 +147,7 @@ impl Default for BullsharkMetrics {
         Self {
             proposed_block_size: Histogram::new(3).unwrap(),
             output_block_size: Histogram::new(3).unwrap(),
-            throttle_start: None,
+            back_pressure_start: None,
             throttle: Latency::new(),
         }
     }
@@ -152,17 +158,13 @@ impl<C> Bullshark<C> {
         let (
             (
                 round,
-                block_hash,
                 txn_pool,
                 block_oks,
                 certs,
-                reorder_validate,
-                certifying_blocks,
-                delivered,
-                reorder_blocks,
-                reorder_certified,
-                reorder_delivered,
+                certifying,
+                committing,
                 executing,
+                execute_backpressured,
             ),
             metrics,
         ) = Default::default();
@@ -171,17 +173,13 @@ impl<C> Bullshark<C> {
             config,
             node_index,
             round,
-            block_hash,
             txn_pool,
             block_oks,
             certs,
-            reorder_validate,
-            certifying_blocks,
-            delivered,
-            reorder_blocks,
-            reorder_certified,
-            reorder_delivered,
+            certifying,
+            committing,
             executing,
+            execute_backpressured,
             metrics,
         }
     }
@@ -195,7 +193,7 @@ impl<C: BullsharkContext> Bullshark<C> {
     }
 
     pub fn on_request(&mut self, at: Instant, request: Request) {
-        self.txn_pool.push((at, request));
+        self.txn_pool.push(request);
     }
 
     pub fn on_message(&mut self, message: message::Message) {
@@ -206,7 +204,7 @@ impl<C: BullsharkContext> Bullshark<C> {
                 self.certifying(block)
             }
             message::Message::BlockOk(block_ok) => {
-                assert!(block_ok.round <= self.round);
+                assert!(block_ok.round == self.round);
                 if block_ok.round == self.round {
                     self.insert_block_ok(block_ok)
                 }
@@ -218,8 +216,9 @@ impl<C: BullsharkContext> Bullshark<C> {
     pub fn log_metrics(&self) {
         info!(
             "bullshark metrics:\n\
-            \tproposed block size: avg {:.0} req, p50 {:.0} req, p95 {:.0} req, p99 {:.0} req\n\
-            \toutput block size: avg {:.0} req, p50 {:.0} req, p95 {:.0} req, p99 {:.0} req",
+            proposed block size: avg {:.0} req, p50 {:.0} req, p95 {:.0} req, p99 {:.0} req\n\
+            output block size: avg {:.0} req, p50 {:.0} req, p95 {:.0} req, p99 {:.0} req\n\
+            throttle time: {}",
             self.metrics.proposed_block_size.mean(),
             self.metrics.proposed_block_size.value_at_quantile(0.5),
             self.metrics.proposed_block_size.value_at_quantile(0.95),
@@ -228,62 +227,26 @@ impl<C: BullsharkContext> Bullshark<C> {
             self.metrics.output_block_size.value_at_quantile(0.5),
             self.metrics.output_block_size.value_at_quantile(0.95),
             self.metrics.output_block_size.value_at_quantile(0.99),
+            self.metrics.throttle,
         );
     }
 
     fn handle_cert(&mut self, cert: message::Cert) {
         self.certified(cert.block_hash);
-        let cert_round = cert.round;
-        if cert_round + 1 < self.round {
+        assert_eq!(cert.round, self.round);
+        self.certs.insert(cert.creator_index, cert);
+        if self.certs.len() < (self.config.num_node - self.config.num_faulty_node) as usize {
             return;
         }
-        let round_certs = self.certs.entry(cert_round).or_default();
-        round_certs.insert(cert.creator_index, cert);
-        if round_certs.len() >= (self.config.num_node - self.config.num_faulty_node) as usize
-        // TODO may need to restrict DAG shape
-        {
-            if self.round < cert_round {
-                warn!(
-                    "fast-forwarding from round {} to {}",
-                    self.round,
-                    cert_round + 1
-                );
-            }
-            if self.round <= cert_round {
-                self.round = cert_round + 1;
-                trace!("[{}] advanced to round {}", self.node_index, self.round);
-                self.certs.retain(|&r, _| r >= cert_round);
-                self.reorder_validate.retain(|&r, _| r >= self.round);
-                if let Some(pending) = self.reorder_validate.remove(&self.round) {
-                    for (node_index, block_hash) in pending {
-                        self.validate2(node_index, block_hash)
-                    }
-                }
-            }
-            self.may_propose();
-        }
-    }
 
-    fn may_propose(&mut self) {
-        // allow one inflight execution to overlap consensus latency with execution
-        // execution releases this backpressure right after issuing fetch (instead of finishing
-        // the whole execution), so this single permit does not prevent concurrent fetches
-        if self.executing.len() > 1 {
-            if self.metrics.throttle_start.is_none() {
-                self.metrics.throttle_start = Some(Instant::now());
-            }
-            return;
-        }
-        if let Some(start) = self.metrics.throttle_start.take() {
-            self.metrics.throttle += start.elapsed();
-        }
-
-        if self.round > 0
-            && self.certs.get(&(self.round - 1)).is_some_and(|certs| {
-                certs.len() >= (self.config.num_node - self.config.num_faulty_node) as usize
-            })
-        {
+        self.round += 1;
+        if self.executing.len() <= 1 {
             self.propose();
+        } else {
+            self.execute_backpressured = true;
+            self.metrics
+                .back_pressure_start
+                .get_or_insert_with(Instant::now);
         }
     }
 
@@ -294,24 +257,23 @@ impl<C: BullsharkContext> Bullshark<C> {
             self.round,
             self.txn_pool.len()
         );
-        if let Some(block_hash) = self.block_hash {
-            warn!("[{}] interrupted proposal {block_hash:?}", self.node_index);
-            self.block_oks.clear()
+        if self.round != 0 {
+            assert!(
+                self.certs
+                    .iter()
+                    .all(|(_, cert)| cert.round == self.round - 1)
+            );
+            assert!(
+                self.certs.len() >= (self.config.num_node - self.config.num_faulty_node) as usize
+            );
         }
-        let certs = if self.round == 0 {
-            Default::default()
-        } else {
-            self.certs.remove(&(self.round - 1)).unwrap()
-        };
-        assert!(certs.iter().all(|(_, cert)| cert.round == self.round - 1));
         let network_block = message::Block {
             round: self.round,
             creator_index: self.node_index,
-            certs: certs.into_values().collect(),
+            certs: take(&mut self.certs).into_values().collect(),
             txns: self
                 .txn_pool
                 .drain(..Self::MAX_BLOCK_TXNS.min(self.txn_pool.len()))
-                .map(|(_, req)| req)
                 .collect(),
         };
         if !network_block.txns.is_empty() {
@@ -399,12 +361,12 @@ impl<C: BullsharkContext> Bullshark<C> {
             self.may_deliver(block)
         } else {
             let block_hash = block.hash();
-            self.certifying_blocks.insert(block_hash, block);
+            self.certifying.insert(block_hash, block);
         }
     }
 
     fn certified(&mut self, block_hash: BlockHash) {
-        let Some(block) = self.certifying_blocks.remove(&block_hash) else {
+        let Some(block) = self.certifying.remove(&block_hash) else {
             self.reorder_certified.insert(block_hash);
             return;
         };
@@ -414,7 +376,7 @@ impl<C: BullsharkContext> Bullshark<C> {
     fn may_deliver(&mut self, block: Block) {
         for &link in &block.links {
             if !self
-                .delivered
+                .committing
                 .get(&(block.round - 1))
                 .is_some_and(|delivered| delivered.contains(&link))
             {
@@ -434,7 +396,7 @@ impl<C: BullsharkContext> Bullshark<C> {
     fn deliver(&mut self, block: Block) {
         // first perform bookkeeping that access block fields
         let block_hash = block.hash();
-        let round_delivered = self.delivered.entry(block.round).or_default();
+        let round_delivered = self.committing.entry(block.round).or_default();
         round_delivered.insert(block_hash);
 
         if !self.config.is_leader(block.node_index, block.round) {
@@ -446,8 +408,8 @@ impl<C: BullsharkContext> Bullshark<C> {
             && block.round >= depth
         {
             let gc_round = block.round - depth;
-            self.delivered.retain(|&r, _| r > gc_round);
-            self.certifying_blocks.retain(|_, b| b.round > gc_round)
+            self.committing.retain(|&r, _| r > gc_round);
+            self.certifying.retain(|_, b| b.round > gc_round)
             // we do not perform garbage collection in `reorder_blocks` and `reorder_certified`
             // because the relevant missing blocks are _secured_ by a quorum certificate so they
             // will eventually appear

@@ -1,0 +1,20 @@
+{
+    "version": "0.2",
+    "ignorePaths": [],
+    "dictionaryDefinitions": [],
+    "dictionaries": [],
+    "words": [
+        "backpressured",
+        "Bullshark",
+        "Deque",
+        "hdrhistogram",
+        "rngs",
+        "rocksdb",
+        "rustc",
+        "Seedable",
+        "tput",
+        "txns"
+    ],
+    "ignoreWords": [],
+    "import": []
+}
