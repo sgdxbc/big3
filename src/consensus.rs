@@ -22,7 +22,7 @@ use std::{
 
 use bincode::{Decode, Encode};
 use hdrhistogram::Histogram;
-use log::{info, trace, warn};
+use log::{info, trace};
 use sha2::{Digest as _, Sha256};
 
 use crate::{
@@ -60,15 +60,6 @@ impl From<&crate::schema::ReplicaConfig> for BullsharkConfig {
             num_node: config.num_nodes,
             num_faulty_node: config.num_faulty_nodes,
         }
-    }
-}
-
-impl BullsharkConfig {
-    fn is_leader(&self, node_index: NodeIndex, round: Round) -> bool {
-        // round % 2 == 0 && node_index == (round / 2 % self.num_node as Round) as NodeIndex
-        // with 2f+1 nodes, the vanilla leader selection will result in long periods without leader,
-        // resulting in fluctuating load to execution layer
-        round.is_multiple_of(2) && node_index == 0
     }
 }
 
@@ -127,7 +118,7 @@ pub struct Bullshark<C> {
 
     // deliver states
     certifying: HashMap<BlockHash, Block>,
-    committing: HashMap<Round, HashSet<BlockHash>>,
+    committing: HashMap<Round, HashMap<NodeIndex, Block>>,
 
     executing: HashSet<OutputId>,
     execute_backpressured: bool,
@@ -139,7 +130,7 @@ struct BullsharkMetrics {
     proposed_block_size: Histogram<u64>,
     output_block_size: Histogram<u64>,
     back_pressure_start: Option<Instant>,
-    throttle: Latency,
+    back_pressure: Latency,
 }
 
 impl Default for BullsharkMetrics {
@@ -148,7 +139,7 @@ impl Default for BullsharkMetrics {
             proposed_block_size: Histogram::new(3).unwrap(),
             output_block_size: Histogram::new(3).unwrap(),
             back_pressure_start: None,
-            throttle: Latency::new(),
+            back_pressure: Latency::new(),
         }
     }
 }
@@ -227,7 +218,7 @@ impl<C: BullsharkContext> Bullshark<C> {
             self.metrics.output_block_size.value_at_quantile(0.5),
             self.metrics.output_block_size.value_at_quantile(0.95),
             self.metrics.output_block_size.value_at_quantile(0.99),
-            self.metrics.throttle,
+            self.metrics.back_pressure,
         );
     }
 
@@ -283,29 +274,15 @@ impl<C: BullsharkContext> Bullshark<C> {
         let block = Block::from_network(&network_block);
         self.context
             .send_to_all(message::Message::Block(network_block));
-        self.block_hash = Some(block.hash());
         self.validate(&block);
         self.certifying(block)
     }
 
     fn validate(&mut self, block: &Block) {
-        if block.round < self.round {
-            warn!(
-                "[{}] ignoring old block for round {} < {}",
-                self.node_index, block.round, self.round
-            );
-            return;
-        }
+        assert_eq!(block.round, self.round);
         // TODO verify integrity
         let block_hash = block.hash();
-        if block.round == self.round {
-            self.validate2(block.node_index, block_hash)
-        } else {
-            self.reorder_validate
-                .entry(block.round)
-                .or_default()
-                .push((block.node_index, block_hash))
-        }
+        self.validate2(block.node_index, block_hash)
     }
 
     fn validate2(&mut self, node_index: NodeIndex, block_hash: BlockHash) {
@@ -326,15 +303,10 @@ impl<C: BullsharkContext> Bullshark<C> {
     }
 
     fn insert_block_ok(&mut self, block_ok: message::BlockOk) {
-        assert!(block_ok.round == self.round);
-        let Some(block_hash) = self.block_hash else {
-            return;
-        };
-        if block_ok.hash != block_hash || block_ok.creator_index != self.node_index {
-            warn!("invalid BlockOk for round {}", block_ok.round);
-            return;
-        }
+        assert_eq!(block_ok.round, self.round);
+        assert_eq!(block_ok.creator_index, self.node_index);
         // TODO verify signature
+        let block_hash = block_ok.hash;
         self.block_oks.insert(block_ok.validator_index, block_ok);
         if self.block_oks.len() == (self.config.num_node - self.config.num_faulty_node) as usize {
             trace!(
@@ -344,7 +316,7 @@ impl<C: BullsharkContext> Bullshark<C> {
             let cert = message::Cert {
                 round: self.round,
                 creator_index: self.node_index,
-                block_hash: self.block_hash.take().unwrap(),
+                block_hash,
                 sigs: take(&mut self.block_oks)
                     .into_iter()
                     .map(|(node_index, block_ok)| (node_index, block_ok.sig))
@@ -357,81 +329,55 @@ impl<C: BullsharkContext> Bullshark<C> {
     }
 
     fn certifying(&mut self, block: Block) {
-        if self.reorder_certified.remove(&block.hash()) {
-            self.may_deliver(block)
-        } else {
-            let block_hash = block.hash();
-            self.certifying.insert(block_hash, block);
-        }
+        self.certifying.insert(block.hash(), block);
     }
 
     fn certified(&mut self, block_hash: BlockHash) {
-        let Some(block) = self.certifying.remove(&block_hash) else {
-            self.reorder_certified.insert(block_hash);
-            return;
-        };
-        self.may_deliver(block)
-    }
-
-    fn may_deliver(&mut self, block: Block) {
-        for &link in &block.links {
-            if !self
-                .committing
-                .get(&(block.round - 1))
-                .is_some_and(|delivered| delivered.contains(&link))
-            {
-                self.reorder_blocks.entry(link).or_default().push(block);
-                return;
-            }
-        }
-        let block_hash = block.hash();
-        self.deliver(block);
-        if let Some(blocks) = self.reorder_blocks.remove(&block_hash) {
-            for block in blocks {
-                self.may_deliver(block)
-            }
-        }
+        let block = self.certifying.remove(&block_hash).unwrap();
+        self.deliver(block)
     }
 
     fn deliver(&mut self, block: Block) {
-        // first perform bookkeeping that access block fields
-        let block_hash = block.hash();
+        assert_eq!(block.round, self.round);
         let round_delivered = self.committing.entry(block.round).or_default();
-        round_delivered.insert(block_hash);
+        round_delivered.insert(block.node_index, block);
 
-        if !self.config.is_leader(block.node_index, block.round) {
-            self.reorder_delivered.insert(block_hash, block);
+        if self.round.is_multiple_of(2)
+            || round_delivered.len() < (self.config.num_faulty_node + 1) as usize
+        {
             return;
         }
 
-        if let Some(depth) = self.config.garbage_collection_depth
-            && block.round >= depth
-        {
-            let gc_round = block.round - depth;
-            self.committing.retain(|&r, _| r > gc_round);
-            self.certifying.retain(|_, b| b.round > gc_round)
-            // we do not perform garbage collection in `reorder_blocks` and `reorder_certified`
-            // because the relevant missing blocks are _secured_ by a quorum certificate so they
-            // will eventually appear
-        }
+        // at this point, every block at round-1 has f+1 links symmetrically. since they also share
+        // the same causal dependencies (i.e. all 2f+1 nodes from round-2), it's not significant
+        // which block is the leader. here we just pick block proposed by node 0 as the leader for
+        // simplicity
 
-        let blocks = self.output_recursive(block);
+        let mut blocks = Vec::new();
+        if self.round > 1 {
+            let blocks1 = self.committing.remove(&(self.round - 3)).unwrap();
+            assert_eq!(
+                blocks1.len(),
+                (self.config.num_node - self.config.num_faulty_node - 1) as usize
+            );
+            blocks.extend(blocks1.into_values());
+            let blocks2 = self.committing.remove(&(self.round - 2)).unwrap();
+            assert_eq!(
+                blocks2.len(),
+                (self.config.num_node - self.config.num_faulty_node) as usize
+            );
+            blocks.extend(blocks2.into_values());
+        }
+        blocks.push(
+            self.committing
+                .get_mut(&(self.round - 1))
+                .unwrap()
+                .remove(&0)
+                .unwrap(),
+        );
+
         let output_id = self.context.output(blocks);
         self.executing.insert(output_id);
-    }
-
-    fn output_recursive(&mut self, block: Block) -> Vec<Block> {
-        let mut blocks = Vec::new();
-        for &link in &block.links {
-            if let Some(parent) = self.reorder_delivered.remove(&link) {
-                blocks.extend(self.output_recursive(parent));
-            }
-        }
-        if !block.txns.is_empty() {
-            self.metrics.output_block_size += block.txns.len() as u64;
-        }
-        blocks.push(block);
-        blocks
     }
 
     pub fn on_output_response(&mut self, output_id: OutputId) {
@@ -443,7 +389,13 @@ impl<C: BullsharkContext> Bullshark<C> {
             output_id,
             self.executing.len()
         );
-        self.may_propose();
+
+        if self.executing.len() <= 1 && take(&mut self.execute_backpressured) {
+            if let Some(start) = self.metrics.back_pressure_start.take() {
+                self.metrics.back_pressure += start.elapsed();
+            }
+            self.propose();
+        }
     }
 }
 
