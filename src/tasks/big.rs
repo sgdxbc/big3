@@ -1,9 +1,10 @@
+use rustc_hash::FxHashSet;
 use tokio::sync::mpsc::{Receiver, Sender, UnboundedReceiver, UnboundedSender};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
     schema,
-    storage::{BackendFetchId, BigStorage, BigStorageContext, StorageOp},
+    storage::{BackendFetchId, BigStorage, BigStorageContext, FetchResponse, StorageOp},
 };
 
 use super::{
@@ -20,8 +21,8 @@ struct BigStorageChannels {
     tx_storage_op: UnboundedSender<StorageOp>,
     rx_storage_op: UnboundedReceiver<StorageOp>,
 
-    tx_fetch_response: UnboundedSender<(BackendFetchId, Vec<Option<Vec<u8>>>)>,
-    rx_fetch_response: UnboundedReceiver<(BackendFetchId, Vec<Option<Vec<u8>>>)>,
+    tx_fetch_response: UnboundedSender<(BackendFetchId, FetchResponse)>,
+    rx_fetch_response: UnboundedReceiver<(BackendFetchId, FetchResponse)>,
 
     tx_incoming_message: Sender<crate::storage::Message>,
     rx_incoming_message: Receiver<crate::storage::Message>,
@@ -125,7 +126,7 @@ impl BigStorageTaskContext {
 }
 
 impl BigStorageContext for BigStorageTaskContext {
-    fn backend_fetch(&mut self, keys: Vec<Vec<u8>>) -> BackendFetchId {
+    fn backend_fetch(&mut self, keys: FxHashSet<Vec<u8>>) -> BackendFetchId {
         self.storage.fetch(keys)
     }
 

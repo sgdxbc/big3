@@ -7,6 +7,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use crate::{
     consensus::Block,
     metrics::Latency,
+    storage::FetchResponse,
     tasks::{RequestId, ResponseContext},
     types::{ClientId, ClientSeq, NodeIndex, Reply},
 };
@@ -35,7 +36,7 @@ pub trait ExecuteContext {
     // network
     fn send(&mut self, id: ClientId, reply: Reply);
     // storage
-    fn fetch(&mut self, keys: Vec<Vec<u8>>) -> FetchId;
+    fn fetch(&mut self, keys: FxHashSet<Vec<u8>>) -> FetchId;
     fn post(&mut self, updates: Vec<(Vec<u8>, Option<Vec<u8>>)>);
 }
 
@@ -66,14 +67,13 @@ pub struct Execute<C> {
 struct FetchingState {
     requests: Vec<(Op, ClientId, ClientSeq)>,
     fetch_id: FetchId,
-    fetch_keys: Vec<String>,
 
     start: Instant,
 }
 
 struct WillFetchState {
     requests: Vec<(Op, ClientId, ClientSeq)>,
-    fetch_keys: Vec<String>,
+    fetch_keys: FxHashSet<Vec<u8>>,
     context: ResponseContext<()>,
 }
 
@@ -129,7 +129,7 @@ impl<C: ExecuteContext> Execute<C> {
                     .unwrap()
                     .0;
                 if let Op::Get(key) = &op {
-                    fetching_keys.insert(key.clone());
+                    fetching_keys.insert(key.as_bytes().to_vec());
                 }
                 working
                     .requests
@@ -143,8 +143,7 @@ impl<C: ExecuteContext> Execute<C> {
             return;
         }
 
-        working.fetch_keys = fetching_keys.into_iter().collect();
-        working.fetch_keys.sort_unstable();
+        working.fetch_keys = fetching_keys;
 
         self.metrics.prepare_time += start.elapsed();
 
@@ -157,23 +156,16 @@ impl<C: ExecuteContext> Execute<C> {
 
     fn fetch_for_blocks(&mut self, working: WillFetchState) {
         assert!(self.fetching.len() < Self::NUM_MAX_CONCURRENT_FETCHES);
-        let fetch_id = self.context.fetch(
-            working
-                .fetch_keys
-                .iter()
-                .map(|k| k.as_bytes().to_vec())
-                .collect(),
-        );
+        let fetch_id = self.context.fetch(working.fetch_keys);
         self.fetching.push_back(FetchingState {
             requests: working.requests,
             fetch_id,
-            fetch_keys: working.fetch_keys,
             start: Instant::now(),
         });
         working.context.respond(());
     }
 
-    pub fn on_fetch_response(&mut self, fetch_id: FetchId, values: Vec<Option<Vec<u8>>>) {
+    pub fn on_fetch_response(&mut self, fetch_id: FetchId, response: FetchResponse) {
         let Some(working) = self.fetching.pop_front() else {
             unimplemented!()
         };
@@ -183,27 +175,24 @@ impl<C: ExecuteContext> Execute<C> {
         if let Some(state) = self.pending_blocks.pop_front() {
             self.fetch_for_blocks(state);
         }
-        self.execute_blocks(working, values);
+        self.execute_blocks(working, response);
     }
 
-    fn execute_blocks(&mut self, working: FetchingState, values: Vec<Option<Vec<u8>>>) {
+    fn execute_blocks(&mut self, working: FetchingState, response: FetchResponse) {
         let start = Instant::now();
 
-        let mut state = working
-            .fetch_keys
-            .into_iter()
-            .zip(values)
-            .collect::<FxHashMap<_, _>>();
-        let mut updates = Vec::new();
+        let mut updates = FxHashMap::default();
         for (op, client_id, client_seq) in working.requests {
             let op = match op {
                 Op::Put(key, value) => {
-                    updates.push((key.as_bytes().to_vec(), Some(value.clone())));
-                    state.insert(key, Some(value));
+                    updates.insert(key, value.clone());
                     Res::Put
                 }
                 Op::Get(key) => {
-                    let Some(value) = &state[&key] else {
+                    let value = updates
+                        .get(&key)
+                        .or_else(|| response.get(key.as_bytes()).as_ref());
+                    let Some(value) = value else {
                         panic!("key not found");
                     };
                     Res::Get(value.clone())
@@ -229,6 +218,11 @@ impl<C: ExecuteContext> Execute<C> {
 
         self.metrics.execute_time += start.elapsed();
 
-        self.context.post(updates);
+        self.context.post(
+            updates
+                .into_iter()
+                .map(|(k, v)| (k.into_bytes(), Some(v)))
+                .collect(),
+        );
     }
 }

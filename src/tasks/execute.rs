@@ -1,3 +1,4 @@
+use rustc_hash::FxHashSet;
 use tokio::{
     select,
     sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel},
@@ -8,6 +9,7 @@ use crate::{
     consensus::Block,
     execute::{Execute, ExecuteContext, FetchId},
     schema,
+    storage::FetchResponse,
     types::{ClientId, Reply},
 };
 
@@ -21,8 +23,8 @@ pub struct ExecuteChannels {
     tx_blocks: UnboundedSender<(Vec<Block>, ResponseContext<()>)>,
     rx_blocks: UnboundedReceiver<(Vec<Block>, ResponseContext<()>)>,
 
-    tx_fetch_response: UnboundedSender<(FetchId, Vec<Option<Vec<u8>>>)>,
-    rx_fetch_response: UnboundedReceiver<(FetchId, Vec<Option<Vec<u8>>>)>,
+    tx_fetch_response: UnboundedSender<(FetchId, FetchResponse)>,
+    rx_fetch_response: UnboundedReceiver<(FetchId, FetchResponse)>,
 }
 
 #[derive(Clone)]
@@ -122,7 +124,7 @@ impl ExecuteContext for ExecuteTaskContext {
         let _ = self.network_outgoing.send_message(id, reply);
     }
 
-    fn fetch(&mut self, keys: Vec<Vec<u8>>) -> FetchId {
+    fn fetch(&mut self, keys: FxHashSet<Vec<u8>>) -> FetchId {
         self.storage.fetch(keys)
     }
 

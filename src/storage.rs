@@ -18,13 +18,35 @@ use crate::{
 };
 
 pub enum StorageOp {
-    Fetch(Vec<Vec<u8>>, ResponseContext<Vec<Option<Vec<u8>>>>),
+    Fetch(HashSet<Vec<u8>>, ResponseContext<FetchResponse>),
     Post(Vec<(Vec<u8>, Option<Vec<u8>>)>),
 }
 
 pub struct PlainStorage {
     db: DB,
     metrics: PlainStorageMetrics,
+}
+
+pub enum FetchResponse {
+    Plain(PlainStorageFetchResponse),
+    Big(BigStorageFetchResponse),
+}
+
+impl FetchResponse {
+    pub fn get(&self, key: &[u8]) -> &Option<Vec<u8>> {
+        match self {
+            FetchResponse::Plain(res) => res.get(key),
+            FetchResponse::Big(res) => res.get(key),
+        }
+    }
+}
+
+pub struct PlainStorageFetchResponse(HashMap<Vec<u8>, Option<Vec<u8>>>);
+
+impl PlainStorageFetchResponse {
+    pub fn get(&self, key: &[u8]) -> &Option<Vec<u8>> {
+        &self.0[key]
+    }
 }
 
 struct PlainStorageMetrics {
@@ -76,17 +98,17 @@ impl PlainStorage {
                         .db
                         .multi_get(&keys)
                         .into_iter()
-                        .collect::<Result<_, _>>()?;
+                        .collect::<Result<Vec<_>, _>>()?;
                     let latency = start.elapsed();
                     self.metrics.fetch_time += latency;
                     self.metrics.multi_get_size += keys.len() as u64;
                     self.metrics.multi_get_tput +=
                         (keys.len() as f64 / latency.as_secs_f64()) as u64;
-                    res
+                    keys.into_iter().zip(res).collect()
                 } else {
                     Default::default()
                 };
-                context.respond(res);
+                context.respond(FetchResponse::Plain(PlainStorageFetchResponse(res)));
             }
             StorageOp::Post(kvs) => {
                 let mut batch = WriteBatch::new();
@@ -110,12 +132,13 @@ impl PlainStorage {
 pub type BackendFetchId = RequestId;
 
 pub trait BigStorageContext {
-    fn backend_fetch(&mut self, keys: Vec<Vec<u8>>) -> BackendFetchId;
+    fn backend_fetch(&mut self, keys: HashSet<Vec<u8>>) -> BackendFetchId;
     fn backend_post(&mut self, updates: Vec<(Vec<u8>, Option<Vec<u8>>)>);
 
     fn send_to_all(&mut self, message: message::Message);
 }
 
+#[derive(Clone)]
 pub struct BigStorageConfig {
     num_nodes: NodeIndex,
     num_faulty_nodes: NodeIndex,
@@ -159,56 +182,42 @@ impl BigStorageConfig {
     }
 }
 
-type Values = Vec<Option<Vec<u8>>>;
+type StateStore = HashMap<Vec<u8>, Option<Vec<u8>>>;
 type FetchSeq = u64;
 
 pub struct BigStorage<C> {
     context: C,
     config: BigStorageConfig,
+    #[allow(dead_code)]
     node_index: NodeIndex,
     // cached config
     primary_shards: HashSet<u32>,
     secondary_shards: HashSet<u32>,
 
     fetch_seq: FetchSeq,
-    fetching: VecDeque<BackendFetchingState>,
-    pending_query: VecDeque<BackendFetchedState>,
-    querying: Option<QueryingState>,
-    reordered_push_states: HashMap<FetchSeq, Vec<(NodeIndex, Values)>>,
+    response_contexts: VecDeque<(FetchSeq, ResponseContext<FetchResponse>)>,
+    backend_fetching: HashMap<BackendFetchId, (FetchSeq, u32)>,
+    shard_states: HashMap<FetchSeq, HashMap<u32, StateStore>>,
 
     metrics: BigStorageMetrics,
+}
+
+pub struct BigStorageFetchResponse {
+    shards: HashMap<u32, HashMap<Vec<u8>, Option<Vec<u8>>>>,
+    config: BigStorageConfig,
+}
+
+impl BigStorageFetchResponse {
+    fn get(&self, key: &[u8]) -> &Option<Vec<u8>> {
+        let shard = self.config.shard_of_key(key);
+        &self.shards[&shard][key]
+    }
 }
 
 struct BigStorageMetrics {
     prepare: Latency,
     backend: Latency,
     network: Latency,
-}
-
-struct BackendFetchingState {
-    seq: FetchSeq,
-    key_shards: Vec<u32>,
-    context: ResponseContext<Values>,
-    // only for sanity check
-    backend: BackendFetchId,
-
-    start: Instant,
-}
-
-struct BackendFetchedState {
-    seq: FetchSeq,
-    key_shards: Vec<u32>,
-    values: Values,
-    context: ResponseContext<Values>,
-    start: Instant,
-}
-
-struct QueryingState {
-    seq: FetchSeq,
-    key_shards: Vec<u32>,
-    node_states: HashMap<NodeIndex, Values>,
-    context: ResponseContext<Values>,
-    start: Instant,
 }
 
 impl<C> BigStorage<C> {
@@ -226,18 +235,16 @@ impl<C> BigStorage<C> {
                 secondary_shards.insert(shard);
             }
         }
-        let (reordered_push_states, fetching, pending_query) = Default::default();
         Self {
             context,
             config,
             node_index,
             primary_shards,
             secondary_shards,
-            reordered_push_states,
             fetch_seq: 0,
-            fetching,
-            pending_query,
-            querying: None,
+            response_contexts: Default::default(),
+            backend_fetching: Default::default(),
+            shard_states: Default::default(),
             metrics: BigStorageMetrics {
                 prepare: Default::default(),
                 backend: Default::default(),
@@ -270,36 +277,23 @@ impl<C: BigStorageContext> BigStorage<C> {
         }
     }
 
-    fn start_fetch(&mut self, keys: Vec<Vec<u8>>, context: ResponseContext<Vec<Option<Vec<u8>>>>) {
+    fn start_fetch(&mut self, keys: HashSet<Vec<u8>>, context: ResponseContext<FetchResponse>) {
         self.fetch_seq += 1;
 
         let start = Instant::now();
-        let key_shards: Vec<u32> = keys
-            .iter()
-            .map(|key| self.config.shard_of_key(key))
-            .collect();
-        let backend_keys = keys
-            .into_iter()
-            .zip(&key_shards)
-            .filter_map(|(key, shard)| {
-                if self.primary_shards.contains(shard) {
-                    Some(key)
-                } else {
-                    None
-                }
-            })
-            .collect();
+        for &shard in &self.primary_shards {
+            let backend_keys = keys
+                .iter()
+                .filter(|key| self.config.shard_of_key(key) == shard)
+                .cloned()
+                .collect();
+            let fetch_id = self.context.backend_fetch(backend_keys);
+            self.backend_fetching
+                .insert(fetch_id, (self.fetch_seq, shard));
+        }
         self.metrics.prepare += start.elapsed();
 
-        let fetch_id = self.context.backend_fetch(backend_keys);
-        let fetching = BackendFetchingState {
-            seq: self.fetch_seq,
-            key_shards,
-            context,
-            backend: fetch_id,
-            start: Instant::now(),
-        };
-        self.fetching.push_back(fetching);
+        self.response_contexts.push_back((self.fetch_seq, context));
     }
 
     pub fn on_message(&mut self, message: message::Message) {
@@ -307,105 +301,49 @@ impl<C: BigStorageContext> BigStorage<C> {
             message::Message::PushState(push_state) => {
                 self.insert_state(
                     push_state.fetch_seq,
-                    push_state.node_index,
-                    push_state.values,
+                    push_state.shard_index,
+                    push_state.state,
                 );
             }
         }
     }
 
-    pub fn on_fetch_response(&mut self, fetch_id: BackendFetchId, values: Vec<Option<Vec<u8>>>) {
-        let Some(fetching) = self.fetching.pop_front() else {
+    pub fn on_fetch_response(&mut self, fetch_id: BackendFetchId, response: FetchResponse) {
+        let (fetch_seq, shard_index) = self.backend_fetching.remove(&fetch_id).unwrap();
+        let FetchResponse::Plain(PlainStorageFetchResponse(state)) = response else {
             unimplemented!()
         };
-        assert_eq!(fetch_id, fetching.backend);
 
         let push_state = message::PushState {
-            values: values.clone(),
-            node_index: self.node_index,
-            fetch_seq: fetching.seq,
+            state: state.clone(),
+            shard_index,
+            fetch_seq,
         };
         self.context.send_to_all(Message::PushState(push_state));
+        // self.metrics.backend += fetching.start.elapsed();
 
-        let state = BackendFetchedState {
-            seq: fetching.seq,
-            key_shards: fetching.key_shards,
-            values,
-            context: fetching.context,
-            start: Instant::now(),
-        };
-        self.metrics.backend += fetching.start.elapsed();
-
-        if self.querying.is_some() {
-            self.pending_query.push_back(state);
-            return;
-        }
-        self.start_query(state);
+        self.insert_state(fetch_seq, shard_index, state);
     }
 
-    fn start_query(&mut self, state: BackendFetchedState) {
-        let replaced = self.querying.replace(QueryingState {
-            seq: state.seq,
-            key_shards: state.key_shards,
-            node_states: Default::default(),
-            context: state.context,
-            start: state.start,
-        });
-        assert!(replaced.is_none());
+    fn insert_state(&mut self, seq: FetchSeq, shard_index: u32, state: StateStore) {
+        let shard_states = self.shard_states.entry(seq).or_default();
+        shard_states.insert(shard_index, state);
 
-        self.insert_state(state.seq, self.node_index, state.values);
-        if let Some(reordered) = self.reordered_push_states.remove(&state.seq) {
-            for (node_index, values) in reordered {
-                self.insert_state(state.seq, node_index, values);
-            }
-        }
-    }
-
-    fn insert_state(&mut self, seq: FetchSeq, node_index: NodeIndex, values: Values) {
-        let Some(querying) = &mut self.querying else {
-            self.reordered_push_states
-                .entry(seq)
-                .or_default()
-                .push((node_index, values));
-            return;
-        };
-        assert!(seq >= querying.seq);
-        if seq != querying.seq {
-            self.reordered_push_states
-                .entry(seq)
-                .or_default()
-                .push((node_index, values));
-            return;
-        }
-
-        querying.node_states.insert(node_index, values);
-        if querying.node_states.len()
-            != (self.config.num_nodes - self.config.num_faulty_nodes) as usize
+        if self
+            .shard_states
+            .get(&self.response_contexts.front().unwrap().0)
+            .is_some_and(|shards| shards.len() == self.config.num_shards() as usize)
         {
-            return;
-        }
+            let (seq, context) = self.response_contexts.pop_front().unwrap();
+            let shards = self.shard_states.remove(&seq).unwrap();
 
-        // info!("all node states received for fetch");
-        let querying = self.querying.take().unwrap();
-        let mut values = Vec::new();
-        let mut node_index = vec![0; self.config.num_nodes as usize];
-        for shard in querying.key_shards {
-            let i = self.config.primary_node_of_shard(shard);
-            let value = querying.node_states[&i][node_index[i as usize]].clone();
-            node_index[i as usize] += 1;
-            values.push(value);
-        }
-        assert!(
-            querying
-                .node_states
-                .iter()
-                .all(|(i, values)| node_index[*i as usize] == values.len())
-        );
-        querying.context.respond(values);
-        self.metrics.network += querying.start.elapsed();
+            let res = BigStorageFetchResponse {
+                shards,
+                config: self.config.clone(),
+            };
+            // self.metrics.network += start.elapsed();
 
-        if let Some(state) = self.pending_query.pop_front() {
-            self.start_query(state);
+            context.respond(FetchResponse::Big(res));
         }
     }
 }
@@ -413,10 +351,9 @@ impl<C: BigStorageContext> BigStorage<C> {
 pub use message::Message;
 
 mod message {
-    use big_schema::NodeIndex;
     use bincode::{Decode, Encode};
 
-    use super::{FetchSeq, Values};
+    use super::{FetchSeq, StateStore};
 
     #[derive(Encode, Decode)]
     pub enum Message {
@@ -426,7 +363,7 @@ mod message {
     #[derive(Encode, Decode, Clone)]
     pub struct PushState {
         pub fetch_seq: FetchSeq,
-        pub values: Values,
-        pub node_index: NodeIndex,
+        pub state: StateStore,
+        pub shard_index: u32,
     }
 }

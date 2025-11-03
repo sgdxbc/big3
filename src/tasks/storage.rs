@@ -1,4 +1,5 @@
 use rocksdb::DB;
+use rustc_hash::FxHashSet;
 use tempfile::{TempDir, tempdir};
 use tokio::{
     process::Command,
@@ -7,7 +8,7 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    storage::{PlainStorage, StorageOp},
+    storage::{FetchResponse, PlainStorage, StorageOp},
     tasks::PREFILL_PATH,
 };
 
@@ -31,14 +32,14 @@ impl StorageHandle {
 
 pub struct StorageContext {
     storage: StorageHandle,
-    tx_fetch_response: UnboundedSender<(RequestId, Vec<Option<Vec<u8>>>)>,
+    tx_fetch_response: UnboundedSender<(RequestId, FetchResponse)>,
     fetch_id: RequestId,
 }
 
 impl StorageContext {
     pub fn new(
         storage: StorageHandle,
-        tx_fetch_response: UnboundedSender<(RequestId, Vec<Option<Vec<u8>>>)>,
+        tx_fetch_response: UnboundedSender<(RequestId, FetchResponse)>,
     ) -> Self {
         Self {
             storage,
@@ -47,7 +48,7 @@ impl StorageContext {
         }
     }
 
-    pub fn fetch(&mut self, keys: Vec<Vec<u8>>) -> RequestId {
+    pub fn fetch(&mut self, keys: FxHashSet<Vec<u8>>) -> RequestId {
         self.fetch_id += 1;
         let context = ResponseContext::new(self.fetch_id, self.tx_fetch_response.clone());
         let op = StorageOp::Fetch(keys, context);
