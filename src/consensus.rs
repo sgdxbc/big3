@@ -14,7 +14,7 @@
 //   (probably due to slow storage), all nodes cannot proceed to the next round
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     fmt::Debug,
     mem::take,
     time::Instant,
@@ -114,11 +114,17 @@ pub struct Bullshark<C> {
     round: Round,
     txn_pool: Vec<Request>,
     block_oks: HashMap<NodeIndex, message::BlockOk>,
-    certs: HashMap<NodeIndex, message::Cert>,
+    // mostly only certs of current round (i.e. previous round at the point of proposing) are
+    // relevant. however, if the proposal is delayed until after starting to receive certs of the
+    // next (current) round, we need to keep the certs of two rounds simultaneously
+    certs: HashMap<Round, HashMap<NodeIndex, message::Cert>>,
+
+    // validate states
+    reorder_validate: HashMap<Round, Vec<Block>>,
 
     // deliver states
     certifying: HashMap<BlockHash, Block>,
-    committing: HashMap<Round, HashMap<NodeIndex, Block>>,
+    committing: HashMap<Round, BTreeMap<NodeIndex, Block>>,
 
     executing: HashSet<OutputId>,
     execute_backpressured: bool,
@@ -154,6 +160,7 @@ impl<C> Bullshark<C> {
                 certs,
                 certifying,
                 committing,
+                reorder_validate,
                 executing,
                 execute_backpressured,
             ),
@@ -167,6 +174,7 @@ impl<C> Bullshark<C> {
             txn_pool,
             block_oks,
             certs,
+            reorder_validate,
             certifying,
             committing,
             executing,
@@ -183,7 +191,7 @@ impl<C: BullsharkContext> Bullshark<C> {
         self.propose();
     }
 
-    pub fn on_request(&mut self, at: Instant, request: Request) {
+    pub fn on_request(&mut self, request: Request) {
         self.txn_pool.push(request);
     }
 
@@ -195,10 +203,8 @@ impl<C: BullsharkContext> Bullshark<C> {
                 self.certifying(block)
             }
             message::Message::BlockOk(block_ok) => {
-                assert!(block_ok.round == self.round);
-                if block_ok.round == self.round {
-                    self.insert_block_ok(block_ok)
-                }
+                assert_eq!(block_ok.round, self.round);
+                self.insert_block_ok(block_ok)
             }
             message::Message::Cert(cert) => self.handle_cert(cert),
         }
@@ -225,12 +231,15 @@ impl<C: BullsharkContext> Bullshark<C> {
     fn handle_cert(&mut self, cert: message::Cert) {
         self.certified(cert.block_hash);
         assert_eq!(cert.round, self.round);
-        self.certs.insert(cert.creator_index, cert);
-        if self.certs.len() < (self.config.num_node - self.config.num_faulty_node) as usize {
+        let round_certs = self.certs.entry(self.round).or_default();
+        round_certs.insert(cert.creator_index, cert);
+        if round_certs.len() < (self.config.num_node - self.config.num_faulty_node) as usize {
             return;
         }
 
         self.round += 1;
+        trace!("[{}] moving to round {}", self.node_index, self.round);
+
         if self.executing.len() <= 1 {
             self.propose();
         } else {
@@ -238,6 +247,12 @@ impl<C: BullsharkContext> Bullshark<C> {
             self.metrics
                 .back_pressure_start
                 .get_or_insert_with(Instant::now);
+        }
+
+        if let Some(blocks) = self.reorder_validate.remove(&self.round) {
+            for block in blocks {
+                self.validate(&block);
+            }
         }
     }
 
@@ -248,20 +263,18 @@ impl<C: BullsharkContext> Bullshark<C> {
             self.round,
             self.txn_pool.len()
         );
-        if self.round != 0 {
-            assert!(
-                self.certs
-                    .iter()
-                    .all(|(_, cert)| cert.round == self.round - 1)
-            );
-            assert!(
-                self.certs.len() >= (self.config.num_node - self.config.num_faulty_node) as usize
-            );
-        }
+        let certs = if self.round != 0 {
+            let certs = self.certs.remove(&(self.round - 1)).unwrap();
+            assert!(certs.iter().all(|(_, cert)| cert.round == self.round - 1));
+            assert!(certs.len() >= (self.config.num_node - self.config.num_faulty_node) as usize);
+            certs
+        } else {
+            Default::default()
+        };
         let network_block = message::Block {
             round: self.round,
             creator_index: self.node_index,
-            certs: take(&mut self.certs).into_values().collect(),
+            certs: certs.into_values().collect(),
             txns: self
                 .txn_pool
                 .drain(..Self::MAX_BLOCK_TXNS.min(self.txn_pool.len()))
@@ -274,13 +287,23 @@ impl<C: BullsharkContext> Bullshark<C> {
         let block = Block::from_network(&network_block);
         self.context
             .send_to_all(message::Message::Block(network_block));
+        self.block_oks.clear();
+
         self.validate(&block);
         self.certifying(block)
     }
 
     fn validate(&mut self, block: &Block) {
-        assert_eq!(block.round, self.round);
+        assert!(block.round == self.round || block.round == self.round + 1);
         // TODO verify integrity
+        if block.round != self.round {
+            self.reorder_validate
+                .entry(block.round)
+                .or_default()
+                .push(block.clone());
+            return;
+        }
+
         let block_hash = block.hash();
         self.validate2(block.node_index, block_hash)
     }
@@ -338,12 +361,19 @@ impl<C: BullsharkContext> Bullshark<C> {
     }
 
     fn deliver(&mut self, block: Block) {
+        trace!(
+            "[{}] delivering block {:?} ({}, {})",
+            self.node_index,
+            block.hash(),
+            block.round,
+            block.node_index
+        );
         assert_eq!(block.round, self.round);
         let round_delivered = self.committing.entry(block.round).or_default();
         round_delivered.insert(block.node_index, block);
 
         if self.round.is_multiple_of(2)
-            || round_delivered.len() < (self.config.num_faulty_node + 1) as usize
+            || round_delivered.len() != (self.config.num_faulty_node + 1) as usize
         {
             return;
         }

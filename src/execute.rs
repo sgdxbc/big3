@@ -214,9 +214,11 @@ impl<C: ExecuteContext> Execute<C> {
                 node_index: self.index,
             };
 
-            if (self.executed_count..self.executed_count + self.config.num_faulty_nodes as u64 + 1)
-                .map(|i| (i % (self.config.num_faulty_nodes as u64 * 2 + 1)) as NodeIndex)
-                .any(|i| i == self.index)
+            if (self.executed_count
+                ..self.executed_count + (self.config.num_faulty_nodes + 1) as u64)
+                .any(|i| {
+                    (i % (self.config.num_faulty_nodes as u64 * 2 + 1)) as NodeIndex == self.index
+                })
             {
                 self.context.send(client_id, reply);
             }

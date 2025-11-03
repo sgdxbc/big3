@@ -1,4 +1,4 @@
-use std::{collections::HashMap, time::Instant};
+use std::collections::HashMap;
 
 use bytes::Bytes;
 use quinn::{Connection, Endpoint};
@@ -17,16 +17,16 @@ use crate::{
 
 #[derive(Clone)]
 pub struct SubmitHandle {
-    tx_request: Sender<(Instant, Request)>,
+    tx_request: Sender<Request>,
 }
 
 impl SubmitHandle {
-    pub fn new(tx_request: Sender<(Instant, Request)>) -> Self {
+    pub fn new(tx_request: Sender<Request>) -> Self {
         Self { tx_request }
     }
 
     pub async fn submit(&self, request: Request) -> anyhow::Result<()> {
-        self.tx_request.send((Instant::now(), request)).await?;
+        self.tx_request.send(request).await?;
         Ok(())
     }
 }

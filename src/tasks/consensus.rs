@@ -1,5 +1,3 @@
-use std::time::Instant;
-
 use tokio::{
     select,
     sync::mpsc::{
@@ -24,8 +22,8 @@ use super::{
 };
 
 pub struct ConsensusChannels {
-    tx_request: Sender<(Instant, Request)>,
-    rx_request: Receiver<(Instant, Request)>,
+    tx_request: Sender<Request>,
+    rx_request: Receiver<Request>,
 
     tx_incoming_message: Sender<crate::consensus::message::Message>,
     rx_incoming_message: Receiver<crate::consensus::message::Message>,
@@ -110,8 +108,8 @@ impl ConsensusTask {
                 Some(message) = self.channels.rx_incoming_message.recv() => {
                     self.state.on_message(message);
                 }
-                Some((at, request)) = self.channels.rx_request.recv() => {
-                    self.state.on_request(at, request);
+                Some(request) = self.channels.rx_request.recv() => {
+                    self.state.on_request(request);
                 }
                 Some((output_id, ())) = self.channels.rx_output_response.recv() => {
                     self.state.on_output_response(output_id);
