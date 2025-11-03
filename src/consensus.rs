@@ -137,6 +137,8 @@ struct BullsharkMetrics {
     output_block_size: Histogram<u64>,
     back_pressure_start: Option<Instant>,
     back_pressure: Latency,
+    round_start: Instant,
+    round: Latency,
 }
 
 impl Default for BullsharkMetrics {
@@ -146,6 +148,8 @@ impl Default for BullsharkMetrics {
             output_block_size: Histogram::new(3).unwrap(),
             back_pressure_start: None,
             back_pressure: Latency::new(),
+            round_start: Instant::now(),
+            round: Latency::new(),
         }
     }
 }
@@ -215,7 +219,8 @@ impl<C: BullsharkContext> Bullshark<C> {
             "bullshark metrics:\n\
             proposed block size: avg {:.0} req, p50 {:.0} req, p95 {:.0} req, p99 {:.0} req\n\
             output block size: avg {:.0} req, p50 {:.0} req, p95 {:.0} req, p99 {:.0} req\n\
-            throttle time: {}",
+            throttle time: {}\n\
+            rounds completed: {}",
             self.metrics.proposed_block_size.mean(),
             self.metrics.proposed_block_size.value_at_quantile(0.5),
             self.metrics.proposed_block_size.value_at_quantile(0.95),
@@ -225,6 +230,7 @@ impl<C: BullsharkContext> Bullshark<C> {
             self.metrics.output_block_size.value_at_quantile(0.95),
             self.metrics.output_block_size.value_at_quantile(0.99),
             self.metrics.back_pressure,
+            self.metrics.round,
         );
     }
 
@@ -239,6 +245,8 @@ impl<C: BullsharkContext> Bullshark<C> {
 
         self.round += 1;
         trace!("[{}] moving to round {}", self.node_index, self.round);
+        self.metrics.round += self.metrics.round_start.elapsed();
+        self.metrics.round_start = Instant::now();
 
         if self.executing.len() <= 1 {
             self.propose();

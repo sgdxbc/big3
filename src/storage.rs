@@ -31,6 +31,7 @@ struct PlainStorageMetrics {
     multi_get_size: Histogram<u64>,
     multi_get_tput: Histogram<u64>,
     fetch_time: Latency,
+    post_time: Latency,
 }
 
 impl Default for PlainStorageMetrics {
@@ -39,6 +40,7 @@ impl Default for PlainStorageMetrics {
             multi_get_size: Histogram::<u64>::new(3).unwrap(),
             multi_get_tput: Histogram::<u64>::new(3).unwrap(),
             fetch_time: Default::default(),
+            post_time: Default::default(),
         }
     }
 }
@@ -53,7 +55,7 @@ impl PlainStorage {
 
     pub fn log_metrics(&self) {
         info!(
-            "PlainStorage\n\tmulti_get_size: mean {:.2} p50 {:.2} p99 {:.2}\n\tmulti_get_tput: mean {:.2} p50 {:.2} p99 {:.2}\n\tfetch_time: {}",
+            "PlainStorage\nmulti_get_size: mean {:.2} p50 {:.2} p99 {:.2}\nmulti_get_tput: mean {:.2} p50 {:.2} p99 {:.2}\nfetch_time: {}\npost_time: {}",
             self.metrics.multi_get_size.mean(),
             self.metrics.multi_get_size.value_at_percentile(50.0),
             self.metrics.multi_get_size.value_at_percentile(99.0),
@@ -61,6 +63,7 @@ impl PlainStorage {
             self.metrics.multi_get_tput.value_at_percentile(50.0),
             self.metrics.multi_get_tput.value_at_percentile(99.0),
             self.metrics.fetch_time,
+            self.metrics.post_time,
         );
     }
 
@@ -93,7 +96,11 @@ impl PlainStorage {
                         None => batch.delete(key),
                     }
                 }
-                self.db.write(batch)?;
+                if !batch.is_empty() {
+                    let start = Instant::now();
+                    self.db.write(batch)?;
+                    self.metrics.post_time += start.elapsed();
+                }
             }
         }
         Ok(())
@@ -173,7 +180,9 @@ pub struct BigStorage<C> {
 }
 
 struct BigStorageMetrics {
-    network_time: Latency,
+    prepare: Latency,
+    backend: Latency,
+    network: Latency,
 }
 
 struct BackendFetchingState {
@@ -182,6 +191,8 @@ struct BackendFetchingState {
     context: ResponseContext<Values>,
     // only for sanity check
     backend: BackendFetchId,
+
+    start: Instant,
 }
 
 struct BackendFetchedState {
@@ -189,6 +200,7 @@ struct BackendFetchedState {
     key_shards: Vec<u32>,
     values: Values,
     context: ResponseContext<Values>,
+    start: Instant,
 }
 
 struct QueryingState {
@@ -196,7 +208,6 @@ struct QueryingState {
     key_shards: Vec<u32>,
     node_states: HashMap<NodeIndex, Values>,
     context: ResponseContext<Values>,
-
     start: Instant,
 }
 
@@ -228,13 +239,18 @@ impl<C> BigStorage<C> {
             pending_query,
             querying: None,
             metrics: BigStorageMetrics {
-                network_time: Default::default(),
+                prepare: Default::default(),
+                backend: Default::default(),
+                network: Default::default(),
             },
         }
     }
 
     pub fn log_metrics(&self) {
-        info!("BigStorage\nnetwork_time: {}", self.metrics.network_time);
+        info!(
+            "BigStorage\nprepare: {}\nbackend: {}\nnetwork: {}",
+            self.metrics.prepare, self.metrics.backend, self.metrics.network
+        );
     }
 }
 
@@ -256,6 +272,8 @@ impl<C: BigStorageContext> BigStorage<C> {
 
     fn start_fetch(&mut self, keys: Vec<Vec<u8>>, context: ResponseContext<Vec<Option<Vec<u8>>>>) {
         self.fetch_seq += 1;
+
+        let start = Instant::now();
         let key_shards: Vec<u32> = keys
             .iter()
             .map(|key| self.config.shard_of_key(key))
@@ -271,12 +289,15 @@ impl<C: BigStorageContext> BigStorage<C> {
                 }
             })
             .collect();
+        self.metrics.prepare += start.elapsed();
+
         let fetch_id = self.context.backend_fetch(backend_keys);
         let fetching = BackendFetchingState {
             seq: self.fetch_seq,
             key_shards,
             context,
             backend: fetch_id,
+            start: Instant::now(),
         };
         self.fetching.push_back(fetching);
     }
@@ -311,7 +332,10 @@ impl<C: BigStorageContext> BigStorage<C> {
             key_shards: fetching.key_shards,
             values,
             context: fetching.context,
+            start: Instant::now(),
         };
+        self.metrics.backend += fetching.start.elapsed();
+
         if self.querying.is_some() {
             self.pending_query.push_back(state);
             return;
@@ -325,7 +349,7 @@ impl<C: BigStorageContext> BigStorage<C> {
             key_shards: state.key_shards,
             node_states: Default::default(),
             context: state.context,
-            start: Instant::now(),
+            start: state.start,
         });
         assert!(replaced.is_none());
 
@@ -378,7 +402,7 @@ impl<C: BigStorageContext> BigStorage<C> {
                 .all(|(i, values)| node_index[*i as usize] == values.len())
         );
         querying.context.respond(values);
-        self.metrics.network_time += querying.start.elapsed();
+        self.metrics.network += querying.start.elapsed();
 
         if let Some(state) = self.pending_query.pop_front() {
             self.start_query(state);

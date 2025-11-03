@@ -27,6 +27,8 @@ pub fn key(index: u64) -> String {
     format!("key-{index:012}")
 }
 
+pub const VALUE_SIZE: usize = 100 - 16;
+
 pub type FetchId = RequestId;
 
 pub trait ExecuteContext {
@@ -104,7 +106,7 @@ impl<C> Execute<C> {
         );
     }
 
-    const NUM_MAX_CONCURRENT_FETCHES: usize = 20;
+    const NUM_MAX_CONCURRENT_FETCHES: usize = 1;
 }
 
 impl<C: ExecuteContext> Execute<C> {

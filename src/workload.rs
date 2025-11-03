@@ -3,10 +3,10 @@ use std::{
     time::Instant,
 };
 
-use rand::{Rng, rng};
+use rand::{Rng, RngCore as _, rng};
 
 use crate::{
-    execute::{self, Op},
+    execute::{self, Op, VALUE_SIZE},
     schema,
     tasks::{RequestId, client::ClientScrapeState},
 };
@@ -97,18 +97,20 @@ impl<C: WorkloadContext> Workload<C> {
         let key_index = self.zipfian.next_u64(&mut rng());
         // let key_index = rng().random_range(0..self.config.num_keys);
         let key = execute::key(key_index);
-        if rng().random_bool(self.config.read_ratio) {
-            let op = Op::Get(key);
-            let command = bincode::encode_to_vec(&op, bincode::config::standard()).unwrap();
-            let invoke_id = self
-                .context
-                .invoke(self.config.shard_of_key(key_index), command);
-            self.working = Some(WorkingState {
-                start: Instant::now(),
-                invoke_id,
-            });
+        let op = if rng().random_bool(self.config.read_ratio) {
+            Op::Get(key)
         } else {
-            todo!()
-        }
+            let mut value = vec![0; VALUE_SIZE];
+            rng().fill_bytes(&mut value);
+            Op::Put(key, value)
+        };
+        let command = bincode::encode_to_vec(&op, bincode::config::standard()).unwrap();
+        let invoke_id = self
+            .context
+            .invoke(self.config.shard_of_key(key_index), command);
+        self.working = Some(WorkingState {
+            start: Instant::now(),
+            invoke_id,
+        });
     }
 }
