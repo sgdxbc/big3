@@ -40,7 +40,7 @@ impl From<&schema::WorkloadConfig> for WorkloadConfig {
 
 impl WorkloadConfig {
     fn shard_of_key(&self, index: u64) -> ShardIndex {
-        (index % self.num_shards as u64) as _
+        ((index / (self.num_keys / self.num_shards as u64)) as ShardIndex).min(self.num_shards - 1)
     }
 }
 

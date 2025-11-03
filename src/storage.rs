@@ -196,21 +196,17 @@ pub struct BigStorage<C> {
 
     fetch_seq: FetchSeq,
     response_contexts: VecDeque<(FetchSeq, ResponseContext<FetchResponse>)>,
-    backend_fetching: HashMap<BackendFetchId, (FetchSeq, u32)>,
-    shard_states: HashMap<FetchSeq, HashMap<u32, StateStore>>,
+    backend_fetching: HashMap<BackendFetchId, FetchSeq>,
+    shard_states: HashMap<FetchSeq, (HashSet<u32>, StateStore)>,
 
     metrics: BigStorageMetrics,
 }
 
-pub struct BigStorageFetchResponse {
-    shards: HashMap<u32, HashMap<Vec<u8>, Option<Vec<u8>>>>,
-    config: BigStorageConfig,
-}
+pub struct BigStorageFetchResponse(StateStore);
 
 impl BigStorageFetchResponse {
     fn get(&self, key: &[u8]) -> &Option<Vec<u8>> {
-        let shard = self.config.shard_of_key(key);
-        &self.shards[&shard][key]
+        &self.0[key]
     }
 }
 
@@ -281,16 +277,13 @@ impl<C: BigStorageContext> BigStorage<C> {
         self.fetch_seq += 1;
 
         let start = Instant::now();
-        for &shard in &self.primary_shards {
-            let backend_keys = keys
-                .iter()
-                .filter(|key| self.config.shard_of_key(key) == shard)
-                .cloned()
-                .collect();
-            let fetch_id = self.context.backend_fetch(backend_keys);
-            self.backend_fetching
-                .insert(fetch_id, (self.fetch_seq, shard));
-        }
+        let backend_keys = keys
+            .iter()
+            .filter(|key| self.primary_shards.contains(&self.config.shard_of_key(key)))
+            .cloned()
+            .collect();
+        let fetch_id = self.context.backend_fetch(backend_keys);
+        self.backend_fetching.insert(fetch_id, self.fetch_seq);
         self.metrics.prepare += start.elapsed();
 
         self.response_contexts.push_back((self.fetch_seq, context));
@@ -299,48 +292,41 @@ impl<C: BigStorageContext> BigStorage<C> {
     pub fn on_message(&mut self, message: message::Message) {
         match message {
             message::Message::PushState(push_state) => {
-                self.insert_state(
-                    push_state.fetch_seq,
-                    push_state.shard_index,
-                    push_state.state,
-                );
+                self.insert_state(push_state.fetch_seq, push_state.shards, push_state.state);
             }
         }
     }
 
     pub fn on_fetch_response(&mut self, fetch_id: BackendFetchId, response: FetchResponse) {
-        let (fetch_seq, shard_index) = self.backend_fetching.remove(&fetch_id).unwrap();
+        let fetch_seq = self.backend_fetching.remove(&fetch_id).unwrap();
         let FetchResponse::Plain(PlainStorageFetchResponse(state)) = response else {
             unimplemented!()
         };
 
         let push_state = message::PushState {
             state: state.clone(),
-            shard_index,
+            shards: self.primary_shards.clone(),
             fetch_seq,
         };
         self.context.send_to_all(Message::PushState(push_state));
         // self.metrics.backend += fetching.start.elapsed();
 
-        self.insert_state(fetch_seq, shard_index, state);
+        self.insert_state(fetch_seq, self.primary_shards.clone(), state);
     }
 
-    fn insert_state(&mut self, seq: FetchSeq, shard_index: u32, state: StateStore) {
-        let shard_states = self.shard_states.entry(seq).or_default();
-        shard_states.insert(shard_index, state);
+    fn insert_state(&mut self, seq: FetchSeq, shards: HashSet<u32>, state: StateStore) {
+        let (inserted_shards, inserted_states) = self.shard_states.entry(seq).or_default();
+        inserted_shards.extend(shards);
+        inserted_states.extend(state);
 
-        if self
-            .shard_states
-            .get(&self.response_contexts.front().unwrap().0)
-            .is_some_and(|shards| shards.len() == self.config.num_shards() as usize)
+        if let Some((fetch_seq, _)) = self.response_contexts.front()
+            && let Some((shards, _)) = self.shard_states.get(fetch_seq)
+            && shards.len() == self.config.num_shards() as usize
         {
             let (seq, context) = self.response_contexts.pop_front().unwrap();
-            let shards = self.shard_states.remove(&seq).unwrap();
+            let (_, state) = self.shard_states.remove(&seq).unwrap();
 
-            let res = BigStorageFetchResponse {
-                shards,
-                config: self.config.clone(),
-            };
+            let res = BigStorageFetchResponse(state);
             // self.metrics.network += start.elapsed();
 
             context.respond(FetchResponse::Big(res));
@@ -352,6 +338,7 @@ pub use message::Message;
 
 mod message {
     use bincode::{Decode, Encode};
+    use rustc_hash::FxHashSet;
 
     use super::{FetchSeq, StateStore};
 
@@ -364,6 +351,6 @@ mod message {
     pub struct PushState {
         pub fetch_seq: FetchSeq,
         pub state: StateStore,
-        pub shard_index: u32,
+        pub shards: FxHashSet<u32>,
     }
 }
