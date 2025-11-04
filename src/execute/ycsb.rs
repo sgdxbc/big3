@@ -83,3 +83,9 @@ impl BlocksExecuteState {
             .collect()
     }
 }
+
+pub fn key(index: u64) -> String {
+    format!("key-{index:012}")
+}
+
+pub const VALUE_SIZE: usize = 100 - 16;

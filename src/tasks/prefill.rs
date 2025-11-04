@@ -5,7 +5,7 @@ use rocksdb::{DB, Options, WriteBatch, WriteOptions};
 use tokio::{fs, task::JoinSet};
 
 use crate::{
-    execute::{self, VALUE_SIZE},
+    execute::{self, ycsb::VALUE_SIZE},
     schema,
 };
 
@@ -38,7 +38,7 @@ impl PrefillTask {
                 let mut batch = WriteBatch::new();
                 let mut value = vec![0u8; VALUE_SIZE];
                 for j in i..(i + batch_size).min(schema.num_keys) {
-                    let key = execute::key(j);
+                    let key = execute::ycsb::key(j);
                     rng.fill_bytes(&mut value);
                     batch.put(key, &value);
                 }

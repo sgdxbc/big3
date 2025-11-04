@@ -6,7 +6,10 @@ use std::{
 use rand::{Rng, RngCore as _, rng};
 
 use crate::{
-    execute::{self, Op, VALUE_SIZE},
+    execute::{
+        self,
+        ycsb::{Op, VALUE_SIZE},
+    },
     schema,
     tasks::{RequestId, client::ClientScrapeState},
 };
@@ -124,7 +127,7 @@ impl<C: WorkloadContext> YcsbWorkload<C> {
     fn invoke(&mut self) {
         let key_index = self.zipfian.next_u64(&mut rng());
         // let key_index = rng().random_range(0..self.config.num_keys);
-        let key = execute::key(key_index);
+        let key = execute::ycsb::key(key_index);
         let op = if rng().random_bool(self.config.read_ratio) {
             Op::Get(key)
         } else {

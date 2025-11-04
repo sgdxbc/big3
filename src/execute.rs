@@ -1,6 +1,5 @@
 use std::{collections::VecDeque, time::Instant};
 
-use bincode::{Decode, Encode};
 use log::info;
 use rustc_hash::FxHashSet;
 
@@ -13,24 +12,7 @@ use crate::{
 };
 
 pub mod ycsb;
-
-#[derive(Encode, Decode)]
-pub enum Op {
-    Put(String, Vec<u8>),
-    Get(String),
-}
-
-#[derive(Encode, Decode)]
-pub enum Res {
-    Put,
-    Get(Vec<u8>),
-}
-
-pub fn key(index: u64) -> String {
-    format!("key-{index:012}")
-}
-
-pub const VALUE_SIZE: usize = 100 - 16;
+pub mod utxo_server;
 
 pub type FetchId = RequestId;
 
