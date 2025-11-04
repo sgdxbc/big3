@@ -26,12 +26,14 @@ pub trait ExecuteContext {
 
 pub struct ExecuteConfig {
     num_faulty_nodes: NodeIndex,
+    num_concurrent_fetches: usize,
 }
 
 impl From<&crate::schema::ReplicaConfig> for ExecuteConfig {
     fn from(config: &crate::schema::ReplicaConfig) -> Self {
         Self {
             num_faulty_nodes: config.num_faulty_nodes,
+            num_concurrent_fetches: 0,
         }
     }
 }
@@ -117,8 +119,6 @@ impl<C> Execute<C> {
             self.metrics.prepare_time, self.metrics.execute_time, self.metrics.fetch_time,
         );
     }
-
-    const NUM_MAX_CONCURRENT_FETCHES: usize = 1;
 }
 
 impl<C: ExecuteContext> Execute<C> {
@@ -144,7 +144,7 @@ impl<C: ExecuteContext> Execute<C> {
 
         self.metrics.prepare_time += start.elapsed();
 
-        if self.fetching.len() < Self::NUM_MAX_CONCURRENT_FETCHES {
+        if self.fetching.len() < self.config.num_concurrent_fetches.max(1) {
             self.fetch_for_blocks(working);
         } else {
             self.pending_blocks.push_back(working);
@@ -152,7 +152,7 @@ impl<C: ExecuteContext> Execute<C> {
     }
 
     fn fetch_for_blocks(&mut self, working: WillFetchState) {
-        assert!(self.fetching.len() < Self::NUM_MAX_CONCURRENT_FETCHES);
+        assert!(self.fetching.len() < self.config.num_concurrent_fetches.max(1));
         let fetch_id = self.context.fetch(working.fetch_keys);
         self.fetching.push_back(FetchingState {
             execute: working.execute,
@@ -169,7 +169,9 @@ impl<C: ExecuteContext> Execute<C> {
         assert_eq!(working.fetch_id, fetch_id);
         self.metrics.fetch_time += working.start.elapsed();
 
-        if let Some(state) = self.pending_blocks.pop_front() {
+        if self.config.num_concurrent_fetches > 0
+            && let Some(state) = self.pending_blocks.pop_front()
+        {
             self.fetch_for_blocks(state);
         }
         self.execute_blocks(working, response);
@@ -193,5 +195,11 @@ impl<C: ExecuteContext> Execute<C> {
         self.context.post(updates);
 
         self.metrics.execute_time += start.elapsed();
+
+        if self.config.num_concurrent_fetches == 0
+            && let Some(state) = self.pending_blocks.pop_front()
+        {
+            self.fetch_for_blocks(state);
+        }
     }
 }
