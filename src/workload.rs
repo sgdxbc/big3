@@ -1,13 +1,15 @@
 use std::{
+    collections::{HashMap, HashSet},
     sync::{Arc, Mutex},
     time::Instant,
 };
 
-use rand::{Rng, RngCore as _, rng};
+use rand::{Rng, RngCore as _, rng, seq::IteratorRandom};
 
 use crate::{
     execute::{
         self,
+        utxo::OutputIndex,
         ycsb::{Op, VALUE_SIZE},
     },
     schema,
@@ -33,9 +35,15 @@ impl<C> Workload<C> {
     pub fn new(
         context: C,
         config: &schema::WorkloadConfig,
+        num_concurrent: u32,
         scrape_state: Arc<Mutex<ClientScrapeState>>,
     ) -> Self {
-        Self::Ycsb(YcsbWorkload::new(context, config.into(), scrape_state))
+        Self::Ycsb(YcsbWorkload::new(
+            context,
+            config.into(),
+            num_concurrent,
+            scrape_state,
+        ))
     }
 }
 
@@ -78,49 +86,51 @@ impl YcsbWorkloadConfig {
 pub struct YcsbWorkload<C> {
     context: C,
     config: YcsbWorkloadConfig,
+    num_concurrent: u32,
     zipfian: ScrambledZipfian,
     scrape_state: Arc<Mutex<ClientScrapeState>>,
 
-    working: Option<WorkingState>,
+    working: HashMap<InvokeId, WorkingState>,
 }
 
 struct WorkingState {
     start: Instant,
-    invoke_id: InvokeId,
 }
 
 impl<C> YcsbWorkload<C> {
     pub fn new(
         context: C,
         config: YcsbWorkloadConfig,
+        num_concurrent: u32,
         scrape_state: Arc<Mutex<ClientScrapeState>>,
     ) -> Self {
         let zipfian = ScrambledZipfian::new_range(0, config.num_keys - 1);
         Self {
             context,
             config,
+            num_concurrent,
             zipfian,
             scrape_state,
-            working: None,
+            working: Default::default(),
         }
     }
 }
 
 impl<C: WorkloadContext> YcsbWorkload<C> {
     pub fn start(&mut self) {
-        self.invoke();
+        for _ in 0..self.num_concurrent {
+            self.invoke();
+        }
     }
 
     pub fn on_invoke_response(&mut self, invoke_id: InvokeId, _res: Vec<u8>) {
-        let working = self.working.as_ref().expect("no ongoing work");
-        assert_eq!(working.invoke_id, invoke_id);
+        let working = self.working.remove(&invoke_id).expect("no ongoing work");
         let latency = working.start.elapsed();
         {
             let mut scrape_state = self.scrape_state.lock().unwrap();
             scrape_state.latency_histogram += latency.as_nanos() as u64;
         }
 
-        self.working = None;
         self.invoke();
     }
 
@@ -139,21 +149,23 @@ impl<C: WorkloadContext> YcsbWorkload<C> {
         let invoke_id = self
             .context
             .invoke(self.config.shard_of_key(key_index), command);
-        self.working = Some(WorkingState {
-            start: Instant::now(),
+        self.working.insert(
             invoke_id,
-        });
+            WorkingState {
+                start: Instant::now(),
+            },
+        );
     }
 }
 
 pub struct UtxoWorkloadConfig {
-    num_keys: u64,
+    // num_keys: u64,
 }
 
 impl From<&schema::WorkloadConfig> for UtxoWorkloadConfig {
     fn from(config: &schema::WorkloadConfig) -> Self {
         Self {
-            num_keys: config.num_keys,
+            // num_keys: config.num_keys,
         }
     }
 }
@@ -161,9 +173,16 @@ impl From<&schema::WorkloadConfig> for UtxoWorkloadConfig {
 pub struct UtxoWorkload<C> {
     context: C,
     config: UtxoWorkloadConfig,
+    num_concurrent: u32,
     scrape_state: Arc<Mutex<ClientScrapeState>>,
 
-    working: Option<WorkingState>,
+    working: HashMap<InvokeId, UtxoWorkingState>,
+    output_pool: HashSet<OutputIndex>,
+}
+
+struct UtxoWorkingState {
+    start: Instant,
+    output_indexes: Vec<OutputIndex>,
 }
 
 impl<C> UtxoWorkload<C> {
@@ -171,35 +190,57 @@ impl<C> UtxoWorkload<C> {
         context: C,
         config: UtxoWorkloadConfig,
         scrape_state: Arc<Mutex<ClientScrapeState>>,
+        num_concurrent: u32,
+        output_pool: HashSet<OutputIndex>,
     ) -> Self {
+        assert!(num_concurrent as usize <= output_pool.len());
         Self {
             context,
             config,
+            num_concurrent,
             scrape_state,
-            working: None,
+            output_pool,
+            working: Default::default(),
         }
     }
 }
 
 impl<C: WorkloadContext> UtxoWorkload<C> {
     pub fn start(&mut self) {
-        self.invoke();
+        for _ in 0..self.num_concurrent {
+            self.invoke();
+        }
     }
 
     pub fn on_invoke_response(&mut self, invoke_id: InvokeId, _res: Vec<u8>) {
-        let working = self.working.as_ref().expect("no ongoing work");
-        assert_eq!(working.invoke_id, invoke_id);
+        let working = self.working.remove(&invoke_id).expect("no ongoing work");
+        // assert_eq!(working.invoke_id, invoke_id);
         let latency = working.start.elapsed();
         {
             let mut scrape_state = self.scrape_state.lock().unwrap();
             scrape_state.latency_histogram += latency.as_nanos() as u64;
         }
+        self.output_pool.extend(working.output_indexes);
 
-        self.working = None;
         self.invoke();
     }
 
     fn invoke(&mut self) {
-        //
+        let output_index = *self.output_pool.iter().choose(&mut rng()).unwrap();
+        self.output_pool.remove(&output_index);
+        let op = execute::utxo::Op {
+            inputs: vec![output_index],
+            outputs: vec![([0u8; 32], 0)],
+        };
+        let txn_id = op.txn_id();
+        let command = bincode::encode_to_vec(&op, bincode::config::standard()).unwrap();
+        let invoke_id = self.context.invoke(0, command);
+        self.working.insert(
+            invoke_id,
+            UtxoWorkingState {
+                start: Instant::now(),
+                output_indexes: vec![(txn_id, 0)],
+            },
+        );
     }
 }

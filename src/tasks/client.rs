@@ -71,9 +71,15 @@ impl WorkloadTask {
         clients: Vec<ClientHandle>,
         scrape_state: Arc<Mutex<ClientScrapeState>>,
         schema: &schema::ClientTask,
+        num_concurrent: u32,
     ) -> anyhow::Result<Self> {
         let context = ClientWorkerTaskContext::new(client_worker_channels.invoke_contexts(clients));
-        let state = Workload::new(context, &schema.workload_config, scrape_state);
+        let state = Workload::new(
+            context,
+            &schema.workload_config,
+            num_concurrent,
+            scrape_state,
+        );
         Ok(Self::new(client_worker_channels, state))
     }
 
@@ -371,22 +377,21 @@ impl ClientNodeTask {
                 });
             }
 
-            for _ in 0..(schema.workload_config.num_concurrent / num_group
-                + (group_index < schema.workload_config.num_concurrent % num_group) as u64)
-            {
-                let scrape_state = scrape_state.clone();
+            let num_concurrent = schema.workload_config.num_concurrent / num_group
+                + (group_index < schema.workload_config.num_concurrent % num_group) as u64;
+            let scrape_state = scrape_state.clone();
 
-                let client_worker_channels = ClientWorkerChannels::new();
-                let client_worker = WorkloadTask::load(
-                    client_worker_channels,
-                    client_handles.clone(),
-                    scrape_state.clone(),
-                    &schema,
-                )?;
-                workloads.push(client_worker);
-            }
-            debug!("client node task loaded");
+            let client_worker_channels = ClientWorkerChannels::new();
+            let client_worker = WorkloadTask::load(
+                client_worker_channels,
+                client_handles.clone(),
+                scrape_state.clone(),
+                &schema,
+                num_concurrent as u32,
+            )?;
+            workloads.push(client_worker);
         }
+        debug!("client node task loaded");
 
         Ok(Self {
             scrape_state,
