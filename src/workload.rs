@@ -29,6 +29,7 @@ pub trait WorkloadContext {
 
 pub enum Workload<C> {
     Ycsb(YcsbWorkload<C>),
+    Utxo(UtxoWorkload<C>),
 }
 
 impl<C> Workload<C> {
@@ -38,12 +39,21 @@ impl<C> Workload<C> {
         num_concurrent: u32,
         scrape_state: Arc<Mutex<ClientScrapeState>>,
     ) -> Self {
-        Self::Ycsb(YcsbWorkload::new(
-            context,
-            config.into(),
-            num_concurrent,
-            scrape_state,
-        ))
+        match config {
+            schema::WorkloadConfig::Ycsb(cfg) => Self::Ycsb(YcsbWorkload::new(
+                context,
+                cfg.into(),
+                num_concurrent,
+                scrape_state,
+            )),
+            schema::WorkloadConfig::Utxo(cfg) => Self::Utxo(UtxoWorkload::new(
+                context,
+                cfg,
+                num_concurrent,
+                scrape_state,
+                0, // TODO
+            )),
+        }
     }
 }
 
@@ -51,12 +61,14 @@ impl<C: WorkloadContext> Workload<C> {
     pub fn start(&mut self) {
         match self {
             Workload::Ycsb(w) => w.start(),
+            Workload::Utxo(w) => w.start(),
         }
     }
 
     pub fn on_invoke_response(&mut self, invoke_id: InvokeId, res: Vec<u8>) {
         match self {
             Workload::Ycsb(w) => w.on_invoke_response(invoke_id, res),
+            Workload::Utxo(w) => w.on_invoke_response(invoke_id, res),
         }
     }
 }
@@ -67,8 +79,8 @@ pub struct YcsbWorkloadConfig {
     num_shards: ShardIndex,
 }
 
-impl From<&schema::WorkloadConfig> for YcsbWorkloadConfig {
-    fn from(config: &schema::WorkloadConfig) -> Self {
+impl From<&schema::YcsbWorkloadConfig> for YcsbWorkloadConfig {
+    fn from(config: &schema::YcsbWorkloadConfig) -> Self {
         Self {
             num_keys: config.num_keys,
             read_ratio: config.read_ratio,
@@ -158,21 +170,8 @@ impl<C: WorkloadContext> YcsbWorkload<C> {
     }
 }
 
-pub struct UtxoWorkloadConfig {
-    // num_keys: u64,
-}
-
-impl From<&schema::WorkloadConfig> for UtxoWorkloadConfig {
-    fn from(config: &schema::WorkloadConfig) -> Self {
-        Self {
-            // num_keys: config.num_keys,
-        }
-    }
-}
-
 pub struct UtxoWorkload<C> {
     context: C,
-    config: UtxoWorkloadConfig,
     num_concurrent: u32,
     scrape_state: Arc<Mutex<ClientScrapeState>>,
 
@@ -186,17 +185,26 @@ struct UtxoWorkingState {
 }
 
 impl<C> UtxoWorkload<C> {
+    const POOL_SIZE: u64 = 100_000;
+
     pub fn new(
         context: C,
-        config: UtxoWorkloadConfig,
-        scrape_state: Arc<Mutex<ClientScrapeState>>,
+        config: &schema::UtxoWorkloadConfig,
         num_concurrent: u32,
-        output_pool: HashSet<OutputIndex>,
+        scrape_state: Arc<Mutex<ClientScrapeState>>,
+        pool_index: u64,
     ) -> Self {
-        assert!(num_concurrent as usize <= output_pool.len());
+        // ensure that fresh outputs are not reused too quickly
+        assert!(num_concurrent as u64 * 2 < Self::POOL_SIZE);
+        assert!((pool_index + 1) * Self::POOL_SIZE <= config.num_outputs);
+        let output_pool = (pool_index * Self::POOL_SIZE..(pool_index + 1) * Self::POOL_SIZE)
+            .map(|i| {
+                let op = execute::utxo::Op::prefilled(i as _);
+                (op.txn_id(), 0)
+            })
+            .collect();
         Self {
             context,
-            config,
             num_concurrent,
             scrape_state,
             output_pool,

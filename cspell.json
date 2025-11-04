@@ -16,6 +16,7 @@
         "tput",
         "txns",
         "utxo",
+        "ycsb",
         "zipfian"
     ],
     "ignoreWords": [],

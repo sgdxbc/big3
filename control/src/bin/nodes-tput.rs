@@ -2,10 +2,10 @@ use std::{fmt::Write as _, time::Duration};
 
 use big_control::{
     Cluster, Instance, PerformanceMetrics,
-    configs::{NUM_KEYS, READ_RATIO, Storage},
+    configs::{NUM_KEYS, READ_RATIO},
     load_all, run_endpoints, scrape_all, stop_all,
 };
-use big_schema::Task;
+use big_schema::{Storage, Task};
 use reqwest::Client;
 use tokio::{
     fs::{File, create_dir_all},
@@ -144,14 +144,10 @@ async fn run_workload(
                 num_nodes: num_nodes(num_faulty_nodes),
                 num_faulty_nodes,
             },
+            storage,
+            app: big_schema::App::Ycsb,
         };
-        (
-            instance,
-            match storage {
-                Storage::Full => Task::Full(schema),
-                Storage::Big => Task::Big(schema),
-            },
-        )
+        (instance, Task::Replica(schema))
     });
     load_all(replica_items, control_client.clone()).await?;
 
@@ -165,14 +161,16 @@ async fn run_workload(
             num_nodes: num_nodes(num_faulty_nodes),
             num_faulty_nodes,
         },
-        workload_config: big_schema::WorkloadConfig {
+        workload_config: big_schema::ClientWorkloadConfig {
             num_concurrent: match storage {
                 Storage::Full => 1_500 * num_shards as u64,
                 Storage::Big => 10_000,
             },
-            num_keys: NUM_KEYS,
-            read_ratio: READ_RATIO,
-            num_shards,
+            app: big_schema::WorkloadConfig::Ycsb(big_schema::YcsbWorkloadConfig {
+                num_keys: NUM_KEYS,
+                read_ratio: READ_RATIO,
+                num_shards,
+            }),
         },
     };
     let client_items = client_instances

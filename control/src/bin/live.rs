@@ -3,8 +3,8 @@ use std::time::Duration;
 use big_control::{
     Cluster, Instance,
     configs::{
-        LIVE_DURATION, NUM_CONCURRENT, NUM_FAULTY_NODES, NUM_KEYS, NUM_SHARDS, READ_RATIO, STORAGE,
-        Storage, num_nodes,
+        APP, LIVE_DURATION, NUM_CONCURRENT, NUM_FAULTY_NODES, NUM_KEYS, NUM_SHARDS, READ_RATIO,
+        STORAGE, num_nodes,
     },
     load_all, run_endpoints, scrape_all, stop_all,
 };
@@ -71,14 +71,10 @@ async fn run_workload(
                 num_nodes: num_nodes(),
                 num_faulty_nodes: NUM_FAULTY_NODES,
             },
+            storage: STORAGE,
+            app: APP,
         };
-        (
-            instance,
-            match STORAGE {
-                Storage::Full => Task::Full(schema),
-                Storage::Big => Task::Big(schema),
-            },
-        )
+        (instance, Task::Replica(schema))
     });
     load_all(replica_items, control_client.clone()).await?;
 
@@ -92,11 +88,13 @@ async fn run_workload(
             num_nodes: num_nodes(),
             num_faulty_nodes: NUM_FAULTY_NODES,
         },
-        workload_config: big_schema::WorkloadConfig {
+        workload_config: big_schema::ClientWorkloadConfig {
             num_concurrent: NUM_CONCURRENT,
-            num_keys: NUM_KEYS,
-            read_ratio: READ_RATIO,
-            num_shards: NUM_SHARDS,
+            app: big_schema::WorkloadConfig::Ycsb(big_schema::YcsbWorkloadConfig {
+                num_keys: NUM_KEYS,
+                read_ratio: READ_RATIO,
+                num_shards: NUM_SHARDS,
+            }),
         },
     };
     let client_items = client_instances

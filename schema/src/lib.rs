@@ -5,8 +5,7 @@ use serde::{Deserialize, Serialize};
 // payload of `/load`
 #[derive(Clone, Serialize, Deserialize)]
 pub enum Task {
-    Full(ReplicaTask),
-    Big(ReplicaTask),
+    Replica(ReplicaTask),
     Client(ClientTask),
     Prefill(PrefillTask),
 }
@@ -18,13 +17,15 @@ pub struct ReplicaTask {
     pub ips: Vec<IpAddr>,
     pub config: ReplicaConfig,
     pub node_index: NodeIndex,
+    pub storage: Storage,
+    pub app: App,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ClientTask {
     pub ips: Vec<Vec<IpAddr>>,
     pub config: ClientConfig,
-    pub workload_config: WorkloadConfig,
+    pub workload_config: ClientWorkloadConfig,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -64,9 +65,37 @@ pub struct ClientConfig {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-pub struct WorkloadConfig {
+pub struct ClientWorkloadConfig {
     pub num_concurrent: u64,
+    pub app: WorkloadConfig,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub enum Storage {
+    Full,
+    Big,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub enum App {
+    Ycsb,
+    Utxo,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum WorkloadConfig {
+    Ycsb(YcsbWorkloadConfig),
+    Utxo(UtxoWorkloadConfig),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct YcsbWorkloadConfig {
     pub num_keys: u64,
     pub read_ratio: f64,
     pub num_shards: ShardIndex,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UtxoWorkloadConfig {
+    pub num_outputs: u64,
 }

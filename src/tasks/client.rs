@@ -76,7 +76,7 @@ impl WorkloadTask {
         let context = ClientWorkerTaskContext::new(client_worker_channels.invoke_contexts(clients));
         let state = Workload::new(
             context,
-            &schema.workload_config,
+            &schema.workload_config.app,
             num_concurrent,
             scrape_state,
         );
