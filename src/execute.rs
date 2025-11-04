@@ -2,15 +2,17 @@ use std::{collections::VecDeque, time::Instant};
 
 use bincode::{Decode, Encode};
 use log::info;
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashSet;
 
 use crate::{
     consensus::Block,
     metrics::Latency,
     storage::FetchResponse,
     tasks::{RequestId, ResponseContext},
-    types::{ClientId, ClientSeq, NodeIndex, Reply},
+    types::{ClientId, NodeIndex, Reply},
 };
+
+pub mod ycsb;
 
 #[derive(Encode, Decode)]
 pub enum Op {
@@ -64,15 +66,43 @@ pub struct Execute<C> {
     metrics: ExecuteMetrics,
 }
 
+enum BlocksExecuteState {
+    Ycsb(ycsb::BlocksExecuteState),
+}
+
+impl BlocksExecuteState {
+    fn prepare(blocks: &[Block]) -> (Self, FxHashSet<Vec<u8>>) {
+        let (state, keys) = ycsb::BlocksExecuteState::prepare(blocks);
+        (BlocksExecuteState::Ycsb(state), keys)
+    }
+
+    fn is_empty(&self) -> bool {
+        match self {
+            BlocksExecuteState::Ycsb(state) => state.is_empty(),
+        }
+    }
+
+    fn commit(
+        self,
+        state: FetchResponse,
+        node_index: NodeIndex,
+        send: impl FnMut(ClientId, Reply),
+    ) -> Vec<(Vec<u8>, Option<Vec<u8>>)> {
+        match self {
+            BlocksExecuteState::Ycsb(s) => s.commit(state, node_index, send),
+        }
+    }
+}
+
 struct FetchingState {
-    requests: Vec<(Op, ClientId, ClientSeq)>,
+    execute: BlocksExecuteState,
     fetch_id: FetchId,
 
     start: Instant,
 }
 
 struct WillFetchState {
-    requests: Vec<(Op, ClientId, ClientSeq)>,
+    execute: BlocksExecuteState,
     fetch_keys: FxHashSet<Vec<u8>>,
     context: ResponseContext<()>,
 }
@@ -117,33 +147,18 @@ impl<C: ExecuteContext> Execute<C> {
     fn prepare_blocks(&mut self, blocks: Vec<Block>, context: ResponseContext<()>) {
         let start = Instant::now();
 
-        let mut working = WillFetchState {
-            requests: Default::default(),
-            fetch_keys: Default::default(),
+        let (execute, fetch_keys) = BlocksExecuteState::prepare(&blocks);
+        let working = WillFetchState {
+            execute,
+            fetch_keys,
             context,
         };
-        let mut fetching_keys = FxHashSet::default();
-        for block in blocks {
-            for request in block.txns {
-                let op = bincode::decode_from_slice(&request.command, bincode::config::standard())
-                    .unwrap()
-                    .0;
-                if let Op::Get(key) = &op {
-                    fetching_keys.insert(key.as_bytes().to_vec());
-                }
-                working
-                    .requests
-                    .push((op, request.client_id, request.client_seq));
-            }
-        }
         // besides performance optimization, this also prevents no-op fetches (and posts) to pollute
         // metrics of execution and storage
-        if working.requests.is_empty() {
+        if working.execute.is_empty() {
             working.context.respond(());
             return;
         }
-
-        working.fetch_keys = fetching_keys;
 
         self.metrics.prepare_time += start.elapsed();
 
@@ -158,7 +173,7 @@ impl<C: ExecuteContext> Execute<C> {
         assert!(self.fetching.len() < Self::NUM_MAX_CONCURRENT_FETCHES);
         let fetch_id = self.context.fetch(working.fetch_keys);
         self.fetching.push_back(FetchingState {
-            requests: working.requests,
+            execute: working.execute,
             fetch_id,
             start: Instant::now(),
         });
@@ -181,30 +196,7 @@ impl<C: ExecuteContext> Execute<C> {
     fn execute_blocks(&mut self, working: FetchingState, response: FetchResponse) {
         let start = Instant::now();
 
-        let mut updates = FxHashMap::default();
-        for (op, client_id, client_seq) in working.requests {
-            let op = match op {
-                Op::Put(key, value) => {
-                    updates.insert(key, value.clone());
-                    Res::Put
-                }
-                Op::Get(key) => {
-                    let value = updates
-                        .get(&key)
-                        .or_else(|| response.get(key.as_bytes()).as_ref());
-                    let Some(value) = value else {
-                        panic!("key not found");
-                    };
-                    Res::Get(value.clone())
-                    // Res::Get(vec![0; 68])
-                }
-            };
-            let reply = Reply {
-                client_seq,
-                res: bincode::encode_to_vec(&op, bincode::config::standard()).unwrap(),
-                node_index: self.index,
-            };
-
+        let send = |client_id, reply| {
             if (self.executed_count
                 ..self.executed_count + (self.config.num_faulty_nodes + 1) as u64)
                 .any(|i| {
@@ -214,15 +206,10 @@ impl<C: ExecuteContext> Execute<C> {
                 self.context.send(client_id, reply);
             }
             self.executed_count += 1;
-        }
+        };
+        let updates = working.execute.commit(response, self.index, send);
+        self.context.post(updates);
 
         self.metrics.execute_time += start.elapsed();
-
-        self.context.post(
-            updates
-                .into_iter()
-                .map(|(k, v)| (k.into_bytes(), Some(v)))
-                .collect(),
-        );
     }
 }

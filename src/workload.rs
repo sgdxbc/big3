@@ -22,13 +22,41 @@ pub trait WorkloadContext {
     fn invoke(&mut self, shard: ShardIndex, command: Vec<u8>) -> InvokeId;
 }
 
-pub struct WorkloadConfig {
+pub enum Workload<C> {
+    Ycsb(YcsbWorkload<C>),
+}
+
+impl<C> Workload<C> {
+    pub fn new(
+        context: C,
+        config: &schema::WorkloadConfig,
+        scrape_state: Arc<Mutex<ClientScrapeState>>,
+    ) -> Self {
+        Self::Ycsb(YcsbWorkload::new(context, config.into(), scrape_state))
+    }
+}
+
+impl<C: WorkloadContext> Workload<C> {
+    pub fn start(&mut self) {
+        match self {
+            Workload::Ycsb(w) => w.start(),
+        }
+    }
+
+    pub fn on_invoke_response(&mut self, invoke_id: InvokeId, res: Vec<u8>) {
+        match self {
+            Workload::Ycsb(w) => w.on_invoke_response(invoke_id, res),
+        }
+    }
+}
+
+pub struct YcsbWorkloadConfig {
     num_keys: u64,
     read_ratio: f64,
     num_shards: ShardIndex,
 }
 
-impl From<&schema::WorkloadConfig> for WorkloadConfig {
+impl From<&schema::WorkloadConfig> for YcsbWorkloadConfig {
     fn from(config: &schema::WorkloadConfig) -> Self {
         Self {
             num_keys: config.num_keys,
@@ -38,15 +66,15 @@ impl From<&schema::WorkloadConfig> for WorkloadConfig {
     }
 }
 
-impl WorkloadConfig {
+impl YcsbWorkloadConfig {
     fn shard_of_key(&self, index: u64) -> ShardIndex {
         ((index / (self.num_keys / self.num_shards as u64)) as ShardIndex).min(self.num_shards - 1)
     }
 }
 
-pub struct Workload<C> {
+pub struct YcsbWorkload<C> {
     context: C,
-    config: WorkloadConfig,
+    config: YcsbWorkloadConfig,
     zipfian: ScrambledZipfian,
     scrape_state: Arc<Mutex<ClientScrapeState>>,
 
@@ -58,10 +86,10 @@ struct WorkingState {
     invoke_id: InvokeId,
 }
 
-impl<C> Workload<C> {
+impl<C> YcsbWorkload<C> {
     pub fn new(
         context: C,
-        config: WorkloadConfig,
+        config: YcsbWorkloadConfig,
         scrape_state: Arc<Mutex<ClientScrapeState>>,
     ) -> Self {
         let zipfian = ScrambledZipfian::new_range(0, config.num_keys - 1);
@@ -75,7 +103,7 @@ impl<C> Workload<C> {
     }
 }
 
-impl<C: WorkloadContext> Workload<C> {
+impl<C: WorkloadContext> YcsbWorkload<C> {
     pub fn start(&mut self) {
         self.invoke();
     }

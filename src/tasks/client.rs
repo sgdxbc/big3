@@ -73,7 +73,7 @@ impl WorkloadTask {
         schema: &schema::ClientTask,
     ) -> anyhow::Result<Self> {
         let context = ClientWorkerTaskContext::new(client_worker_channels.invoke_contexts(clients));
-        let state = Workload::new(context, (&schema.workload_config).into(), scrape_state);
+        let state = Workload::new(context, &schema.workload_config, scrape_state);
         Ok(Self::new(client_worker_channels, state))
     }
 
