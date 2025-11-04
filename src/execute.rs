@@ -11,8 +11,8 @@ use crate::{
     types::{ClientId, NodeIndex, Reply},
 };
 
+pub mod utxo;
 pub mod ycsb;
-pub mod utxo_server;
 
 pub type FetchId = RequestId;
 

@@ -145,3 +145,61 @@ impl<C: WorkloadContext> YcsbWorkload<C> {
         });
     }
 }
+
+pub struct UtxoWorkloadConfig {
+    num_keys: u64,
+}
+
+impl From<&schema::WorkloadConfig> for UtxoWorkloadConfig {
+    fn from(config: &schema::WorkloadConfig) -> Self {
+        Self {
+            num_keys: config.num_keys,
+        }
+    }
+}
+
+pub struct UtxoWorkload<C> {
+    context: C,
+    config: UtxoWorkloadConfig,
+    scrape_state: Arc<Mutex<ClientScrapeState>>,
+
+    working: Option<WorkingState>,
+}
+
+impl<C> UtxoWorkload<C> {
+    pub fn new(
+        context: C,
+        config: UtxoWorkloadConfig,
+        scrape_state: Arc<Mutex<ClientScrapeState>>,
+    ) -> Self {
+        Self {
+            context,
+            config,
+            scrape_state,
+            working: None,
+        }
+    }
+}
+
+impl<C: WorkloadContext> UtxoWorkload<C> {
+    pub fn start(&mut self) {
+        self.invoke();
+    }
+
+    pub fn on_invoke_response(&mut self, invoke_id: InvokeId, _res: Vec<u8>) {
+        let working = self.working.as_ref().expect("no ongoing work");
+        assert_eq!(working.invoke_id, invoke_id);
+        let latency = working.start.elapsed();
+        {
+            let mut scrape_state = self.scrape_state.lock().unwrap();
+            scrape_state.latency_histogram += latency.as_nanos() as u64;
+        }
+
+        self.working = None;
+        self.invoke();
+    }
+
+    fn invoke(&mut self) {
+        //
+    }
+}
