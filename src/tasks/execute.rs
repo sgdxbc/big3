@@ -62,6 +62,34 @@ impl ExecuteSourceHandle {
     }
 }
 
+pub enum GeneralExecuteSourceTask {
+    Ycsb(ExecuteSourceTask<crate::execute::ycsb::Op>),
+    Utxo(ExecuteSourceTask<crate::execute::utxo::Op>),
+}
+
+impl GeneralExecuteSourceTask {
+    pub async fn run(self, stop: CancellationToken) -> anyhow::Result<()> {
+        match self {
+            GeneralExecuteSourceTask::Ycsb(task) => task.run(stop).await,
+            GeneralExecuteSourceTask::Utxo(task) => task.run(stop).await,
+        }
+    }
+}
+
+pub enum GeneralExecuteSchedTask {
+    Ycsb(ExecuteSchedTask<crate::execute::ycsb::YcsbExecute>),
+    Utxo(ExecuteSchedTask<crate::execute::utxo::UtxoExecute>),
+}
+
+impl GeneralExecuteSchedTask {
+    pub async fn run(self, stop: CancellationToken) -> anyhow::Result<()> {
+        match self {
+            GeneralExecuteSchedTask::Ycsb(task) => task.run(stop).await,
+            GeneralExecuteSchedTask::Utxo(task) => task.run(stop).await,
+        }
+    }
+}
+
 pub struct ExecuteSourceTask<Op> {
     channels: ExecuteSourceChannels,
     tx_fetch: flume::Sender<(Vec<u8>, oneshot::Sender<Option<Vec<u8>>>)>,
@@ -172,7 +200,7 @@ impl<Op> ExecuteSchedHandle<Op> {
     }
 }
 
-pub struct ExecuteSched<E: AbstractExecute> {
+pub struct ExecuteSchedTask<E: AbstractExecute> {
     channels: ExecuteSchedChannels<E::Op>,
     tx_post: UnboundedSender<Vec<(Vec<u8>, Option<Vec<u8>>)>>,
     network_outgoing: NetworkOutgoingHandle,
@@ -185,7 +213,7 @@ pub struct ExecuteSched<E: AbstractExecute> {
     evict_queue: BinaryHeap<Reverse<(u64, Vec<u8>)>>,
 }
 
-impl<E: AbstractExecute> ExecuteSched<E> {
+impl<E: AbstractExecute> ExecuteSchedTask<E> {
     pub fn new(
         channels: ExecuteSchedChannels<E::Op>,
         tx_post: UnboundedSender<Vec<(Vec<u8>, Option<Vec<u8>>)>>,
@@ -206,7 +234,7 @@ impl<E: AbstractExecute> ExecuteSched<E> {
     }
 }
 
-impl<E> ExecuteSched<E>
+impl<E> ExecuteSchedTask<E>
 where
     E: AbstractExecute + Send + 'static,
     E::Res: Encode,

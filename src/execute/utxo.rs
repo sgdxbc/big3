@@ -53,9 +53,9 @@ impl AbstractOp for Op {
     }
 }
 
-pub struct Execute;
+pub struct UtxoExecute;
 
-impl AbstractExecute for Execute {
+impl AbstractExecute for UtxoExecute {
     type Op = Op;
     type Res = Res;
 

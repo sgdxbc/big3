@@ -101,6 +101,9 @@ impl StorageWorkersTask {
     const NUM_GET_WORKER_THREADS: usize = 20;
 
     pub async fn run(self) -> anyhow::Result<()> {
+        drop(self.channels.tx_fetch);
+        drop(self.channels.tx_post);
+
         let db = Arc::new(self.db);
         let mut join_set = JoinSet::new();
         for _ in 0..Self::NUM_GET_WORKER_THREADS {

@@ -3,13 +3,16 @@ use tokio_util::sync::CancellationToken;
 use crate::schema;
 
 use super::{
-    consensus::{ConsensusChannels, ConsensusTask},
-    execute::{ExecuteChannels, ExecuteTask},
+    consensus::{ConsensusChannels, next::ConsensusTask},
+    execute::{
+        ExecuteSchedChannels, ExecuteSchedTask, ExecuteSourceChannels, ExecuteSourceTask,
+        GeneralExecuteSchedTask, GeneralExecuteSourceTask,
+    },
     network::{
         interconnect::NetworkInterconnectTask,
         server::{NetworkAcceptTask, NetworkOutgoingChannels, NetworkOutgoingTask},
     },
-    storage::PlainStorageTask,
+    storage::{StorageWorkersChannels, StorageWorkersTask},
 };
 
 pub struct FullReplicaNodeTask {
@@ -17,16 +20,19 @@ pub struct FullReplicaNodeTask {
     network_outgoing: NetworkOutgoingTask,
     network_connect: NetworkInterconnectTask,
     consensus: ConsensusTask,
-    execute: ExecuteTask,
-    storage: PlainStorageTask,
+    execute_source: GeneralExecuteSourceTask,
+    execute_sched: GeneralExecuteSchedTask,
+    storage: StorageWorkersTask,
 }
 
 impl FullReplicaNodeTask {
     pub async fn load(schema: schema::ReplicaTask) -> anyhow::Result<Self> {
         let network_outgoing_channels = NetworkOutgoingChannels::new();
         let consensus_channels = ConsensusChannels::new();
-        let execute_channels = ExecuteChannels::new();
-        let storage_channels = super::storage::PlainStorageChannels::new();
+        let execute_source_channels = ExecuteSourceChannels::new();
+        let storage_channels = StorageWorkersChannels::new();
+
+        let execute_sched_channels = ExecuteSchedChannels::new();
 
         let network_accept = NetworkAcceptTask::load(
             consensus_channels.handle().submit,
@@ -39,24 +45,36 @@ impl FullReplicaNodeTask {
                 .await?;
         let consensus = ConsensusTask::load(
             consensus_channels,
-            execute_channels.handle(),
+            execute_source_channels.handle(),
             network_connect.handle(),
             &schema,
         )
         .await?;
-        let execute = ExecuteTask::load(
-            execute_channels,
-            storage_channels.handle(),
-            network_outgoing.channels.handle(),
-            &schema,
+        let storage = StorageWorkersTask::load(
+            storage_channels,
+            execute_sched_channels.handle().tx_post_done,
         )
         .await?;
-        let storage = PlainStorageTask::load(storage_channels).await?;
+
+        let execute_source = ExecuteSourceTask::new(
+            execute_source_channels,
+            storage.channels.handle().tx_fetch,
+            execute_sched_channels.handle(),
+        );
+        let execute_sched = ExecuteSchedTask::new(
+            execute_sched_channels,
+            storage.channels.handle().tx_post,
+            network_outgoing.channels.handle(),
+            schema.node_index,
+            crate::execute::ycsb::YcsbExecute,
+        );
+
         Ok(Self {
             network_outgoing,
             network_accept,
             network_connect,
-            execute,
+            execute_source: GeneralExecuteSourceTask::Ycsb(execute_source),
+            execute_sched: GeneralExecuteSchedTask::Ycsb(execute_sched),
             storage,
             consensus,
         })
@@ -67,9 +85,10 @@ impl FullReplicaNodeTask {
             self.network_outgoing.run(stop.clone()),
             self.network_accept.run(stop.clone()),
             self.network_connect.run(stop.clone()),
-            self.execute.run(stop.clone()),
+            self.execute_source.run(stop.clone()),
+            self.execute_sched.run(stop.clone()),
             self.consensus.run(stop.clone()),
-            self.storage.run(stop.clone()),
+            self.storage.run(),
         )?;
         Ok(())
     }

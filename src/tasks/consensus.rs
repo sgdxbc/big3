@@ -149,3 +149,86 @@ impl BullsharkContext for ConsensusTaskContext {
         self.network_connect.send_to_all(message);
     }
 }
+
+pub mod next {
+    use crate::tasks::execute::ExecuteSourceHandle;
+
+    use super::*;
+
+    pub struct ConsensusTask {
+        channels: ConsensusChannels,
+        state: Bullshark<ConsensusTaskContext>,
+    }
+
+    impl ConsensusTask {
+        fn new(channels: ConsensusChannels, state: Bullshark<ConsensusTaskContext>) -> Self {
+            Self { channels, state }
+        }
+
+        pub async fn load(
+            channels: ConsensusChannels,
+            execute: ExecuteSourceHandle,
+            network_connect: NetworkInterconnectHandle,
+            schema: &schema::ReplicaTask,
+        ) -> anyhow::Result<Self> {
+            let context = ConsensusTaskContext::new(execute, network_connect);
+            let state = Bullshark::new(context, (&schema.config).into(), schema.node_index);
+            Ok(Self::new(channels, state))
+        }
+
+        pub async fn run(mut self, stop: CancellationToken) -> anyhow::Result<()> {
+            tokio::spawn(async move {
+                stop.run_until_cancelled(self.run_inner()).await;
+                self.state.log_metrics();
+            })
+            .await?;
+            Ok(())
+        }
+
+        async fn run_inner(&mut self) {
+            self.state.start();
+            loop {
+                select! {
+                    Some(message) = self.channels.rx_incoming_message.recv() => {
+                        self.state.on_message(message);
+                    }
+                    Some(request) = self.channels.rx_request.recv() => {
+                        self.state.on_request(request);
+                    }
+                    Some((output_id, ())) = self.channels.rx_output_response.recv() => {
+                        self.state.on_output_response(output_id);
+                    }
+                }
+            }
+        }
+    }
+
+    struct ConsensusTaskContext {
+        execute: ExecuteSourceHandle,
+        network_connect: NetworkInterconnectHandle,
+    }
+
+    impl ConsensusTaskContext {
+        fn new(execute: ExecuteSourceHandle, network_connect: NetworkInterconnectHandle) -> Self {
+            Self {
+                execute,
+                network_connect,
+            }
+        }
+    }
+
+    impl BullsharkContext for ConsensusTaskContext {
+        fn output(&mut self, blocks: Vec<Block>) -> OutputId {
+            self.execute.execute(blocks);
+            0
+        }
+
+        fn send(&mut self, node_index: NodeIndex, message: crate::consensus::message::Message) {
+            self.network_connect.send(node_index, message);
+        }
+
+        fn send_to_all(&mut self, message: crate::consensus::message::Message) {
+            self.network_connect.send_to_all(message);
+        }
+    }
+}
