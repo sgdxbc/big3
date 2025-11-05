@@ -65,7 +65,7 @@ impl ExecuteSourceHandle {
 pub struct ExecuteSourceTask<Op> {
     channels: ExecuteSourceChannels,
     tx_fetch: flume::Sender<(Vec<u8>, oneshot::Sender<Option<Vec<u8>>>)>,
-    tx_op_state: UnboundedSender<RequestState<Op>>,
+    sched: ExecuteSchedHandle<Op>,
 }
 
 pub struct RequestState<Op> {
@@ -79,12 +79,12 @@ impl<Op> ExecuteSourceTask<Op> {
     pub fn new(
         channels: ExecuteSourceChannels,
         tx_fetch: flume::Sender<(Vec<u8>, oneshot::Sender<Option<Vec<u8>>>)>,
-        tx_op_state: UnboundedSender<RequestState<Op>>,
+        sched: ExecuteSchedHandle<Op>,
     ) -> Self {
         Self {
             channels,
             tx_fetch,
-            tx_op_state,
+            sched,
         }
     }
 }
@@ -120,7 +120,7 @@ impl<Op: AbstractOp + Send + 'static + Decode<()>> ExecuteSourceTask<Op> {
                         client_id: request.client_id,
                         client_seq: request.client_seq,
                     };
-                    let _ = self.tx_op_state.send(op_state);
+                    self.sched.submit_request(op_state);
                 }
             }
         }
@@ -131,13 +131,13 @@ pub struct ExecuteSchedChannels<Op> {
     tx_request_state: UnboundedSender<RequestState<Op>>,
     rx_request_state: UnboundedReceiver<RequestState<Op>>,
 
-    tx_write_done: UnboundedSender<u64>,
-    rx_write_done: UnboundedReceiver<u64>,
+    tx_post_done: UnboundedSender<u64>,
+    rx_post_done: UnboundedReceiver<u64>,
 }
 
 pub struct ExecuteSchedHandle<Op> {
     pub tx_request_state: UnboundedSender<RequestState<Op>>,
-    pub tx_write_done: UnboundedSender<u64>,
+    pub tx_post_done: UnboundedSender<u64>,
 }
 
 impl<T> Default for ExecuteSchedChannels<T> {
@@ -149,19 +149,19 @@ impl<T> Default for ExecuteSchedChannels<T> {
 impl<Op> ExecuteSchedChannels<Op> {
     pub fn new() -> Self {
         let (tx_request_state, rx_request_state) = unbounded_channel();
-        let (tx_write_done, rx_write_done) = unbounded_channel();
+        let (tx_post_done, rx_post_done) = unbounded_channel();
         Self {
             tx_request_state,
             rx_request_state,
-            tx_write_done,
-            rx_write_done,
+            tx_post_done,
+            rx_post_done,
         }
     }
 
     pub fn handle(&self) -> ExecuteSchedHandle<Op> {
         ExecuteSchedHandle {
             tx_request_state: self.tx_request_state.clone(),
-            tx_write_done: self.tx_write_done.clone(),
+            tx_post_done: self.tx_post_done.clone(),
         }
     }
 }
@@ -170,15 +170,11 @@ impl<Op> ExecuteSchedHandle<Op> {
     pub fn submit_request(&self, request: RequestState<Op>) {
         let _ = self.tx_request_state.send(request);
     }
-
-    pub fn notify_write_done(&self, version: u64) {
-        let _ = self.tx_write_done.send(version);
-    }
 }
 
 pub struct ExecuteSched<E: AbstractExecute> {
     channels: ExecuteSchedChannels<E::Op>,
-    tx_write: UnboundedSender<Vec<(Vec<u8>, Option<Vec<u8>>)>>,
+    tx_post: UnboundedSender<Vec<(Vec<u8>, Option<Vec<u8>>)>>,
     network_outgoing: NetworkOutgoingHandle,
 
     node_index: NodeIndex,
@@ -192,14 +188,14 @@ pub struct ExecuteSched<E: AbstractExecute> {
 impl<E: AbstractExecute> ExecuteSched<E> {
     pub fn new(
         channels: ExecuteSchedChannels<E::Op>,
-        tx_write: UnboundedSender<Vec<(Vec<u8>, Option<Vec<u8>>)>>,
+        tx_post: UnboundedSender<Vec<(Vec<u8>, Option<Vec<u8>>)>>,
         network_outgoing: NetworkOutgoingHandle,
         node_index: NodeIndex,
         state: E,
     ) -> Self {
         Self {
             channels,
-            tx_write,
+            tx_post,
             network_outgoing,
             node_index,
             state,
@@ -232,8 +228,8 @@ where
                 Some(state) = self.channels.rx_request_state.recv() => {
                     self.handle_request_state(state).await?
                 }
-                Some(version) = self.channels.rx_write_done.recv() => {
-                    self.handle_write_done(version)
+                Some(version) = self.channels.rx_post_done.recv() => {
+                    self.handle_post_done(version)
                 }
             }
         }
@@ -270,12 +266,12 @@ where
                 self.evict_queue
                     .push(Reverse((self.current_version, key.clone())));
             }
-            let _ = self.tx_write.send(updates);
+            let _ = self.tx_post.send(updates);
         }
         Ok(())
     }
 
-    fn handle_write_done(&mut self, version: u64) {
+    fn handle_post_done(&mut self, version: u64) {
         while self
             .evict_queue
             .peek()
