@@ -1,12 +1,14 @@
 use bincode::{Decode, Encode};
 use log::warn;
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::{
     consensus::Block,
     storage::FetchResponse,
     types::{ClientId, ClientSeq, NodeIndex, Reply},
 };
+
+use super::{AbstractExecute, AbstractOp};
 
 pub type TxnId = [u8; 32];
 pub type OutputIndex = (TxnId, u32);
@@ -38,6 +40,50 @@ impl Op {
             hasher.update(output_value.to_le_bytes());
         }
         hasher.finalize().into()
+    }
+}
+
+pub fn key(output_index: &OutputIndex) -> Vec<u8> {
+    [&output_index.0[..], &output_index.1.to_be_bytes()].concat()
+}
+
+impl AbstractOp for Op {
+    fn read_set(&self) -> Vec<Vec<u8>> {
+        self.inputs.iter().map(key).collect()
+    }
+}
+
+pub struct Execute;
+
+impl AbstractExecute for Execute {
+    type Op = Op;
+    type Res = Res;
+
+    fn execute(
+        &mut self,
+        op: Self::Op,
+        state: FxHashMap<Vec<u8>, Option<Vec<u8>>>,
+    ) -> (Self::Res, Vec<(Vec<u8>, Option<Vec<u8>>)>) {
+        for input in &op.inputs {
+            // TODO check signature script
+            if !state.contains_key(&key(input)) {
+                warn!("invalid UTXO");
+                return (Res::Invalid, Vec::new());
+            }
+        }
+        // TODO check sum(input) >= sum(output)
+        let mut updates = Vec::new();
+        for input in &op.inputs {
+            updates.push((key(input), None));
+        }
+        let txn_id = op.txn_id();
+        for (i, (pub_key, amount)) in op.outputs.iter().enumerate() {
+            updates.push((
+                key(&(txn_id, i as u32)),
+                Some([&pub_key[..], &amount.to_le_bytes()].concat()),
+            ));
+        }
+        (Res::Ok, updates)
     }
 }
 
