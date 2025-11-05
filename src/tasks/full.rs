@@ -69,7 +69,7 @@ impl FullReplicaNodeTask {
                     execute_sched_channels,
                     storage.channels.handle().tx_post,
                     network_outgoing.channels.handle(),
-                    schema.node_index,
+                    (&schema).into(),
                     crate::execute::ycsb::YcsbExecute,
                 );
 
@@ -124,7 +124,7 @@ impl FullReplicaNodeTask {
                     execute_sched_channels,
                     storage.channels.handle().tx_post,
                     network_outgoing.channels.handle(),
-                    schema.node_index,
+                    (&schema).into(),
                     crate::execute::utxo::UtxoExecute,
                 );
 

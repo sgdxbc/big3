@@ -45,7 +45,7 @@ impl PrefillTask {
                             batch.put(key, &value[..ycsb::VALUE_SIZE]);
                         }
                         schema::App::Utxo => {
-                            let txn = utxo::Op::prefilled(i);
+                            let txn = utxo::Op::prefilled(j);
                             let key = utxo::key(&(txn.id(), 0));
                             rng.fill(&mut value[..32 + 8]);
                             batch.put(key, &value[..32 + 8]);

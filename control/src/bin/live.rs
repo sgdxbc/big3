@@ -91,11 +91,20 @@ async fn run_workload(
             },
             workload_config: big_schema::ClientWorkloadConfig {
                 num_concurrent: NUM_CONCURRENT,
-                app: big_schema::WorkloadConfig::Ycsb(big_schema::YcsbWorkloadConfig {
-                    num_keys: NUM_KEYS,
-                    read_ratio: READ_RATIO,
-                    num_shards: NUM_SHARDS,
-                }),
+                app: match APP {
+                    big_schema::App::Ycsb => {
+                        big_schema::WorkloadConfig::Ycsb(big_schema::YcsbWorkloadConfig {
+                            num_keys: NUM_KEYS,
+                            read_ratio: READ_RATIO,
+                            num_shards: NUM_SHARDS,
+                        })
+                    }
+                    big_schema::App::Utxo => {
+                        big_schema::WorkloadConfig::Utxo(big_schema::UtxoWorkloadConfig {
+                            num_outputs: NUM_KEYS,
+                        })
+                    }
+                },
             },
             node_index: i as _,
         };

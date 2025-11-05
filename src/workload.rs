@@ -1,10 +1,10 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     sync::{Arc, Mutex},
     time::Instant,
 };
 
-use rand::{Rng, RngCore as _, rng, seq::IteratorRandom};
+use rand::{Rng, RngCore as _, rng};
 
 use crate::{
     execute::{
@@ -177,7 +177,7 @@ pub struct UtxoWorkload<C> {
     scrape_state: Arc<Mutex<ClientScrapeState>>,
 
     working: HashMap<InvokeId, UtxoWorkingState>,
-    output_pool: HashSet<OutputIndex>,
+    output_pool: Vec<OutputIndex>,
 }
 
 struct UtxoWorkingState {
@@ -186,7 +186,7 @@ struct UtxoWorkingState {
 }
 
 impl<C> UtxoWorkload<C> {
-    const POOL_SIZE: u32 = 100_000;
+    const POOL_SIZE: u32 = 1_000_000;
 
     pub fn new(
         context: C,
@@ -235,8 +235,8 @@ impl<C: WorkloadContext> UtxoWorkload<C> {
     }
 
     fn invoke(&mut self) {
-        let output_index = *self.output_pool.iter().choose(&mut rng()).unwrap();
-        self.output_pool.remove(&output_index);
+        let i = rng().random_range(0..self.output_pool.len());
+        let output_index = self.output_pool.swap_remove(i);
         let op = execute::utxo::Op {
             inputs: vec![output_index],
             outputs: vec![([0u8; 32], 0)],

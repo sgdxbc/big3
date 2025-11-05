@@ -200,17 +200,32 @@ impl<Op> ExecuteSchedHandle<Op> {
     }
 }
 
+pub struct ExecuteConfig {
+    num_faulty_nodes: NodeIndex,
+    node_index: NodeIndex,
+}
+
+impl From<&schema::ReplicaTask> for ExecuteConfig {
+    fn from(config: &schema::ReplicaTask) -> Self {
+        Self {
+            num_faulty_nodes: config.config.num_faulty_nodes,
+            node_index: config.node_index,
+        }
+    }
+}
+
 pub struct ExecuteSchedTask<E: AbstractExecute> {
     channels: ExecuteSchedChannels<E::Op>,
     tx_post: UnboundedSender<Vec<(Vec<u8>, Option<Vec<u8>>)>>,
     network_outgoing: NetworkOutgoingHandle,
 
-    node_index: NodeIndex,
+    config: ExecuteConfig,
 
     state: E,
     recent_updates: FxHashMap<Vec<u8>, (u64, Option<Vec<u8>>)>,
     current_version: u64,
     evict_queue: BinaryHeap<Reverse<(u64, Vec<u8>)>>,
+    send_flag: NodeIndex,
 }
 
 impl<E: AbstractExecute> ExecuteSchedTask<E> {
@@ -218,18 +233,20 @@ impl<E: AbstractExecute> ExecuteSchedTask<E> {
         channels: ExecuteSchedChannels<E::Op>,
         tx_post: UnboundedSender<Vec<(Vec<u8>, Option<Vec<u8>>)>>,
         network_outgoing: NetworkOutgoingHandle,
-        node_index: NodeIndex,
+        config: ExecuteConfig,
         state: E,
     ) -> Self {
+        let send_count = config.node_index;
         Self {
             channels,
             tx_post,
             network_outgoing,
-            node_index,
+            config,
             state,
             recent_updates: Default::default(),
             current_version: 0,
             evict_queue: Default::default(),
+            send_flag: send_count,
         }
     }
 }
@@ -280,11 +297,14 @@ where
         let reply = Reply {
             client_seq: request_state.client_seq,
             res: bincode::encode_to_vec(&res, bincode::config::standard()).unwrap(),
-            node_index: self.node_index,
+            node_index: self.config.node_index,
         };
-        let _ = self
-            .network_outgoing
-            .send_message(request_state.client_id, reply);
+        if self.send_flag <= self.config.num_faulty_nodes {
+            let _ = self
+                .network_outgoing
+                .send_message(request_state.client_id, reply);
+        }
+        self.send_flag = (self.send_flag + 1) % (self.config.num_faulty_nodes * 2 + 1);
 
         if !updates.is_empty() {
             self.current_version += 1;
