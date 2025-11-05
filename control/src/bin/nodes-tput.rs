@@ -155,27 +155,28 @@ async fn run_workload(
     start_all(server_instances, control_client.clone()).await?;
 
     println!("load clients");
-    let client_task = big_schema::ClientTask {
-        ips,
-        config: big_schema::ClientConfig {
-            num_nodes: num_nodes(num_faulty_nodes),
-            num_faulty_nodes,
-        },
-        workload_config: big_schema::ClientWorkloadConfig {
-            num_concurrent: match storage {
-                Storage::Full => 1_500 * num_shards as u64,
-                Storage::Big => 10_000,
+    let client_items = client_instances.iter().enumerate().map(|(i, instance)| {
+        let client_task = big_schema::ClientTask {
+            ips: ips.clone(),
+            config: big_schema::ClientConfig {
+                num_nodes: num_nodes(num_faulty_nodes),
+                num_faulty_nodes,
             },
-            app: big_schema::WorkloadConfig::Ycsb(big_schema::YcsbWorkloadConfig {
-                num_keys: NUM_KEYS,
-                read_ratio: READ_RATIO,
-                num_shards,
-            }),
-        },
-    };
-    let client_items = client_instances
-        .iter()
-        .map(|instance| (instance, Task::Client(client_task.clone())));
+            workload_config: big_schema::ClientWorkloadConfig {
+                num_concurrent: match storage {
+                    Storage::Full => 1_500 * num_shards as u32,
+                    Storage::Big => 10_000,
+                },
+                app: big_schema::WorkloadConfig::Ycsb(big_schema::YcsbWorkloadConfig {
+                    num_keys: NUM_KEYS,
+                    read_ratio: READ_RATIO,
+                    num_shards,
+                }),
+            },
+            node_index: i as _,
+        };
+        (instance, Task::Client(client_task))
+    });
     load_all(client_items, control_client.clone()).await?;
     println!("start clients");
     start_all(client_instances, control_client.clone()).await?;

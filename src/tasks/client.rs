@@ -70,15 +70,17 @@ impl WorkloadTask {
         client_worker_channels: ClientWorkerChannels,
         clients: Vec<ClientHandle>,
         scrape_state: Arc<Mutex<ClientScrapeState>>,
-        schema: &schema::ClientTask,
+        schema: &schema::WorkloadConfig,
         num_concurrent: u32,
+        workload_index: u32,
     ) -> anyhow::Result<Self> {
         let context = ClientWorkerTaskContext::new(client_worker_channels.invoke_contexts(clients));
         let state = Workload::new(
             context,
-            &schema.workload_config.app,
-            num_concurrent,
             scrape_state,
+            schema,
+            num_concurrent,
+            workload_index,
         );
         Ok(Self::new(client_worker_channels, state))
     }
@@ -378,7 +380,7 @@ impl ClientNodeTask {
             }
 
             let num_concurrent = schema.workload_config.num_concurrent / num_group
-                + (group_index < schema.workload_config.num_concurrent % num_group) as u64;
+                + (group_index < schema.workload_config.num_concurrent % num_group) as u32;
             let scrape_state = scrape_state.clone();
 
             let client_worker_channels = ClientWorkerChannels::new();
@@ -386,8 +388,9 @@ impl ClientNodeTask {
                 client_worker_channels,
                 client_handles.clone(),
                 scrape_state.clone(),
-                &schema,
-                num_concurrent as u32,
+                &schema.workload_config.app,
+                num_concurrent,
+                schema.node_index as u32 * num_group + group_index,
             )?;
             workloads.push(client_worker);
         }

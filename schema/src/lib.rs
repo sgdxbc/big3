@@ -26,11 +26,14 @@ pub struct ClientTask {
     pub ips: Vec<Vec<IpAddr>>,
     pub config: ClientConfig,
     pub workload_config: ClientWorkloadConfig,
+    pub node_index: NodeIndex,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct PrefillTask {
     pub num_keys: u64,
+    pub storage: Storage,
+    pub app: App,
 }
 
 // response of `/scrape`
@@ -66,7 +69,7 @@ pub struct ClientConfig {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ClientWorkloadConfig {
-    pub num_concurrent: u64,
+    pub num_concurrent: u32,
     pub app: WorkloadConfig,
 }
 

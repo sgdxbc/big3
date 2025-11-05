@@ -35,11 +35,12 @@ pub enum Workload<C> {
 impl<C> Workload<C> {
     pub fn new(
         context: C,
-        config: &schema::WorkloadConfig,
-        num_concurrent: u32,
         scrape_state: Arc<Mutex<ClientScrapeState>>,
+        schema: &schema::WorkloadConfig,
+        num_concurrent: u32,
+        workload_index: u32,
     ) -> Self {
-        match config {
+        match &schema {
             schema::WorkloadConfig::Ycsb(cfg) => Self::Ycsb(YcsbWorkload::new(
                 context,
                 cfg.into(),
@@ -51,7 +52,7 @@ impl<C> Workload<C> {
                 cfg,
                 num_concurrent,
                 scrape_state,
-                0, // TODO
+                workload_index,
             )),
         }
     }
@@ -185,22 +186,22 @@ struct UtxoWorkingState {
 }
 
 impl<C> UtxoWorkload<C> {
-    const POOL_SIZE: u64 = 100_000;
+    const POOL_SIZE: u32 = 100_000;
 
     pub fn new(
         context: C,
         config: &schema::UtxoWorkloadConfig,
         num_concurrent: u32,
         scrape_state: Arc<Mutex<ClientScrapeState>>,
-        pool_index: u64,
+        pool_index: u32,
     ) -> Self {
         // ensure that fresh outputs are not reused too quickly
-        assert!(num_concurrent as u64 * 2 < Self::POOL_SIZE);
-        assert!((pool_index + 1) * Self::POOL_SIZE <= config.num_outputs);
+        assert!(num_concurrent * 2 < Self::POOL_SIZE);
+        assert!((pool_index + 1) as u64 * Self::POOL_SIZE as u64 <= config.num_outputs);
         let output_pool = (pool_index * Self::POOL_SIZE..(pool_index + 1) * Self::POOL_SIZE)
             .map(|i| {
                 let op = execute::utxo::Op::prefilled(i as _);
-                (op.txn_id(), 0)
+                (op.id(), 0)
             })
             .collect();
         Self {
@@ -240,7 +241,7 @@ impl<C: WorkloadContext> UtxoWorkload<C> {
             inputs: vec![output_index],
             outputs: vec![([0u8; 32], 0)],
         };
-        let txn_id = op.txn_id();
+        let txn_id = op.id();
         let command = bincode::encode_to_vec(&op, bincode::config::standard()).unwrap();
         let invoke_id = self.context.invoke(0, command);
         self.working.insert(

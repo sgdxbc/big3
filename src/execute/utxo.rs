@@ -27,7 +27,7 @@ pub enum Res {
 }
 
 impl Op {
-    pub fn txn_id(&self) -> TxnId {
+    pub fn id(&self) -> TxnId {
         use sha2::{Digest as _, Sha256};
 
         let mut hasher = Sha256::new();
@@ -76,7 +76,7 @@ impl AbstractExecute for UtxoExecute {
         for input in &op.inputs {
             updates.push((key(input), None));
         }
-        let txn_id = op.txn_id();
+        let txn_id = op.id();
         for (i, (pub_key, amount)) in op.outputs.iter().enumerate() {
             updates.push((
                 key(&(txn_id, i as u32)),
@@ -147,7 +147,7 @@ impl BlocksExecuteState {
                 for (txn_id, index) in &op.inputs {
                     spent.insert((*txn_id, *index));
                 }
-                let txn_id = op.txn_id();
+                let txn_id = op.id();
                 for (i, (pub_key, amount)) in op.outputs.iter().enumerate() {
                     outputs.push((txn_id, i as u32, *pub_key, *amount));
                 }

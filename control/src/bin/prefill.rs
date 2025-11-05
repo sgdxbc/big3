@@ -1,6 +1,10 @@
 use std::time::Duration;
 
-use big_control::{Cluster, Instance, configs::NUM_KEYS, load_all, run_endpoints, stop_all};
+use big_control::{
+    Cluster, Instance,
+    configs::{APP, NUM_KEYS, STORAGE},
+    load_all, run_endpoints, stop_all,
+};
 use big_schema::{PrefillTask, Task};
 use reqwest::Client;
 use tokio::{time::sleep, try_join};
@@ -23,7 +27,11 @@ async fn run_workload(server_instances: Vec<Instance>) -> anyhow::Result<()> {
     let control_client = Client::new();
     sleep(Duration::from_millis(2000)).await;
     println!("load servers");
-    let task = PrefillTask { num_keys: NUM_KEYS };
+    let task = PrefillTask {
+        num_keys: NUM_KEYS,
+        storage: STORAGE,
+        app: APP,
+    };
     load_all(
         server_instances
             .iter()

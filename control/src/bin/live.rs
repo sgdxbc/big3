@@ -82,24 +82,25 @@ async fn run_workload(
     start_all(server_instances, control_client.clone()).await?;
 
     println!("load clients");
-    let client_task = big_schema::ClientTask {
-        ips,
-        config: big_schema::ClientConfig {
-            num_nodes: num_nodes(),
-            num_faulty_nodes: NUM_FAULTY_NODES,
-        },
-        workload_config: big_schema::ClientWorkloadConfig {
-            num_concurrent: NUM_CONCURRENT,
-            app: big_schema::WorkloadConfig::Ycsb(big_schema::YcsbWorkloadConfig {
-                num_keys: NUM_KEYS,
-                read_ratio: READ_RATIO,
-                num_shards: NUM_SHARDS,
-            }),
-        },
-    };
-    let client_items = client_instances
-        .iter()
-        .map(|instance| (instance, Task::Client(client_task.clone())));
+    let client_items = client_instances.iter().enumerate().map(|(i, instance)| {
+        let client_task = big_schema::ClientTask {
+            ips: ips.clone(),
+            config: big_schema::ClientConfig {
+                num_nodes: num_nodes(),
+                num_faulty_nodes: NUM_FAULTY_NODES,
+            },
+            workload_config: big_schema::ClientWorkloadConfig {
+                num_concurrent: NUM_CONCURRENT,
+                app: big_schema::WorkloadConfig::Ycsb(big_schema::YcsbWorkloadConfig {
+                    num_keys: NUM_KEYS,
+                    read_ratio: READ_RATIO,
+                    num_shards: NUM_SHARDS,
+                }),
+            },
+            node_index: i as _,
+        };
+        (instance, Task::Client(client_task))
+    });
     load_all(client_items, control_client.clone()).await?;
     println!("start clients");
     start_all(client_instances, control_client.clone()).await?;
@@ -113,7 +114,7 @@ async fn run_workload(
         sec_tputs.push(metrics.tput);
         println!(
             "last 5 sec avg tput: {}",
-            sec_tputs.iter().rev().take(5).sum::<f64>() / 5.
+            sec_tputs.iter().rev().take(5).sum::<f64>() / sec_tputs.len().min(5) as f64
         );
         next_scrape += Duration::from_secs(1);
     }
