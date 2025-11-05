@@ -13,6 +13,7 @@
         "rngs",
         "rocksdb",
         "rustc",
+        "Sched",
         "Seedable",
         "tput",
         "txns",

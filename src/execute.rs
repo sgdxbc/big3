@@ -1,7 +1,7 @@
 use std::{collections::VecDeque, time::Instant};
 
 use log::info;
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::{
     consensus::Block,
@@ -13,6 +13,21 @@ use crate::{
 
 pub mod utxo;
 pub mod ycsb;
+
+pub trait AbstractOp {
+    fn read_set(&self) -> Vec<Vec<u8>>;
+}
+
+pub trait AbstractExecute {
+    type Op: AbstractOp;
+    type Res;
+
+    fn execute(
+        &mut self,
+        op: Self::Op,
+        state: FxHashMap<Vec<u8>, Option<Vec<u8>>>,
+    ) -> (Self::Res, Vec<(Vec<u8>, Option<Vec<u8>>)>);
+}
 
 pub type FetchId = RequestId;
 

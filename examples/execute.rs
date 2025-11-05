@@ -1,13 +1,16 @@
+#![allow(clippy::type_complexity)]
+
 use std::{
     cmp::Reverse,
     collections::BinaryHeap,
+    path::Path,
     sync::Arc,
     time::{Duration, Instant},
 };
 
 use log::info;
 use rand::{Rng, rng};
-use rocksdb::{DB, WriteBatch};
+use rocksdb::{DB, Options, WriteBatch};
 use rustc_hash::FxHashMap;
 use tempfile::TempDir;
 use tokio::{
@@ -20,10 +23,10 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 const NUM_MAX_CONCURRENT_OP: usize = 100;
-const READ_RATIO: f64 = 0.95;
+const READ_RATIO: f64 = 0.33;
 const NUM_KEYS: u64 = 1_000_000_000;
 const NUM_GET_WORKER_THREADS: usize = 20;
-const DURATION: Duration = Duration::from_secs(20);
+const DURATION: Duration = Duration::from_secs(60);
 
 #[global_allocator]
 static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
@@ -40,8 +43,6 @@ async fn main() -> anyhow::Result<()> {
         .await?;
     anyhow::ensure!(status.success(), "cp command failed");
 
-    let db = Arc::new(DB::open_default(temp_dir.path())?);
-
     let (tx_op, rx_op) = flume::unbounded();
     let (tx_res, rx_res) = flume::unbounded();
     let (tx_get, rx_get) = flume::unbounded();
@@ -50,7 +51,7 @@ async fn main() -> anyhow::Result<()> {
     let token = CancellationToken::new();
 
     let source = Source::new(rx_res, tx_op, tx_get);
-    let worker = Worker::new(db, rx_get, rx_updates, tx_write_done);
+    let worker = Worker::new(temp_dir.path(), rx_get, rx_updates, tx_write_done)?;
     let sched = Sched::new(Execute::new(tx_res), rx_op, rx_write_done, tx_updates);
     let timeout = async {
         sleep(DURATION).await;
@@ -129,17 +130,20 @@ fn set_affinity(#[allow(unused_variables)] i: usize) {
 
 impl Worker {
     fn new(
-        db: Arc<DB>,
+        db_path: &Path,
         rx_get: flume::Receiver<(Vec<u8>, oneshot::Sender<Option<Vec<u8>>>)>,
         rx_updates: flume::Receiver<Vec<(Vec<u8>, Option<Vec<u8>>)>>,
         tx_write_done: flume::Sender<u64>,
-    ) -> Self {
-        Self {
-            db,
+    ) -> anyhow::Result<Self> {
+        let mut opts = Options::default();
+        opts.enable_statistics();
+        let db = DB::open(&opts, db_path)?;
+        Ok(Self {
+            db: db.into(),
             rx_get,
             rx_updates,
             tx_write_done,
-        }
+        })
     }
 
     async fn run(self) -> anyhow::Result<()> {
@@ -152,13 +156,26 @@ impl Worker {
                 get_worker(db, rx_get)
             });
         }
+        let db = self.db.clone();
         join_set.spawn_blocking(move || {
             set_affinity(5);
-            write_worker(self.db, self.rx_updates, self.tx_write_done)
+            write_worker(db, self.rx_updates, self.tx_write_done)
         });
         while let Some(res) = join_set.join_next().await {
             res??;
         }
+
+        info!(
+            "db stats:\n{}",
+            self.db.property_value("rocksdb.stats")?.unwrap_or_default()
+        );
+        info!(
+            "db option stats:\n{}",
+            self.db
+                .property_value("rocksdb.options-statistics")?
+                .unwrap_or_default()
+        );
+
         Ok(())
     }
 }
@@ -256,7 +273,7 @@ impl Source {
 
     async fn run(self, token: CancellationToken) -> anyhow::Result<()> {
         spawn_blocking(move || {
-            set_affinity(7);
+            set_affinity(6);
             runtime::Builder::new_current_thread()
                 .build()
                 .unwrap()
@@ -273,12 +290,22 @@ impl Source {
         }
         let mut count = 0;
         let start = Instant::now();
-        while let Ok(_res) = self.rx_res.recv_async().await {
+        let mut interval_start = Instant::now();
+        while let Ok(res) = self.rx_res.recv_async().await {
+            if let Res::Get(value) = res {
+                assert!(value.is_some())
+            }
+
             count += 1;
             if count % 100_000 == 0 {
                 let elapsed = start.elapsed().as_secs_f64();
                 let qps = count as f64 / elapsed;
-                info!("Completed {count} ops in {elapsed:.2} s ({qps:.2} ops/s)");
+                let interval_elapsed = interval_start.elapsed().as_secs_f64();
+                let interval_qps = 100_000.0 / interval_elapsed;
+                info!(
+                    "Completed {count} ops in {elapsed:.2} s ({qps:.2} ops/s, interval ({interval_qps:.2} ops/s)"
+                );
+                interval_start = Instant::now();
             }
 
             self.request();
@@ -347,7 +374,7 @@ impl<E: AbstractExecute> Sched<E> {
         E::Op: Send + 'static,
     {
         spawn_blocking(move || {
-            set_affinity(6);
+            set_affinity(7);
             runtime::Builder::new_current_thread()
                 .build()
                 .unwrap()
