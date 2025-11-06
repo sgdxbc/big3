@@ -78,7 +78,7 @@ impl From<&schema::ReplicaConfig> for BigStorageConfig {
             num_nodes: value.num_nodes,
             // num_faulty_nodes: value.num_faulty_nodes,
             num_stripes: 100,
-            num_secondary_nodes: 6,
+            num_secondary_nodes: 1,
         }
     }
 }
@@ -324,6 +324,7 @@ pub struct BigStorageRetrieveWorkerTask {
 
     retrieving: FxHashMap<FetchSeq, (Vec<u8>, oneshot::Sender<Option<Vec<u8>>>)>,
     fetch_seq: FetchSeq,
+    reorder_push_value: FxHashMap<FetchSeq, message::PushValue>,
 }
 
 impl BigStorageRetrieveWorkerTask {
@@ -342,6 +343,7 @@ impl BigStorageRetrieveWorkerTask {
             shards,
             retrieving: Default::default(),
             fetch_seq: 0,
+            reorder_push_value: Default::default(),
         }
     }
 
@@ -366,20 +368,32 @@ impl BigStorageRetrieveWorkerTask {
     fn handle_fetch(&mut self, key: Vec<u8>, tx: oneshot::Sender<Option<Vec<u8>>>) {
         self.fetch_seq += 1;
         if self.shards.contains(&self.config.shard_of_key(&key)) {
-            let _ = self.tx_key.send((self.fetch_seq, key.clone(), tx));
+            let _ = self.tx_key.send((self.fetch_seq, key, tx));
         } else {
             self.retrieving.insert(self.fetch_seq, (key, tx));
+        }
+
+        if let Some(push_value) = self.reorder_push_value.remove(&self.fetch_seq) {
+            self.handle_push_value(push_value);
         }
     }
 
     fn handle_message(&mut self, message: Message) {
         match message {
             Message::PushValue(push_value) => {
-                if let Some((key, tx)) = self.retrieving.remove(&push_value.seq) {
-                    assert_eq!(key, push_value.key);
-                    let _ = tx.send(push_value.value);
-                }
+                self.handle_push_value(push_value);
             }
+        }
+    }
+
+    fn handle_push_value(&mut self, push_value: message::PushValue) {
+        if push_value.seq > self.fetch_seq {
+            self.reorder_push_value.insert(push_value.seq, push_value);
+            return;
+        }
+        if let Some((key, tx)) = self.retrieving.remove(&push_value.seq) {
+            assert_eq!(key, push_value.key);
+            let _ = tx.send(push_value.value);
         }
     }
 }

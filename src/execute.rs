@@ -82,7 +82,7 @@ impl ExecuteSourceHandle {
 }
 
 pub struct ExecuteSourceTask<Op> {
-    channels: ExecuteSourceChannels,
+    pub channels: ExecuteSourceChannels,
     tx_fetch: flume::Sender<(Vec<u8>, oneshot::Sender<Option<Vec<u8>>>)>,
     sched: ExecuteSchedHandle<Op>,
 }
