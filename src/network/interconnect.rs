@@ -151,12 +151,12 @@ impl<const BATCH: bool> NetworkInterconnectTask<BATCH> {
 
     async fn run_connection_outgoing(
         conn: Connection,
-        mut tx_outgoing_message: UnboundedReceiver<Bytes>,
+        mut rx_outgoing_message: UnboundedReceiver<Bytes>,
     ) -> anyhow::Result<()> {
         let mut buf;
         while {
             buf = Vec::new();
-            tx_outgoing_message.recv_many(&mut buf, usize::MAX).await > 0
+            rx_outgoing_message.recv_many(&mut buf, usize::MAX).await > 0
         } {
             let mut send = conn.open_uni().await?;
             send.write_all_chunks(&mut buf).await?;

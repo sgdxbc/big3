@@ -15,7 +15,7 @@ use crate::{
 };
 
 pub struct BigReplicaNodeTask {
-    network_accept: NetworkAcceptTask,
+    network_accept: NetworkAcceptTask<true>,
     network_outgoing: NetworkOutgoingTask,
     network_interconnect_consensus: NetworkInterconnectTask,
     network_interconnect_big: NetworkInterconnectTask<true>,

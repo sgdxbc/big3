@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, time::Duration};
 
 use bytes::Bytes;
 use log::error;
@@ -10,6 +10,7 @@ use tokio::{
         Receiver, Sender, UnboundedReceiver, UnboundedSender, channel, unbounded_channel,
     },
     task::JoinSet,
+    time::sleep,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -124,7 +125,7 @@ impl ClientContext for ClientTaskContext {
     }
 }
 
-pub struct NetworkConnectTask {
+pub struct NetworkConnectTask<const BATCH: bool = false> {
     txs_outgoing_message: HashMap<NodeIndex, UnboundedSender<Bytes>>,
     join_set: JoinSet<anyhow::Result<()>>,
 }
@@ -144,7 +145,7 @@ impl NetworkConnectHandle {
     }
 }
 
-impl NetworkConnectTask {
+impl<const BATCH: bool> NetworkConnectTask<BATCH> {
     pub async fn load(
         endpoint: Endpoint,
         client: ClientHandle,
@@ -183,21 +184,30 @@ impl NetworkConnectTask {
     async fn run_connection_incoming(conn: Connection, client: ClientHandle) -> anyhow::Result<()> {
         loop {
             let mut recv = conn.accept_uni().await?;
-            let bytes = recv.read_to_end(usize::MAX).await?;
-            let message = bincode::decode_from_slice(&bytes, bincode::config::standard())
-                .unwrap()
-                .0;
-            let _ = client.incoming_message(message).await;
+            let mut bytes = &*recv.read_to_end(usize::MAX).await?;
+            while !bytes.is_empty() {
+                let (message, len) =
+                    bincode::decode_from_slice(bytes, bincode::config::standard())?;
+                let _ = client.incoming_message(message).await;
+                bytes = &bytes[len..];
+            }
         }
     }
 
     async fn run_connection_outgoing(
         conn: Connection,
-        mut tx_outgoing_message: UnboundedReceiver<Bytes>,
+        mut rx_outgoing_message: UnboundedReceiver<Bytes>,
     ) -> anyhow::Result<()> {
-        while let Some(bytes) = tx_outgoing_message.recv().await {
+        let mut buf;
+        while {
+            buf = Vec::new();
+            rx_outgoing_message.recv_many(&mut buf, usize::MAX).await > 0
+        } {
             let mut send = conn.open_uni().await?;
-            send.write_all(&bytes).await?;
+            send.write_all_chunks(&mut buf).await?;
+            if BATCH {
+                sleep(Duration::from_millis(1)).await
+            }
         }
         Ok(())
     }

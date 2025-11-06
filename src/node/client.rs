@@ -22,7 +22,7 @@ pub struct ClientNodeTask {
 }
 
 struct ConnectedClientTask {
-    network_connect: NetworkConnectTask,
+    network_connect: NetworkConnectTask<true>,
     client: ClientTask,
 }
 

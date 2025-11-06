@@ -16,7 +16,7 @@ use crate::{
 };
 
 pub struct FullReplicaNodeTask {
-    network_accept: NetworkAcceptTask,
+    network_accept: NetworkAcceptTask<true>,
     network_outgoing: NetworkOutgoingTask,
     network_connect: NetworkInterconnectTask,
     consensus: ConsensusTask,
