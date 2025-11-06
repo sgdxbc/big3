@@ -40,7 +40,12 @@ impl<R, P> RequestContext<R, P> {
     }
 
     pub fn request(&mut self, request: R) -> RequestId {
-        self.id += 1;
+        self.request_with_id(self.id + 1, request)
+    }
+
+    pub fn request_with_id(&mut self, id: RequestId, request: R) -> RequestId {
+        assert!(id > self.id);
+        self.id = id;
         let ctx = ResponseContext {
             id: self.id,
             tx: self.tx_response.clone(),

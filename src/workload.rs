@@ -113,17 +113,22 @@ impl WorkloadTask {
 }
 
 struct ClientWorkerTaskContext {
+    invoke_id: InvokeId,
     invokes: Vec<RequestContext<Vec<u8>, Vec<u8>>>,
 }
 
 impl ClientWorkerTaskContext {
     fn new(invokes: Vec<RequestContext<Vec<u8>, Vec<u8>>>) -> Self {
-        Self { invokes }
+        Self {
+            invokes,
+            invoke_id: 0,
+        }
     }
 }
 
 impl WorkloadContext for ClientWorkerTaskContext {
     fn invoke(&mut self, shard: ShardIndex, command: Vec<u8>) -> InvokeId {
-        self.invokes[shard as usize].request(command)
+        self.invoke_id += 1;
+        self.invokes[shard as usize].request_with_id(self.invoke_id, command)
     }
 }

@@ -38,7 +38,8 @@ impl ClientNodeTask {
 
         let mut connected_clients = Vec::new();
         let mut workloads = Vec::new();
-        let num_group = 4;
+        // let num_group = 4;
+        let num_group = 1;
         for group_index in 0..num_group {
             let mut endpoint = Endpoint::client(([0, 0, 0, 0], 0).into())?;
             endpoint.set_default_client_config(config.clone());
