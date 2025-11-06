@@ -10,6 +10,7 @@
         "hdrhistogram",
         "nanos",
         "oneshot",
+        "reqwest",
         "rngs",
         "rocksdb",
         "rustc",

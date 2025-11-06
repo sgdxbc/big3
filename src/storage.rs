@@ -74,12 +74,20 @@ pub struct BigStorageConfig {
 
 impl From<&schema::ReplicaConfig> for BigStorageConfig {
     fn from(value: &schema::ReplicaConfig) -> Self {
-        Self {
+        let config = Self {
             num_nodes: value.num_nodes,
             // num_faulty_nodes: value.num_faulty_nodes,
             num_stripes: 100,
             num_secondary_nodes: 6,
-        }
+        };
+        let num_faulty_nodes = value.num_faulty_nodes;
+        assert!((0..config.num_shards()).all(|shard| {
+            config.primary_node_of_shard(shard) < config.num_nodes - num_faulty_nodes
+                || config
+                    .secondary_nodes_of_shard(shard)
+                    .any(|n| n < config.num_nodes - num_faulty_nodes)
+        }));
+        config
     }
 }
 
@@ -100,7 +108,8 @@ impl BigStorageConfig {
     fn secondary_nodes_of_shard(&self, shard: u32) -> impl Iterator<Item = NodeIndex> {
         (0..self.num_nodes - 1)
             .choose_multiple(
-                &mut StdRng::seed_from_u64(shard as _),
+                // &mut StdRng::seed_from_u64(shard as _),
+                &mut StdRng::seed_from_u64((shard % self.num_stripes) as _),
                 self.num_secondary_nodes as _,
             )
             .into_iter()

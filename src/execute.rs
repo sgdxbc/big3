@@ -95,7 +95,7 @@ impl From<&schema::ReplicaTask> for ExecuteConfig {
         Self {
             num_faulty_nodes: config.config.num_faulty_nodes,
             node_index: config.node_index,
-            num_max_concurrent_fetches: 10_000,
+            num_max_concurrent_fetches: 100_000,
         }
     }
 }
