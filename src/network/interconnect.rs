@@ -49,6 +49,7 @@ pub struct NetworkInterconnectTask {
     join_set: JoinSet<anyhow::Result<()>>,
 }
 
+#[derive(Clone)]
 pub struct NetworkInterconnectHandle {
     txs_outgoing_message: HashMap<NodeIndex, UnboundedSender<Bytes>>,
 }

@@ -5,21 +5,25 @@ use std::{
 
 use rand::{SeedableRng as _, rngs::StdRng, seq::IteratorRandom as _};
 use rocksdb::{DB, WriteBatch};
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 use tempfile::{TempDir, tempdir};
 use tokio::{
     process::Command,
     sync::{
-        mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel},
+        mpsc::{Receiver, Sender, UnboundedReceiver, UnboundedSender, channel, unbounded_channel},
         oneshot,
     },
     task::JoinSet,
 };
+use tokio_util::sync::CancellationToken;
 
 use crate::{
     common::{NodeIndex, PREFILL_PATH},
+    network::interconnect::{NetworkInterconnectHandle, ReceiveHandle},
     schema,
 };
+
+use self::message::Message;
 
 pub struct StorageWorkersChannels {
     pub tx_fetch: flume::Sender<(Vec<u8>, oneshot::Sender<Option<Vec<u8>>>)>,
@@ -104,9 +108,42 @@ impl BigStorageConfig {
     }
 }
 
+pub struct BigStorageWorkerChannels {
+    tx_key: flume::Sender<(FetchSeq, Vec<u8>, oneshot::Sender<Option<Vec<u8>>>)>,
+    rx_key: flume::Receiver<(FetchSeq, Vec<u8>, oneshot::Sender<Option<Vec<u8>>>)>,
+
+    tx_message: Sender<Message>,
+    rx_message: Receiver<Message>,
+}
+
+impl Default for BigStorageWorkerChannels {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl BigStorageWorkerChannels {
+    pub fn new() -> Self {
+        let (tx_key, rx_key) = flume::unbounded();
+        let (tx_message, rx_message) = channel(1000);
+        Self {
+            tx_key,
+            rx_key,
+            tx_message,
+            rx_message,
+        }
+    }
+
+    pub fn receive_handle(&self) -> ReceiveHandle<Message> {
+        ReceiveHandle::new(self.tx_message.clone())
+    }
+}
+
 pub struct BigStorageWorkersTask {
     pub channels: StorageWorkersChannels,
+    pub big_channels: BigStorageWorkerChannels,
     tx_post_done: UnboundedSender<u64>,
+    network_interconnect: NetworkInterconnectHandle,
 
     config: BigStorageConfig,
     // node_index: NodeIndex,
@@ -116,10 +153,15 @@ pub struct BigStorageWorkersTask {
     db: DB,
 }
 
+type FetchSeq = u64;
+
 impl BigStorageWorkersTask {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         channels: StorageWorkersChannels,
+        big_channels: BigStorageWorkerChannels,
         tx_post_done: UnboundedSender<u64>,
+        network_interconnect: NetworkInterconnectHandle,
         config: BigStorageConfig,
         node_index: NodeIndex,
         temp_dir: TempDir,
@@ -135,9 +177,12 @@ impl BigStorageWorkersTask {
                     .any(|n| n == node_index)
             })
             .collect();
+
         Self {
             channels,
+            big_channels,
             tx_post_done,
+            network_interconnect,
             config,
             // node_index,
             primary_shards,
@@ -149,7 +194,9 @@ impl BigStorageWorkersTask {
 
     pub async fn load(
         channels: StorageWorkersChannels,
+        big_channels: BigStorageWorkerChannels,
         tx_post_done: UnboundedSender<u64>,
+        network_interconnect: NetworkInterconnectHandle,
         config: BigStorageConfig,
         node_index: NodeIndex,
     ) -> anyhow::Result<Self> {
@@ -164,7 +211,9 @@ impl BigStorageWorkersTask {
         let db = DB::open_default(temp_dir.path())?;
         Ok(Self::new(
             channels,
+            big_channels,
             tx_post_done,
+            network_interconnect,
             config,
             node_index,
             temp_dir,
@@ -174,27 +223,40 @@ impl BigStorageWorkersTask {
 
     const NUM_GET_WORKER_THREADS: usize = 20;
 
-    pub async fn run(self) -> anyhow::Result<()> {
+    pub async fn run(self, cancel: CancellationToken) -> anyhow::Result<()> {
         drop(self.channels.tx_fetch);
         drop(self.channels.tx_post);
 
         let db = Arc::new(self.db);
+        let shards = &self.primary_shards | &self.secondary_shards;
+
         let mut join_set = JoinSet::new();
         for _ in 0..Self::NUM_GET_WORKER_THREADS {
             let db = db.clone();
-            let rx_get = self.channels.rx_fetch.clone();
-            join_set.spawn_blocking(move || Self::get_worker(db, rx_get));
+            let config = self.config.clone();
+            let rx_key = self.big_channels.rx_key.clone();
+            let network_interconnect = self.network_interconnect.clone();
+            let shards = shards.clone();
+            join_set.spawn_blocking(move || {
+                Self::get_worker(db, config, shards, rx_key, network_interconnect)
+            });
         }
-        let db = db.clone();
-        join_set.spawn_blocking(move || {
-            Self::write_worker(
-                db,
-                self.config,
-                &self.primary_shards | &self.secondary_shards,
-                self.channels.rx_post,
-                self.tx_post_done,
-            )
-        });
+        {
+            let db = db.clone();
+            let config = self.config.clone();
+            let shards = shards.clone();
+            join_set.spawn_blocking(move || {
+                Self::write_worker(db, config, shards, self.channels.rx_post, self.tx_post_done)
+            });
+        }
+        let retrieve = BigStorageRetrieveWorkerTask::new(
+            self.channels.rx_fetch,
+            self.big_channels.rx_message,
+            self.big_channels.tx_key,
+            self.config,
+            shards,
+        );
+        join_set.spawn(async move { retrieve.run(cancel).await });
         while let Some(res) = join_set.join_next().await {
             res??;
         }
@@ -205,11 +267,18 @@ impl BigStorageWorkersTask {
 
     fn get_worker(
         db: Arc<DB>,
-        rx_key: flume::Receiver<(Vec<u8>, oneshot::Sender<Option<Vec<u8>>>)>,
+        config: BigStorageConfig,
+        shards: FxHashSet<u32>,
+        rx_key: flume::Receiver<(FetchSeq, Vec<u8>, oneshot::Sender<Option<Vec<u8>>>)>,
+        network_interconnect: NetworkInterconnectHandle,
     ) -> anyhow::Result<()> {
-        while let Ok((key, tx)) = rx_key.recv() {
-            let value = db.get(key)?;
-            let _ = tx.send(value);
+        while let Ok((seq, key, tx)) = rx_key.recv() {
+            assert!(shards.contains(&config.shard_of_key(&key)));
+            let value = db.get(&key)?;
+            let _ = tx.send(value.clone());
+
+            let push_value = message::PushValue { seq, key, value };
+            network_interconnect.send_to_all(Message::PushValue(push_value));
         }
         Ok(())
     }
@@ -242,5 +311,93 @@ impl BigStorageWorkersTask {
             let _ = tx_write_done.send(count);
         }
         Ok(())
+    }
+}
+
+pub struct BigStorageRetrieveWorkerTask {
+    rx_fetch: flume::Receiver<(Vec<u8>, oneshot::Sender<Option<Vec<u8>>>)>,
+    rx_message: Receiver<Message>,
+    tx_key: flume::Sender<(FetchSeq, Vec<u8>, oneshot::Sender<Option<Vec<u8>>>)>,
+
+    config: BigStorageConfig,
+    shards: FxHashSet<u32>,
+
+    retrieving: FxHashMap<FetchSeq, (Vec<u8>, oneshot::Sender<Option<Vec<u8>>>)>,
+    fetch_seq: FetchSeq,
+}
+
+impl BigStorageRetrieveWorkerTask {
+    pub fn new(
+        rx_fetch: flume::Receiver<(Vec<u8>, oneshot::Sender<Option<Vec<u8>>>)>,
+        rx_message: Receiver<Message>,
+        tx_key: flume::Sender<(FetchSeq, Vec<u8>, oneshot::Sender<Option<Vec<u8>>>)>,
+        config: BigStorageConfig,
+        shards: FxHashSet<u32>,
+    ) -> Self {
+        Self {
+            rx_fetch,
+            rx_message,
+            tx_key,
+            config,
+            shards,
+            retrieving: Default::default(),
+            fetch_seq: 0,
+        }
+    }
+
+    pub async fn run(mut self, cancel: CancellationToken) -> anyhow::Result<()> {
+        cancel.run_until_cancelled(self.run_inner()).await;
+        Ok(())
+    }
+
+    async fn run_inner(&mut self) {
+        loop {
+            tokio::select! {
+                Ok((key, tx)) = self.rx_fetch.recv_async() => {
+                    self.handle_fetch(key, tx);
+                }
+                Some(message) = self.rx_message.recv() => {
+                    self.handle_message(message);
+                }
+            }
+        }
+    }
+
+    fn handle_fetch(&mut self, key: Vec<u8>, tx: oneshot::Sender<Option<Vec<u8>>>) {
+        self.fetch_seq += 1;
+        if self.shards.contains(&self.config.shard_of_key(&key)) {
+            let _ = self.tx_key.send((self.fetch_seq, key.clone(), tx));
+        } else {
+            self.retrieving.insert(self.fetch_seq, (key, tx));
+        }
+    }
+
+    fn handle_message(&mut self, message: Message) {
+        match message {
+            Message::PushValue(push_value) => {
+                if let Some((key, tx)) = self.retrieving.remove(&push_value.seq) {
+                    assert_eq!(key, push_value.key);
+                    let _ = tx.send(push_value.value);
+                }
+            }
+        }
+    }
+}
+
+mod message {
+    use bincode::{Decode, Encode};
+
+    use super::FetchSeq;
+
+    #[derive(Decode, Encode)]
+    pub enum Message {
+        PushValue(PushValue),
+    }
+
+    #[derive(Decode, Encode)]
+    pub struct PushValue {
+        pub seq: FetchSeq,
+        pub key: Vec<u8>,
+        pub value: Option<Vec<u8>>,
     }
 }
