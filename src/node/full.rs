@@ -1,9 +1,7 @@
 use tokio_util::sync::CancellationToken;
 
-use crate::schema;
-
-use super::{
-    consensus::{ConsensusChannels, next::ConsensusTask},
+use crate::{
+    consensus::{ConsensusChannels, ConsensusTask},
     execute::{
         ExecuteSchedChannels, ExecuteSchedTask, ExecuteSourceChannels, ExecuteSourceTask,
         GeneralExecuteSchedTask, GeneralExecuteSourceTask,
@@ -12,7 +10,8 @@ use super::{
         interconnect::NetworkInterconnectTask,
         server::{NetworkAcceptTask, NetworkOutgoingChannels, NetworkOutgoingTask},
     },
-    storage::{StorageWorkersChannels, StorageWorkersTask},
+    plain_storage::{StorageWorkersChannels, StorageWorkersTask},
+    schema,
 };
 
 pub struct FullReplicaNodeTask {

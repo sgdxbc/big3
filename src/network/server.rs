@@ -12,7 +12,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     cert::server_config,
-    types::{ClientId, Reply, Request},
+    common::{ClientId, Reply, Request},
 };
 
 #[derive(Clone)]

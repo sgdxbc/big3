@@ -1,255 +1,129 @@
 use std::{
-    collections::HashMap,
     sync::{Arc, Mutex},
-    time::Instant,
+    time::Duration,
 };
 
-use rand::{Rng, RngCore as _, rng};
+use rand::{Rng, rng};
+use tokio::{
+    select,
+    sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel},
+    time::{interval, sleep},
+};
+use tokio_util::sync::CancellationToken;
 
 use crate::{
-    execute::{
-        self,
-        utxo::OutputIndex,
-        ycsb::{Op, VALUE_SIZE},
-    },
+    client::ClientHandle,
+    common::{RequestContext, RequestId},
     schema,
-    tasks::{RequestId, client::ClientScrapeState},
 };
 
-use self::zipfian::ScrambledZipfian;
+use self::state::{InvokeId, ShardIndex, Workload, WorkloadContext};
 
+mod state;
 mod zipfian;
 
-pub type InvokeId = RequestId;
-pub type ShardIndex = crate::schema::ShardIndex;
+pub use state::ClientScrapeState;
 
-pub trait WorkloadContext {
-    fn invoke(&mut self, shard: ShardIndex, command: Vec<u8>) -> InvokeId;
+pub struct ClientWorkerChannels {
+    tx_invoke_response: UnboundedSender<(RequestId, Vec<u8>)>,
+    rx_invoke_response: UnboundedReceiver<(RequestId, Vec<u8>)>,
 }
 
-pub enum Workload<C> {
-    Ycsb(YcsbWorkload<C>),
-    Utxo(UtxoWorkload<C>),
+impl Default for ClientWorkerChannels {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
-impl<C> Workload<C> {
-    pub fn new(
-        context: C,
+impl ClientWorkerChannels {
+    pub fn new() -> Self {
+        let (tx_invoke_response, rx_invoke_response) = unbounded_channel();
+        Self {
+            tx_invoke_response,
+            rx_invoke_response,
+        }
+    }
+
+    fn invoke_contexts(&self, clients: Vec<ClientHandle>) -> Vec<RequestContext<Vec<u8>, Vec<u8>>> {
+        clients
+            .into_iter()
+            .map(|client_handle| {
+                RequestContext::new(client_handle.tx_invoke, self.tx_invoke_response.clone())
+            })
+            .collect()
+    }
+}
+
+pub struct WorkloadTask {
+    channels: ClientWorkerChannels,
+    state: Workload<ClientWorkerTaskContext>,
+}
+
+impl WorkloadTask {
+    fn new(channels: ClientWorkerChannels, state: Workload<ClientWorkerTaskContext>) -> Self {
+        Self { channels, state }
+    }
+
+    pub fn load(
+        client_worker_channels: ClientWorkerChannels,
+        clients: Vec<ClientHandle>,
         scrape_state: Arc<Mutex<ClientScrapeState>>,
         schema: &schema::WorkloadConfig,
         num_concurrent: u32,
         workload_index: u32,
-    ) -> Self {
-        match &schema {
-            schema::WorkloadConfig::Ycsb(cfg) => Self::Ycsb(YcsbWorkload::new(
-                context,
-                cfg.into(),
-                num_concurrent,
-                scrape_state,
-            )),
-            schema::WorkloadConfig::Utxo(cfg) => Self::Utxo(UtxoWorkload::new(
-                context,
-                cfg,
-                num_concurrent,
-                scrape_state,
-                workload_index,
-            )),
-        }
-    }
-}
-
-impl<C: WorkloadContext> Workload<C> {
-    pub fn start(&mut self) {
-        match self {
-            Workload::Ycsb(w) => w.start(),
-            Workload::Utxo(w) => w.start(),
-        }
-    }
-
-    pub fn on_invoke_response(&mut self, invoke_id: InvokeId, res: Vec<u8>) {
-        match self {
-            Workload::Ycsb(w) => w.on_invoke_response(invoke_id, res),
-            Workload::Utxo(w) => w.on_invoke_response(invoke_id, res),
-        }
-    }
-}
-
-pub struct YcsbWorkloadConfig {
-    num_keys: u64,
-    read_ratio: f64,
-    num_shards: ShardIndex,
-}
-
-impl From<&schema::YcsbWorkloadConfig> for YcsbWorkloadConfig {
-    fn from(config: &schema::YcsbWorkloadConfig) -> Self {
-        Self {
-            num_keys: config.num_keys,
-            read_ratio: config.read_ratio,
-            num_shards: config.num_shards,
-        }
-    }
-}
-
-impl YcsbWorkloadConfig {
-    fn shard_of_key(&self, index: u64) -> ShardIndex {
-        ((index / (self.num_keys / self.num_shards as u64)) as ShardIndex).min(self.num_shards - 1)
-    }
-}
-
-pub struct YcsbWorkload<C> {
-    context: C,
-    config: YcsbWorkloadConfig,
-    num_concurrent: u32,
-    zipfian: ScrambledZipfian,
-    scrape_state: Arc<Mutex<ClientScrapeState>>,
-
-    working: HashMap<InvokeId, WorkingState>,
-}
-
-struct WorkingState {
-    start: Instant,
-}
-
-impl<C> YcsbWorkload<C> {
-    pub fn new(
-        context: C,
-        config: YcsbWorkloadConfig,
-        num_concurrent: u32,
-        scrape_state: Arc<Mutex<ClientScrapeState>>,
-    ) -> Self {
-        let zipfian = ScrambledZipfian::new_range(0, config.num_keys - 1);
-        Self {
+    ) -> anyhow::Result<Self> {
+        let context = ClientWorkerTaskContext::new(client_worker_channels.invoke_contexts(clients));
+        let state = Workload::new(
             context,
-            config,
-            num_concurrent,
-            zipfian,
             scrape_state,
-            working: Default::default(),
-        }
-    }
-}
-
-impl<C: WorkloadContext> YcsbWorkload<C> {
-    pub fn start(&mut self) {
-        for _ in 0..self.num_concurrent {
-            self.invoke();
-        }
-    }
-
-    pub fn on_invoke_response(&mut self, invoke_id: InvokeId, _res: Vec<u8>) {
-        let working = self.working.remove(&invoke_id).expect("no ongoing work");
-        let latency = working.start.elapsed();
-        {
-            let mut scrape_state = self.scrape_state.lock().unwrap();
-            scrape_state.latency_histogram += latency.as_nanos() as u64;
-        }
-
-        self.invoke();
-    }
-
-    fn invoke(&mut self) {
-        let key_index = self.zipfian.next_u64(&mut rng());
-        // let key_index = rng().random_range(0..self.config.num_keys);
-        let key = execute::ycsb::key(key_index);
-        let op = if rng().random_bool(self.config.read_ratio) {
-            Op::Get(key)
-        } else {
-            let mut value = vec![0; VALUE_SIZE];
-            rng().fill_bytes(&mut value);
-            Op::Put(key, value)
-        };
-        let command = bincode::encode_to_vec(&op, bincode::config::standard()).unwrap();
-        let invoke_id = self
-            .context
-            .invoke(self.config.shard_of_key(key_index), command);
-        self.working.insert(
-            invoke_id,
-            WorkingState {
-                start: Instant::now(),
-            },
-        );
-    }
-}
-
-pub struct UtxoWorkload<C> {
-    context: C,
-    num_concurrent: u32,
-    scrape_state: Arc<Mutex<ClientScrapeState>>,
-
-    working: HashMap<InvokeId, UtxoWorkingState>,
-    output_pool: Vec<OutputIndex>,
-}
-
-struct UtxoWorkingState {
-    start: Instant,
-    output_indexes: Vec<OutputIndex>,
-}
-
-impl<C> UtxoWorkload<C> {
-    const POOL_SIZE: u32 = 1_000_000;
-
-    pub fn new(
-        context: C,
-        config: &schema::UtxoWorkloadConfig,
-        num_concurrent: u32,
-        scrape_state: Arc<Mutex<ClientScrapeState>>,
-        pool_index: u32,
-    ) -> Self {
-        // ensure that fresh outputs are not reused too quickly
-        assert!(num_concurrent * 2 < Self::POOL_SIZE);
-        assert!((pool_index + 1) as u64 * Self::POOL_SIZE as u64 <= config.num_outputs);
-        let output_pool = (pool_index * Self::POOL_SIZE..(pool_index + 1) * Self::POOL_SIZE)
-            .map(|i| {
-                let op = execute::utxo::Op::prefilled(i as _);
-                (op.id(), 0)
-            })
-            .collect();
-        Self {
-            context,
+            schema,
             num_concurrent,
-            scrape_state,
-            output_pool,
-            working: Default::default(),
+            workload_index,
+        );
+        Ok(Self::new(client_worker_channels, state))
+    }
+
+    pub async fn run(mut self, stop: CancellationToken) -> anyhow::Result<()> {
+        tokio::spawn(async move {
+            stop.run_until_cancelled(self.run_inner()).await;
+            // self.state.log_metrics();
+        })
+        .await?;
+        Ok(())
+    }
+
+    const TICK_INTERVAL: Duration = Duration::from_millis(10);
+
+    async fn run_inner(&mut self) {
+        let duration = rng().random_range(Duration::ZERO..Self::TICK_INTERVAL);
+        sleep(duration).await;
+        self.state.start();
+        let mut ticker = interval(Self::TICK_INTERVAL);
+        loop {
+            select! {
+                _ = ticker.tick() => {
+                    // self.state.on_tick();
+                }
+                Some((seq, res)) = self.channels.rx_invoke_response.recv() => {
+                    self.state.on_invoke_response(seq, res);
+                }
+            }
         }
     }
 }
 
-impl<C: WorkloadContext> UtxoWorkload<C> {
-    pub fn start(&mut self) {
-        for _ in 0..self.num_concurrent {
-            self.invoke();
-        }
+struct ClientWorkerTaskContext {
+    invokes: Vec<RequestContext<Vec<u8>, Vec<u8>>>,
+}
+
+impl ClientWorkerTaskContext {
+    fn new(invokes: Vec<RequestContext<Vec<u8>, Vec<u8>>>) -> Self {
+        Self { invokes }
     }
+}
 
-    pub fn on_invoke_response(&mut self, invoke_id: InvokeId, _res: Vec<u8>) {
-        let working = self.working.remove(&invoke_id).expect("no ongoing work");
-        // assert_eq!(working.invoke_id, invoke_id);
-        let latency = working.start.elapsed();
-        {
-            let mut scrape_state = self.scrape_state.lock().unwrap();
-            scrape_state.latency_histogram += latency.as_nanos() as u64;
-        }
-        self.output_pool.extend(working.output_indexes);
-
-        self.invoke();
-    }
-
-    fn invoke(&mut self) {
-        let i = rng().random_range(0..self.output_pool.len());
-        let output_index = self.output_pool.swap_remove(i);
-        let op = execute::utxo::Op {
-            inputs: vec![output_index],
-            outputs: vec![([0u8; 32], 0)],
-        };
-        let txn_id = op.id();
-        let command = bincode::encode_to_vec(&op, bincode::config::standard()).unwrap();
-        let invoke_id = self.context.invoke(0, command);
-        self.working.insert(
-            invoke_id,
-            UtxoWorkingState {
-                start: Instant::now(),
-                output_indexes: vec![(txn_id, 0)],
-            },
-        );
+impl WorkloadContext for ClientWorkerTaskContext {
+    fn invoke(&mut self, shard: ShardIndex, command: Vec<u8>) -> InvokeId {
+        self.invokes[shard as usize].request(command)
     }
 }

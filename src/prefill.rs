@@ -5,11 +5,10 @@ use rocksdb::{DB, Options, WriteBatch, WriteOptions};
 use tokio::{fs, task::JoinSet};
 
 use crate::{
+    common::PREFILL_PATH,
     execute::{utxo, ycsb},
     schema,
 };
-
-use super::PREFILL_PATH;
 
 pub struct PrefillTask;
 

@@ -1,95 +1,219 @@
-use std::collections::{HashMap, hash_map::Entry};
+use std::collections::HashMap;
 
-use log::warn;
+use bytes::Bytes;
+use log::error;
+use quinn::{Connection, Endpoint};
+use rand::seq::IteratorRandom as _;
+use tokio::{
+    select,
+    sync::mpsc::{
+        Receiver, Sender, UnboundedReceiver, UnboundedSender, channel, unbounded_channel,
+    },
+    task::JoinSet,
+};
+use tokio_util::sync::CancellationToken;
 
 use crate::{
-    schema::ClientConfig,
-    tasks::ResponseContext,
-    types::{ClientId, ClientSeq, NodeIndex, Reply, Request},
+    common::{ClientId, NodeIndex, Reply, Request, ResponseContext},
+    schema,
 };
 
-pub trait ClientContext {
-    fn send(&mut self, request: Request); // to a random replica
+use self::state::{Client, ClientContext};
+
+mod state;
+
+pub struct ClientChannels {
+    tx_invoke: UnboundedSender<(Vec<u8>, ResponseContext<Vec<u8>>)>,
+    rx_invoke: UnboundedReceiver<(Vec<u8>, ResponseContext<Vec<u8>>)>,
+
+    tx_incoming_message: Sender<Reply>,
+    rx_incoming_message: Receiver<Reply>,
 }
 
-pub struct Client<C> {
-    pub context: C,
-    config: ClientConfig,
-    id: ClientId,
-
-    seq: ClientSeq,
-    working_states: HashMap<ClientSeq, WorkingState>,
+#[derive(Clone)]
+pub struct ClientHandle {
+    pub tx_invoke: UnboundedSender<(Vec<u8>, ResponseContext<Vec<u8>>)>,
+    tx_incoming_message: Sender<Reply>,
 }
 
-struct WorkingState {
-    replies: HashMap<NodeIndex, Vec<u8>>,
-    context: ResponseContext<Vec<u8>>,
+impl Default for ClientChannels {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
-impl<C> Client<C> {
-    pub fn new(context: C, config: ClientConfig, id: ClientId) -> Self {
+impl ClientChannels {
+    pub fn new() -> Self {
+        let (tx_invoke, rx_invoke) = unbounded_channel();
+        let (tx_incoming_message, rx_incoming_message) = channel(100);
         Self {
-            context,
-            config,
-            id,
-            seq: 0,
-            working_states: Default::default(),
+            tx_invoke,
+            rx_invoke,
+            tx_incoming_message,
+            rx_incoming_message,
+        }
+    }
+
+    pub fn handle(&self) -> ClientHandle {
+        ClientHandle {
+            tx_invoke: self.tx_invoke.clone(),
+            tx_incoming_message: self.tx_incoming_message.clone(),
         }
     }
 }
 
-impl<C: ClientContext> Client<C> {
-    pub fn invoke(&mut self, command: Vec<u8>, context: ResponseContext<Vec<u8>>) {
-        self.seq += 1;
+impl ClientHandle {
+    pub async fn incoming_message(&self, reply: Reply) -> anyhow::Result<()> {
+        self.tx_incoming_message.send(reply).await?;
+        Ok(())
+    }
+}
 
-        let request = Request {
-            client_id: self.id,
-            client_seq: self.seq,
-            command,
-        };
-        self.context.send(request);
+pub struct ClientTask {
+    pub channels: ClientChannels,
+    state: Client<ClientTaskContext>,
+}
 
-        self.working_states.insert(
-            self.seq,
-            WorkingState {
-                replies: Default::default(),
-                context,
-            },
-        );
+impl ClientTask {
+    fn new(channels: ClientChannels, state: Client<ClientTaskContext>) -> Self {
+        Self { channels, state }
     }
 
-    pub fn on_message(&mut self, message: Reply) {
-        assert!(message.client_seq <= self.seq);
-        let Entry::Occupied(mut state) = self.working_states.entry(message.client_seq) else {
-            warn!(
-                "stale reply for client_seq {} (no working state)",
-                message.client_seq
-            );
-            return;
-        };
+    pub async fn load(
+        client_channels: ClientChannels,
+        network_connect: NetworkConnectHandle,
+        schema: &schema::ClientTask,
+        client_id: ClientId,
+    ) -> anyhow::Result<Self> {
+        let client_context = ClientTaskContext { network_connect };
+        let state = Client::new(client_context, schema.config.clone(), client_id);
+        Ok(Self::new(client_channels, state))
+    }
 
-        state
-            .get_mut()
-            .replies
-            .insert(message.node_index, message.res.clone());
-        if state.get().replies.len() > self.config.num_faulty_nodes as usize {
-            if state
-                .get()
-                .replies
-                .values()
-                .filter(|&res| res == &message.res)
-                .count()
-                >= (self.config.num_faulty_nodes + 1) as usize
-            {
-                state.remove().context.respond(message.res);
-            } else {
-                warn!(
-                    "received non-matching replies for client_seq {}",
-                    message.client_seq
-                );
+    pub async fn run(mut self, stop: CancellationToken) -> anyhow::Result<()> {
+        tokio::spawn(async move {
+            stop.run_until_cancelled(self.run_inner()).await;
+            self.state.log_metrics();
+        })
+        .await?;
+        Ok(())
+    }
+
+    async fn run_inner(&mut self) {
+        loop {
+            select! {
+                Some((command, tx_response)) = self.channels.rx_invoke.recv() => {
+                    self.state.invoke(command, tx_response);
+                }
+                Some(reply) = self.channels.rx_incoming_message.recv() => {
+                    self.state.on_message(reply);
+                }
             }
         }
     }
+}
 
-    pub fn log_metrics(&self) {}
+struct ClientTaskContext {
+    network_connect: NetworkConnectHandle,
+}
+
+impl ClientContext for ClientTaskContext {
+    fn send(&mut self, request: Request) {
+        let bytes = bincode::encode_to_vec(&request, bincode::config::standard()).unwrap();
+        let _ = self.network_connect.send(bytes.into());
+    }
+}
+
+pub struct NetworkConnectTask {
+    txs_outgoing_message: HashMap<NodeIndex, UnboundedSender<Bytes>>,
+    join_set: JoinSet<anyhow::Result<()>>,
+}
+
+pub struct NetworkConnectHandle {
+    txs_outgoing_message: HashMap<NodeIndex, UnboundedSender<Bytes>>,
+}
+
+impl NetworkConnectHandle {
+    fn send(&self, bytes: Bytes) -> anyhow::Result<()> {
+        self.txs_outgoing_message
+            .values()
+            .choose(&mut rand::rng())
+            .unwrap()
+            .send(bytes)?;
+        Ok(())
+    }
+}
+
+impl NetworkConnectTask {
+    pub async fn load(
+        endpoint: Endpoint,
+        client: ClientHandle,
+        schema: &schema::ClientTask,
+        shard_index: schema::ShardIndex,
+        client_id: ClientId,
+    ) -> anyhow::Result<Self> {
+        let mut txs_outgoing_message = HashMap::new();
+        let mut join_set = JoinSet::new();
+
+        for (i, &ip) in schema.ips[shard_index as usize].iter().enumerate() {
+            let conn = endpoint
+                .connect((ip, 5000).into(), "server.example")?
+                .await?;
+            conn.open_uni()
+                .await?
+                .write_all(&client_id.to_le_bytes())
+                .await?;
+            join_set.spawn(Self::run_connection_incoming(conn.clone(), client.clone()));
+            let (tx_outgoing, rx_outgoing) = unbounded_channel();
+            join_set.spawn(Self::run_connection_outgoing(conn.clone(), rx_outgoing));
+            txs_outgoing_message.insert(i as NodeIndex, tx_outgoing);
+        }
+        Ok(Self {
+            txs_outgoing_message,
+            join_set,
+        })
+    }
+
+    pub fn handle(&self) -> NetworkConnectHandle {
+        NetworkConnectHandle {
+            txs_outgoing_message: self.txs_outgoing_message.clone(),
+        }
+    }
+
+    async fn run_connection_incoming(conn: Connection, client: ClientHandle) -> anyhow::Result<()> {
+        loop {
+            let mut recv = conn.accept_uni().await?;
+            let bytes = recv.read_to_end(usize::MAX).await?;
+            let message = bincode::decode_from_slice(&bytes, bincode::config::standard())
+                .unwrap()
+                .0;
+            let _ = client.incoming_message(message).await;
+        }
+    }
+
+    async fn run_connection_outgoing(
+        conn: Connection,
+        mut tx_outgoing_message: UnboundedReceiver<Bytes>,
+    ) -> anyhow::Result<()> {
+        while let Some(bytes) = tx_outgoing_message.recv().await {
+            let mut send = conn.open_uni().await?;
+            send.write_all(&bytes).await?;
+        }
+        Ok(())
+    }
+
+    pub async fn run(mut self, stop: CancellationToken) -> anyhow::Result<()> {
+        tokio::spawn(async move { stop.run_until_cancelled(self.run_inner()).await })
+            .await?
+            .unwrap_or(Ok(()))
+    }
+
+    async fn run_inner(&mut self) -> anyhow::Result<()> {
+        while let Some(res) = self.join_set.join_next().await {
+            if let Err(err) = res.unwrap() {
+                error!("NetworkConnectTask error: {}", err);
+            }
+        }
+        Ok(())
+    }
 }

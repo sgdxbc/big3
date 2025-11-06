@@ -1,12 +1,6 @@
 use bincode::{Decode, Encode};
 use log::warn;
-use rustc_hash::{FxHashMap, FxHashSet};
-
-use crate::{
-    consensus::Block,
-    storage::FetchResponse,
-    types::{ClientId, ClientSeq, NodeIndex, Reply},
-};
+use rustc_hash::FxHashMap;
 
 use super::{AbstractExecute, AbstractOp};
 
@@ -84,93 +78,6 @@ impl AbstractExecute for UtxoExecute {
             ));
         }
         (Res::Ok, updates)
-    }
-}
-
-pub struct BlocksExecuteState {
-    requests: Vec<(Op, ClientId, ClientSeq)>,
-}
-
-impl BlocksExecuteState {
-    pub fn prepare(blocks: &[Block]) -> (Self, FxHashSet<Vec<u8>>) {
-        let mut state = BlocksExecuteState {
-            requests: Vec::new(),
-        };
-        let mut keys = FxHashSet::default();
-        for block in blocks {
-            for request in &block.txns {
-                let op: Op =
-                    bincode::decode_from_slice(&request.command, bincode::config::standard())
-                        .expect("failed to decode op")
-                        .0;
-                for (txn_id, index) in &op.inputs {
-                    keys.insert([&txn_id[..], &index.to_be_bytes()].concat());
-                }
-                state
-                    .requests
-                    .push((op, request.client_id, request.client_seq));
-            }
-        }
-        (state, keys)
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.requests.is_empty()
-    }
-
-    pub fn commit(
-        self,
-        state: FetchResponse,
-        node_index: NodeIndex,
-        mut send: impl FnMut(ClientId, Reply),
-    ) -> Vec<(Vec<u8>, Option<Vec<u8>>)> {
-        let mut spent = FxHashSet::default();
-        let mut outputs = Vec::new();
-        for (op, client_id, client_seq) in self.requests {
-            let mut res = Res::Ok;
-            for (txn_id, index) in &op.inputs {
-                if state
-                    .get(&[&txn_id[..], &index.to_be_bytes()].concat())
-                    .is_none()
-                    || spent.contains(&(*txn_id, *index))
-                // TODO check signature script
-                // TODO check sum(input) >= sum(output)
-                // TODO should allow spending the newly-created outputs in the same batch, but
-                // probably rare in practice
-                {
-                    warn!("invalid UTXO");
-                    res = Res::Invalid;
-                    break;
-                }
-            }
-            if let Res::Ok = res {
-                for (txn_id, index) in &op.inputs {
-                    spent.insert((*txn_id, *index));
-                }
-                let txn_id = op.id();
-                for (i, (pub_key, amount)) in op.outputs.iter().enumerate() {
-                    outputs.push((txn_id, i as u32, *pub_key, *amount));
-                }
-            }
-            let reply = Reply {
-                client_seq,
-                res: bincode::encode_to_vec(&res, bincode::config::standard()).unwrap(),
-                node_index,
-            };
-            send(client_id, reply);
-        }
-
-        let mut updates = spent
-            .into_iter()
-            .map(|(txn_id, index)| ([&txn_id[..], &index.to_be_bytes()].concat(), None))
-            .collect::<Vec<_>>();
-        updates.extend(outputs.into_iter().map(|(txn_id, index, pub_key, amount)| {
-            (
-                [&txn_id[..], &index.to_be_bytes()].concat(),
-                Some([&pub_key[..], &amount.to_le_bytes()].concat()),
-            )
-        }));
-        updates
     }
 }
 

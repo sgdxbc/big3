@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use axum::{Json, extract::State, response::IntoResponse, routing::post};
-use big::{schema, tasks::Task};
+use big::{node::Task, schema};
 use log::info;
 use rustix::process::{Resource, getrlimit, setrlimit};
 use tokio::{

@@ -12,8 +12,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     cert::{client_config, server_config},
+    common::NodeIndex,
     schema,
-    types::NodeIndex,
 };
 
 pub struct ReceiveHandle<M> {
