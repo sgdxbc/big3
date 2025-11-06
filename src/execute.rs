@@ -39,10 +39,14 @@ pub trait AbstractExecute {
 pub struct ExecuteSourceChannels {
     tx_blocks: UnboundedSender<Vec<Block>>,
     rx_blocks: UnboundedReceiver<Vec<Block>>,
+
+    tx_post_done: UnboundedSender<u64>,
+    rx_post_done: UnboundedReceiver<u64>,
 }
 
 pub struct ExecuteSourceHandle {
     tx_blocks: UnboundedSender<Vec<Block>>,
+    pub tx_post_done: UnboundedSender<u64>,
 }
 
 impl Default for ExecuteSourceChannels {
@@ -54,15 +58,19 @@ impl Default for ExecuteSourceChannels {
 impl ExecuteSourceChannels {
     pub fn new() -> Self {
         let (tx_blocks, rx_blocks) = unbounded_channel();
+        let (tx_post_done, rx_post_done) = unbounded_channel();
         Self {
             tx_blocks,
             rx_blocks,
+            tx_post_done,
+            rx_post_done,
         }
     }
 
     pub fn handle(&self) -> ExecuteSourceHandle {
         ExecuteSourceHandle {
             tx_blocks: self.tx_blocks.clone(),
+            tx_post_done: self.tx_post_done.clone(),
         }
     }
 }
@@ -72,39 +80,15 @@ impl ExecuteSourceHandle {
         let _ = self.tx_blocks.send(blocks);
     }
 }
-
-pub enum GeneralExecuteSourceTask {
-    Ycsb(ExecuteSourceTask<crate::execute::ycsb::Op>),
-    Utxo(ExecuteSourceTask<crate::execute::utxo::Op>),
-}
-
-impl GeneralExecuteSourceTask {
-    pub async fn run(self, stop: CancellationToken) -> anyhow::Result<()> {
-        match self {
-            GeneralExecuteSourceTask::Ycsb(task) => task.run(stop).await,
-            GeneralExecuteSourceTask::Utxo(task) => task.run(stop).await,
-        }
-    }
-}
-
-pub enum GeneralExecuteSchedTask {
-    Ycsb(ExecuteSchedTask<crate::execute::ycsb::YcsbExecute>),
-    Utxo(ExecuteSchedTask<crate::execute::utxo::UtxoExecute>),
-}
-
-impl GeneralExecuteSchedTask {
-    pub async fn run(self, stop: CancellationToken) -> anyhow::Result<()> {
-        match self {
-            GeneralExecuteSchedTask::Ycsb(task) => task.run(stop).await,
-            GeneralExecuteSchedTask::Utxo(task) => task.run(stop).await,
-        }
-    }
-}
-
 pub struct ExecuteSourceTask<Op> {
     channels: ExecuteSourceChannels,
     tx_fetch: flume::Sender<(Vec<u8>, oneshot::Sender<Option<Vec<u8>>>)>,
     sched: ExecuteSchedHandle<Op>,
+}
+
+enum ExecuteSchedEvent<Op> {
+    RequestState(RequestState<Op>),
+    PostDone(u64),
 }
 
 pub struct RequestState<Op> {
@@ -138,45 +122,52 @@ impl<Op: AbstractOp + Send + 'static + Decode<()>> ExecuteSourceTask<Op> {
     }
 
     async fn run_inner(&mut self) {
-        while let Some(blocks) = self.channels.rx_blocks.recv().await {
-            for block in blocks {
-                for request in block.txns {
-                    let op = bincode::decode_from_slice::<Op, _>(
-                        &request.command,
-                        bincode::config::standard(),
-                    )
-                    .unwrap()
-                    .0;
-                    let mut read_set = FxHashMap::default();
-                    for key in op.read_set() {
-                        let (tx, rx) = oneshot::channel();
-                        let _ = self.tx_fetch.send((key.clone(), tx));
-                        read_set.insert(key, rx);
-                    }
-                    let op_state = RequestState {
-                        op,
-                        read_set,
-                        client_id: request.client_id,
-                        client_seq: request.client_seq,
-                    };
-                    self.sched.submit_request(op_state);
-                }
+        loop {
+            select! {
+                Some(blocks) = self.channels.rx_blocks.recv() => self.handle_blocks(blocks),
+                Some(version) = self.channels.rx_post_done.recv() => self.handle_post_done(version),
             }
         }
+    }
+
+    fn handle_blocks(&mut self, blocks: Vec<Block>) {
+        for block in blocks {
+            for request in block.txns {
+                let op = bincode::decode_from_slice::<Op, _>(
+                    &request.command,
+                    bincode::config::standard(),
+                )
+                .unwrap()
+                .0;
+                let mut read_set = FxHashMap::default();
+                for key in op.read_set() {
+                    let (tx, rx) = oneshot::channel();
+                    let _ = self.tx_fetch.send((key.clone(), tx));
+                    read_set.insert(key, rx);
+                }
+                let op_state = RequestState {
+                    op,
+                    read_set,
+                    client_id: request.client_id,
+                    client_seq: request.client_seq,
+                };
+                self.sched.emit(ExecuteSchedEvent::RequestState(op_state));
+            }
+        }
+    }
+
+    fn handle_post_done(&mut self, version: u64) {
+        self.sched.emit(ExecuteSchedEvent::PostDone(version));
     }
 }
 
 pub struct ExecuteSchedChannels<Op> {
-    tx_request_state: UnboundedSender<RequestState<Op>>,
-    rx_request_state: UnboundedReceiver<RequestState<Op>>,
-
-    tx_post_done: UnboundedSender<u64>,
-    rx_post_done: UnboundedReceiver<u64>,
+    tx_request_state: UnboundedSender<ExecuteSchedEvent<Op>>,
+    rx_request_state: UnboundedReceiver<ExecuteSchedEvent<Op>>,
 }
 
 pub struct ExecuteSchedHandle<Op> {
-    pub tx_request_state: UnboundedSender<RequestState<Op>>,
-    pub tx_post_done: UnboundedSender<u64>,
+    tx_request_state: UnboundedSender<ExecuteSchedEvent<Op>>,
 }
 
 impl<T> Default for ExecuteSchedChannels<T> {
@@ -188,26 +179,22 @@ impl<T> Default for ExecuteSchedChannels<T> {
 impl<Op> ExecuteSchedChannels<Op> {
     pub fn new() -> Self {
         let (tx_request_state, rx_request_state) = unbounded_channel();
-        let (tx_post_done, rx_post_done) = unbounded_channel();
         Self {
             tx_request_state,
             rx_request_state,
-            tx_post_done,
-            rx_post_done,
         }
     }
 
     pub fn handle(&self) -> ExecuteSchedHandle<Op> {
         ExecuteSchedHandle {
             tx_request_state: self.tx_request_state.clone(),
-            tx_post_done: self.tx_post_done.clone(),
         }
     }
 }
 
 impl<Op> ExecuteSchedHandle<Op> {
-    pub fn submit_request(&self, request: RequestState<Op>) {
-        let _ = self.tx_request_state.send(request);
+    fn emit(&self, event: ExecuteSchedEvent<Op>) {
+        let _ = self.tx_request_state.send(event);
     }
 }
 
@@ -279,16 +266,15 @@ where
     }
 
     async fn run_inner(&mut self) -> anyhow::Result<()> {
-        loop {
-            select! {
-                Some(state) = self.channels.rx_request_state.recv() => {
-                    self.handle_request_state(state).await?
+        while let Some(event) = self.channels.rx_request_state.recv().await {
+            match event {
+                ExecuteSchedEvent::RequestState(request_state) => {
+                    self.handle_request_state(request_state).await?
                 }
-                Some(version) = self.channels.rx_post_done.recv() => {
-                    self.handle_post_done(version)
-                }
+                ExecuteSchedEvent::PostDone(version) => self.handle_post_done(version),
             }
         }
+        Ok(())
     }
 
     async fn handle_request_state(
@@ -317,16 +303,18 @@ where
         }
         self.send_flag = (self.send_flag + 1) % (self.config.num_faulty_nodes * 2 + 1);
 
-        if !updates.is_empty() {
-            self.current_version += 1;
-            for (key, value) in &updates {
-                self.recent_updates
-                    .insert(key.clone(), (self.current_version, value.clone()));
-                self.evict_queue
-                    .push(Reverse((self.current_version, key.clone())));
-            }
-            let _ = self.tx_post.send(updates);
+        // 1-1 mapping between requests and versions is necessary for skipping
+        // TODO implement skipping
+        // if !updates.is_empty() {
+        self.current_version += 1;
+        for (key, value) in &updates {
+            self.recent_updates
+                .insert(key.clone(), (self.current_version, value.clone()));
+            self.evict_queue
+                .push(Reverse((self.current_version, key.clone())));
         }
+        let _ = self.tx_post.send(updates);
+        // }
         Ok(())
     }
 
@@ -340,6 +328,34 @@ where
             if self.recent_updates[&key].0 == v {
                 self.recent_updates.remove(&key);
             }
+        }
+    }
+}
+
+pub enum GeneralExecuteSourceTask {
+    Ycsb(ExecuteSourceTask<crate::execute::ycsb::Op>),
+    Utxo(ExecuteSourceTask<crate::execute::utxo::Op>),
+}
+
+impl GeneralExecuteSourceTask {
+    pub async fn run(self, stop: CancellationToken) -> anyhow::Result<()> {
+        match self {
+            GeneralExecuteSourceTask::Ycsb(task) => task.run(stop).await,
+            GeneralExecuteSourceTask::Utxo(task) => task.run(stop).await,
+        }
+    }
+}
+
+pub enum GeneralExecuteSchedTask {
+    Ycsb(ExecuteSchedTask<crate::execute::ycsb::YcsbExecute>),
+    Utxo(ExecuteSchedTask<crate::execute::utxo::UtxoExecute>),
+}
+
+impl GeneralExecuteSchedTask {
+    pub async fn run(self, stop: CancellationToken) -> anyhow::Result<()> {
+        match self {
+            GeneralExecuteSchedTask::Ycsb(task) => task.run(stop).await,
+            GeneralExecuteSchedTask::Utxo(task) => task.run(stop).await,
         }
     }
 }

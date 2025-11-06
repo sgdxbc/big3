@@ -9,6 +9,7 @@ pub mod metrics;
 pub mod node;
 pub mod plain_storage;
 pub mod prefill;
+pub mod storage;
 pub mod workload;
 
 pub mod network {

@@ -10,8 +10,9 @@ use crate::{
         interconnect::NetworkInterconnectTask,
         server::{NetworkAcceptTask, NetworkOutgoingChannels, NetworkOutgoingTask},
     },
-    plain_storage::{StorageWorkersChannels, StorageWorkersTask},
+    plain_storage::StorageWorkersTask,
     schema,
+    storage::StorageWorkersChannels,
 };
 
 pub struct FullReplicaNodeTask {
@@ -55,7 +56,7 @@ impl FullReplicaNodeTask {
                 .await?;
                 let storage = StorageWorkersTask::load(
                     storage_channels,
-                    execute_sched_channels.handle().tx_post_done,
+                    execute_source_channels.handle().tx_post_done,
                 )
                 .await?;
 
@@ -110,7 +111,7 @@ impl FullReplicaNodeTask {
                 .await?;
                 let storage = StorageWorkersTask::load(
                     storage_channels,
-                    execute_sched_channels.handle().tx_post_done,
+                    execute_source_channels.handle().tx_post_done,
                 )
                 .await?;
 
