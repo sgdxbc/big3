@@ -80,6 +80,7 @@ impl ExecuteSourceHandle {
         let _ = self.tx_blocks.send(blocks);
     }
 }
+
 pub struct ExecuteSourceTask<Op> {
     channels: ExecuteSourceChannels,
     tx_fetch: flume::Sender<(Vec<u8>, oneshot::Sender<Option<Vec<u8>>>)>,

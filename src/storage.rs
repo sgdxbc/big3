@@ -1,6 +1,24 @@
-use tokio::sync::{
-    mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel},
-    oneshot,
+use std::{
+    hash::{BuildHasher as _, BuildHasherDefault, DefaultHasher},
+    sync::Arc,
+};
+
+use rand::{SeedableRng as _, rngs::StdRng, seq::IteratorRandom as _};
+use rocksdb::{DB, WriteBatch};
+use rustc_hash::FxHashSet;
+use tempfile::{TempDir, tempdir};
+use tokio::{
+    process::Command,
+    sync::{
+        mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel},
+        oneshot,
+    },
+    task::JoinSet,
+};
+
+use crate::{
+    common::{NodeIndex, PREFILL_PATH},
+    schema,
 };
 
 pub struct StorageWorkersChannels {
@@ -39,5 +57,190 @@ impl StorageWorkersChannels {
             tx_fetch: self.tx_fetch.clone(),
             tx_post: self.tx_post.clone(),
         }
+    }
+}
+
+#[derive(Clone)]
+pub struct BigStorageConfig {
+    num_nodes: NodeIndex,
+    // num_faulty_nodes: NodeIndex,
+    num_stripes: u32,
+    num_secondary_nodes: NodeIndex,
+}
+
+impl From<&schema::ReplicaConfig> for BigStorageConfig {
+    fn from(value: &schema::ReplicaConfig) -> Self {
+        Self {
+            num_nodes: value.num_nodes,
+            // num_faulty_nodes: value.num_faulty_nodes,
+            num_stripes: 100,
+            num_secondary_nodes: 6,
+        }
+    }
+}
+
+impl BigStorageConfig {
+    fn num_shards(&self) -> u32 {
+        self.num_stripes * self.num_nodes as u32
+    }
+
+    fn shard_of_key(&self, key: &[u8]) -> u32 {
+        (BuildHasherDefault::<DefaultHasher>::default().hash_one(key) % self.num_shards() as u64)
+            as _
+    }
+
+    fn primary_node_of_shard(&self, shard: u32) -> NodeIndex {
+        (shard % self.num_nodes as u32) as _
+    }
+
+    fn secondary_nodes_of_shard(&self, shard: u32) -> impl Iterator<Item = NodeIndex> {
+        (0..self.num_nodes - 1)
+            .choose_multiple(
+                &mut StdRng::seed_from_u64(shard as _),
+                self.num_secondary_nodes as _,
+            )
+            .into_iter()
+            .map(move |n| n + (n >= self.primary_node_of_shard(shard)) as NodeIndex)
+    }
+}
+
+pub struct BigStorageWorkersTask {
+    pub channels: StorageWorkersChannels,
+    tx_post_done: UnboundedSender<u64>,
+
+    config: BigStorageConfig,
+    // node_index: NodeIndex,
+    primary_shards: FxHashSet<u32>,
+    secondary_shards: FxHashSet<u32>,
+    temp_dir: TempDir,
+    db: DB,
+}
+
+impl BigStorageWorkersTask {
+    fn new(
+        channels: StorageWorkersChannels,
+        tx_post_done: UnboundedSender<u64>,
+        config: BigStorageConfig,
+        node_index: NodeIndex,
+        temp_dir: TempDir,
+        db: DB,
+    ) -> Self {
+        let primary_shards = (0..config.num_shards())
+            .filter(|&shard| config.primary_node_of_shard(shard) == node_index)
+            .collect();
+        let secondary_shards = (0..config.num_shards())
+            .filter(|&shard| {
+                config
+                    .secondary_nodes_of_shard(shard)
+                    .any(|n| n == node_index)
+            })
+            .collect();
+        Self {
+            channels,
+            tx_post_done,
+            config,
+            // node_index,
+            primary_shards,
+            secondary_shards,
+            temp_dir,
+            db,
+        }
+    }
+
+    pub async fn load(
+        channels: StorageWorkersChannels,
+        tx_post_done: UnboundedSender<u64>,
+        config: BigStorageConfig,
+        node_index: NodeIndex,
+    ) -> anyhow::Result<Self> {
+        let temp_dir = tempdir()?;
+        let status = Command::new("cp")
+            .arg("-rT")
+            .arg(PREFILL_PATH)
+            .arg(temp_dir.path())
+            .status()
+            .await?;
+        anyhow::ensure!(status.success(), "failed to copy prefill data");
+        let db = DB::open_default(temp_dir.path())?;
+        Ok(Self::new(
+            channels,
+            tx_post_done,
+            config,
+            node_index,
+            temp_dir,
+            db,
+        ))
+    }
+
+    const NUM_GET_WORKER_THREADS: usize = 20;
+
+    pub async fn run(self) -> anyhow::Result<()> {
+        drop(self.channels.tx_fetch);
+        drop(self.channels.tx_post);
+
+        let db = Arc::new(self.db);
+        let mut join_set = JoinSet::new();
+        for _ in 0..Self::NUM_GET_WORKER_THREADS {
+            let db = db.clone();
+            let rx_get = self.channels.rx_fetch.clone();
+            join_set.spawn_blocking(move || Self::get_worker(db, rx_get));
+        }
+        let db = db.clone();
+        join_set.spawn_blocking(move || {
+            Self::write_worker(
+                db,
+                self.config,
+                &self.primary_shards | &self.secondary_shards,
+                self.channels.rx_post,
+                self.tx_post_done,
+            )
+        });
+        while let Some(res) = join_set.join_next().await {
+            res??;
+        }
+        // stats if any
+        self.temp_dir.close()?;
+        Ok(())
+    }
+
+    fn get_worker(
+        db: Arc<DB>,
+        rx_key: flume::Receiver<(Vec<u8>, oneshot::Sender<Option<Vec<u8>>>)>,
+    ) -> anyhow::Result<()> {
+        while let Ok((key, tx)) = rx_key.recv() {
+            let value = db.get(key)?;
+            let _ = tx.send(value);
+        }
+        Ok(())
+    }
+
+    fn write_worker(
+        db: Arc<DB>,
+        config: BigStorageConfig,
+        shards: FxHashSet<u32>,
+        mut rx_updates: UnboundedReceiver<Vec<(Vec<u8>, Option<Vec<u8>>)>>,
+        tx_write_done: UnboundedSender<u64>,
+    ) -> anyhow::Result<()> {
+        let mut count = 0;
+        let mut updates_buf = Vec::new();
+        while rx_updates.blocking_recv_many(&mut updates_buf, 10_000) > 0 {
+            count += updates_buf.len() as u64;
+            let mut batch = WriteBatch::new();
+            for updates in updates_buf.drain(..) {
+                for (key, value) in updates {
+                    if !shards.contains(&config.shard_of_key(&key)) {
+                        continue;
+                    }
+                    match value {
+                        Some(v) => batch.put(key, v),
+                        None => batch.delete(key),
+                    }
+                }
+            }
+
+            db.write(batch)?;
+            let _ = tx_write_done.send(count);
+        }
+        Ok(())
     }
 }
