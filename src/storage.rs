@@ -141,7 +141,7 @@ pub trait BigStorageContext {
 #[derive(Clone)]
 pub struct BigStorageConfig {
     num_nodes: NodeIndex,
-    num_faulty_nodes: NodeIndex,
+    // num_faulty_nodes: NodeIndex,
     num_stripes: u32,
     num_secondary_nodes: NodeIndex,
 }
@@ -150,16 +150,16 @@ impl From<&schema::ReplicaConfig> for BigStorageConfig {
     fn from(value: &schema::ReplicaConfig) -> Self {
         Self {
             num_nodes: value.num_nodes,
-            num_faulty_nodes: value.num_faulty_nodes,
+            // num_faulty_nodes: value.num_faulty_nodes,
             num_stripes: 100,
-            num_secondary_nodes: 7,
+            num_secondary_nodes: 6,
         }
     }
 }
 
 impl BigStorageConfig {
     fn num_shards(&self) -> u32 {
-        self.num_stripes * (self.num_nodes - self.num_faulty_nodes) as u32
+        self.num_stripes * self.num_nodes as u32
     }
 
     fn shard_of_key(&self, key: &[u8]) -> u32 {
@@ -168,7 +168,7 @@ impl BigStorageConfig {
     }
 
     fn primary_node_of_shard(&self, shard: u32) -> NodeIndex {
-        (shard % (self.num_nodes - self.num_faulty_nodes) as u32) as _
+        (shard % self.num_nodes as u32) as _
     }
 
     fn secondary_nodes_of_shard(&self, shard: u32) -> impl Iterator<Item = NodeIndex> {
