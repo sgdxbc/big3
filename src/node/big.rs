@@ -3,8 +3,8 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     consensus::{ConsensusChannels, ConsensusTask},
     execute::{
-        ExecuteSchedChannels, ExecuteSchedTask, ExecuteSourceChannels, ExecuteSourceTask,
-        GeneralExecuteSchedTask, GeneralExecuteSourceTask,
+        AbstractExecute, ExecuteSchedChannels, ExecuteSchedTask, ExecuteSourceChannels,
+        ExecuteSourceTask, GeneralExecuteSchedTask, GeneralExecuteSourceTask,
     },
     network::{
         interconnect::NetworkInterconnectTask,
@@ -26,7 +26,12 @@ pub struct BigReplicaNodeTask {
 }
 
 impl BigReplicaNodeTask {
-    pub async fn load(schema: schema::ReplicaTask) -> anyhow::Result<Self> {
+    async fn load_inner<E: AbstractExecute>(
+        schema: schema::ReplicaTask,
+        execute: E,
+        into_execute_source: impl FnOnce(ExecuteSourceTask<E::Op>) -> GeneralExecuteSourceTask,
+        into_execute_sched: impl FnOnce(ExecuteSchedTask<E>) -> GeneralExecuteSchedTask,
+    ) -> anyhow::Result<Self> {
         let network_outgoing_channels = NetworkOutgoingChannels::new();
         let consensus_channels = ConsensusChannels::new();
         let execute_source_channels = ExecuteSourceChannels::new();
@@ -64,7 +69,7 @@ impl BigReplicaNodeTask {
             storage_channels.handle().tx_post,
             network_outgoing.channels.handle(),
             (&schema).into(),
-            crate::execute::ycsb::YcsbExecute,
+            execute,
         );
         let storage = BigStorageWorkersTask::load(
             storage_channels,
@@ -81,10 +86,33 @@ impl BigReplicaNodeTask {
             network_interconnect_consensus,
             network_interconnect_big,
             consensus,
-            execute_source: GeneralExecuteSourceTask::Ycsb(execute_source),
-            execute_sched: GeneralExecuteSchedTask::Ycsb(execute_sched),
+            execute_source: into_execute_source(execute_source),
+            execute_sched: into_execute_sched(execute_sched),
             storage,
         })
+    }
+
+    pub async fn load(schema: schema::ReplicaTask) -> anyhow::Result<Self> {
+        match &schema.app {
+            schema::App::Ycsb => {
+                Self::load_inner(
+                    schema,
+                    crate::execute::ycsb::YcsbExecute,
+                    GeneralExecuteSourceTask::Ycsb,
+                    GeneralExecuteSchedTask::Ycsb,
+                )
+                .await
+            }
+            schema::App::Utxo => {
+                Self::load_inner(
+                    schema,
+                    crate::execute::utxo::UtxoExecute,
+                    GeneralExecuteSourceTask::Utxo,
+                    GeneralExecuteSchedTask::Utxo,
+                )
+                .await
+            }
+        }
     }
 
     pub async fn run(self, stop: CancellationToken) -> anyhow::Result<()> {
