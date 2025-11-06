@@ -7,6 +7,7 @@ use quinn::{Connection, Endpoint, TransportConfig};
 use tokio::{
     sync::mpsc::{Sender, UnboundedReceiver, UnboundedSender, unbounded_channel},
     task::JoinSet,
+    time::sleep,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -44,7 +45,7 @@ impl<M> ReceiveHandle<M> {
     }
 }
 
-pub struct NetworkInterconnectTask {
+pub struct NetworkInterconnectTask<const BATCH: bool = false> {
     txs_outgoing_message: HashMap<NodeIndex, UnboundedSender<Bytes>>,
     join_set: JoinSet<anyhow::Result<()>>,
 }
@@ -69,7 +70,7 @@ impl NetworkInterconnectHandle {
     }
 }
 
-impl NetworkInterconnectTask {
+impl<const BATCH: bool> NetworkInterconnectTask<BATCH> {
     pub async fn load<M: Decode<()> + Send + Sync + 'static>(
         receive: ReceiveHandle<M>,
         schema: &schema::ReplicaTask,
@@ -138,9 +139,13 @@ impl NetworkInterconnectTask {
     ) -> anyhow::Result<()> {
         loop {
             let mut recv = conn.accept_uni().await?;
-            let bytes = recv.read_to_end(usize::MAX).await?;
-            let message = bincode::decode_from_slice(&bytes, bincode::config::standard())?.0;
-            let _ = receive.incoming_message(message).await;
+            let mut bytes = &*recv.read_to_end(usize::MAX).await?;
+            while !bytes.is_empty() {
+                let (message, len) =
+                    bincode::decode_from_slice(bytes, bincode::config::standard())?;
+                let _ = receive.incoming_message(message).await;
+                bytes = &bytes[len..];
+            }
         }
     }
 
@@ -148,9 +153,16 @@ impl NetworkInterconnectTask {
         conn: Connection,
         mut tx_outgoing_message: UnboundedReceiver<Bytes>,
     ) -> anyhow::Result<()> {
-        while let Some(bytes) = tx_outgoing_message.recv().await {
+        let mut buf;
+        while {
+            buf = Vec::new();
+            tx_outgoing_message.recv_many(&mut buf, usize::MAX).await > 0
+        } {
             let mut send = conn.open_uni().await?;
-            send.write_all(&bytes).await?;
+            send.write_all_chunks(&mut buf).await?;
+            if BATCH {
+                sleep(Duration::from_millis(1)).await
+            }
         }
         Ok(())
     }

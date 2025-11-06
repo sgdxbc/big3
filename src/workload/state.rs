@@ -8,6 +8,7 @@ use hdrhistogram::{
     Histogram,
     serialization::{Serializer as _, V2Serializer},
 };
+use log::info;
 use rand::{Rng, RngCore as _, rng};
 
 use crate::{
@@ -56,6 +57,13 @@ impl<C> Workload<C> {
                 scrape_state,
                 workload_index,
             )),
+        }
+    }
+
+    pub fn log_metrics(&self) {
+        match self {
+            Workload::Ycsb(w) => w.log_metrics(),
+            Workload::Utxo(_w) => { /* TODO */ }
         }
     }
 }
@@ -128,6 +136,16 @@ impl<C> YcsbWorkload<C> {
             scrape_state,
             working: Default::default(),
         }
+    }
+
+    fn log_metrics(&self) {
+        let now = Instant::now();
+        let max_latency = self.working.values().map(|state| now - state.start).max();
+        info!(
+            "YCSB Workload Metrics: Ongoing Requests: {}, Max Latency: {:?}",
+            self.working.len(),
+            max_latency
+        );
     }
 }
 
