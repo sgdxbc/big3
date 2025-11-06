@@ -1,4 +1,7 @@
-use std::{cmp::Reverse, collections::BinaryHeap};
+use std::{
+    cmp::Reverse,
+    collections::{BinaryHeap, VecDeque},
+};
 
 use bincode::{Decode, Encode};
 use rustc_hash::FxHashMap;
@@ -12,7 +15,7 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    common::{ClientId, ClientSeq, NodeIndex, Reply},
+    common::{ClientId, ClientSeq, NodeIndex, Reply, Request},
     consensus::Block,
     network::server::NetworkOutgoingHandle,
     schema,
@@ -81,15 +84,37 @@ impl ExecuteSourceHandle {
     }
 }
 
+pub struct ExecuteConfig {
+    num_faulty_nodes: NodeIndex,
+    node_index: NodeIndex,
+    num_max_concurrent_fetches: u32,
+}
+
+impl From<&schema::ReplicaTask> for ExecuteConfig {
+    fn from(config: &schema::ReplicaTask) -> Self {
+        Self {
+            num_faulty_nodes: config.config.num_faulty_nodes,
+            node_index: config.node_index,
+            num_max_concurrent_fetches: 10_000,
+        }
+    }
+}
+
 pub struct ExecuteSourceTask<Op> {
     pub channels: ExecuteSourceChannels,
     tx_fetch: flume::Sender<(Vec<u8>, oneshot::Sender<Option<Vec<u8>>>)>,
     sched: ExecuteSchedHandle<Op>,
+
+    config: ExecuteConfig,
+
+    fetch_version: u64,
+    post_version: u64,
+    pending_requests: VecDeque<Request>,
 }
 
 enum ExecuteSchedEvent<Op> {
     RequestState(RequestState<Op>),
-    PostDone(u64),
+    // PostDone(u64),
 }
 
 pub struct RequestState<Op> {
@@ -104,11 +129,16 @@ impl<Op> ExecuteSourceTask<Op> {
         channels: ExecuteSourceChannels,
         tx_fetch: flume::Sender<(Vec<u8>, oneshot::Sender<Option<Vec<u8>>>)>,
         sched: ExecuteSchedHandle<Op>,
+        config: ExecuteConfig,
     ) -> Self {
         Self {
             channels,
             tx_fetch,
             sched,
+            config,
+            fetch_version: 0,
+            post_version: 0,
+            pending_requests: Default::default(),
         }
     }
 }
@@ -134,31 +164,48 @@ impl<Op: AbstractOp + Send + 'static + Decode<()>> ExecuteSourceTask<Op> {
     fn handle_blocks(&mut self, blocks: Vec<Block>) {
         for block in blocks {
             for request in block.txns {
-                let op = bincode::decode_from_slice::<Op, _>(
-                    &request.command,
-                    bincode::config::standard(),
-                )
-                .unwrap()
-                .0;
-                let mut read_set = FxHashMap::default();
-                for key in op.read_set() {
-                    let (tx, rx) = oneshot::channel();
-                    let _ = self.tx_fetch.send((key.clone(), tx));
-                    read_set.insert(key, rx);
+                if self.fetch_version - self.post_version
+                    >= self.config.num_max_concurrent_fetches as u64
+                {
+                    self.pending_requests.push_back(request);
+                    continue;
                 }
-                let op_state = RequestState {
-                    op,
-                    read_set,
-                    client_id: request.client_id,
-                    client_seq: request.client_seq,
-                };
-                self.sched.emit(ExecuteSchedEvent::RequestState(op_state));
+
+                self.fetch(request);
             }
         }
     }
 
+    fn fetch(&mut self, request: Request) {
+        self.fetch_version += 1;
+
+        let op = bincode::decode_from_slice::<Op, _>(&request.command, bincode::config::standard())
+            .unwrap()
+            .0;
+        let mut read_set = FxHashMap::default();
+        for key in op.read_set() {
+            let (tx, rx) = oneshot::channel();
+            let _ = self.tx_fetch.send((key.clone(), tx));
+            read_set.insert(key, rx);
+        }
+        let op_state = RequestState {
+            op,
+            read_set,
+            client_id: request.client_id,
+            client_seq: request.client_seq,
+        };
+        self.sched.emit(ExecuteSchedEvent::RequestState(op_state));
+    }
+
     fn handle_post_done(&mut self, version: u64) {
-        self.sched.emit(ExecuteSchedEvent::PostDone(version));
+        // self.sched.emit(ExecuteSchedEvent::PostDone(version));
+        self.post_version = version;
+
+        while self.fetch_version - self.post_version < self.config.num_max_concurrent_fetches as u64
+            && let Some(request) = self.pending_requests.pop_front()
+        {
+            self.fetch(request);
+        }
     }
 }
 
@@ -196,20 +243,6 @@ impl<Op> ExecuteSchedChannels<Op> {
 impl<Op> ExecuteSchedHandle<Op> {
     fn emit(&self, event: ExecuteSchedEvent<Op>) {
         let _ = self.tx_request_state.send(event);
-    }
-}
-
-pub struct ExecuteConfig {
-    num_faulty_nodes: NodeIndex,
-    node_index: NodeIndex,
-}
-
-impl From<&schema::ReplicaTask> for ExecuteConfig {
-    fn from(config: &schema::ReplicaTask) -> Self {
-        Self {
-            num_faulty_nodes: config.config.num_faulty_nodes,
-            node_index: config.node_index,
-        }
     }
 }
 
@@ -272,7 +305,7 @@ where
                 ExecuteSchedEvent::RequestState(request_state) => {
                     self.handle_request_state(request_state).await?
                 }
-                ExecuteSchedEvent::PostDone(version) => self.handle_post_done(version),
+                // ExecuteSchedEvent::PostDone(version) => self.handle_post_done(version),
             }
         }
         Ok(())
@@ -316,6 +349,12 @@ where
         }
         let _ = self.tx_post.send(updates);
         // }
+
+        if self.current_version > self.config.num_max_concurrent_fetches as u64 {
+            self.handle_post_done(
+                self.current_version - self.config.num_max_concurrent_fetches as u64,
+            );
+        }
         Ok(())
     }
 

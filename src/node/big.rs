@@ -57,6 +57,7 @@ impl BigReplicaNodeTask {
             execute_source_channels,
             storage_channels.handle().tx_fetch,
             execute_sched_channels.handle(),
+            (&schema).into(),
         );
         let execute_sched = ExecuteSchedTask::new(
             execute_sched_channels,

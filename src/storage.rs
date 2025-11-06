@@ -78,7 +78,7 @@ impl From<&schema::ReplicaConfig> for BigStorageConfig {
             num_nodes: value.num_nodes,
             // num_faulty_nodes: value.num_faulty_nodes,
             num_stripes: 100,
-            num_secondary_nodes: 1,
+            num_secondary_nodes: 6,
         }
     }
 }
