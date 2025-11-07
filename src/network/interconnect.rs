@@ -5,9 +5,9 @@ use bytes::Bytes;
 use log::error;
 use quinn::{Connection, Endpoint, TransportConfig};
 use tokio::{
-    sync::mpsc::{Sender, UnboundedReceiver, UnboundedSender, unbounded_channel},
+    sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel},
     task::JoinSet,
-    time::sleep,
+    time::interval,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -18,7 +18,7 @@ use crate::{
 };
 
 pub struct ReceiveHandle<M> {
-    tx_incoming_message: Sender<M>,
+    tx_incoming_message: UnboundedSender<M>,
 }
 
 impl<M> Clone for ReceiveHandle<M> {
@@ -30,17 +30,17 @@ impl<M> Clone for ReceiveHandle<M> {
 }
 
 impl<M> ReceiveHandle<M> {
-    pub fn new(tx_incoming_message: Sender<M>) -> Self {
+    pub fn new(tx_incoming_message: UnboundedSender<M>) -> Self {
         Self {
             tx_incoming_message,
         }
     }
 
-    pub async fn incoming_message(&self, message: M) -> anyhow::Result<()>
+    pub fn incoming_message(&self, message: M) -> anyhow::Result<()>
     where
         M: Send + Sync + 'static,
     {
-        self.tx_incoming_message.send(message).await?;
+        self.tx_incoming_message.send(message)?;
         Ok(())
     }
 }
@@ -143,7 +143,7 @@ impl<const BATCH: bool> NetworkInterconnectTask<BATCH> {
             while !bytes.is_empty() {
                 let (message, len) =
                     bincode::decode_from_slice(bytes, bincode::config::standard())?;
-                let _ = receive.incoming_message(message).await;
+                let _ = receive.incoming_message(message);
                 bytes = &bytes[len..];
             }
         }
@@ -154,15 +154,16 @@ impl<const BATCH: bool> NetworkInterconnectTask<BATCH> {
         mut rx_outgoing_message: UnboundedReceiver<Bytes>,
     ) -> anyhow::Result<()> {
         let mut buf;
+        let mut interval = interval(Duration::from_millis(1));
         while {
+            if BATCH {
+                interval.tick().await;
+            }
             buf = Vec::new();
             rx_outgoing_message.recv_many(&mut buf, usize::MAX).await > 0
         } {
             let mut send = conn.open_uni().await?;
             send.write_all_chunks(&mut buf).await?;
-            if BATCH {
-                sleep(Duration::from_millis(1)).await
-            }
         }
         Ok(())
     }

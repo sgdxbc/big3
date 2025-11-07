@@ -10,7 +10,7 @@ use tokio::{
         Receiver, Sender, UnboundedReceiver, UnboundedSender, channel, unbounded_channel,
     },
     task::JoinSet,
-    time::sleep,
+    time::interval,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -199,15 +199,16 @@ impl<const BATCH: bool> NetworkConnectTask<BATCH> {
         mut rx_outgoing_message: UnboundedReceiver<Bytes>,
     ) -> anyhow::Result<()> {
         let mut buf;
+        let mut interval = interval(Duration::from_millis(1));
         while {
+            if BATCH {
+                interval.tick().await;
+            }
             buf = Vec::new();
             rx_outgoing_message.recv_many(&mut buf, usize::MAX).await > 0
         } {
             let mut send = conn.open_uni().await?;
             send.write_all_chunks(&mut buf).await?;
-            if BATCH {
-                sleep(Duration::from_millis(1)).await
-            }
         }
         Ok(())
     }

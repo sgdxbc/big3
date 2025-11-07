@@ -26,8 +26,8 @@ pub struct ConsensusChannels {
     tx_request: Sender<Request>,
     rx_request: Receiver<Request>,
 
-    tx_incoming_message: Sender<Message>,
-    rx_incoming_message: Receiver<Message>,
+    tx_incoming_message: UnboundedSender<Message>,
+    rx_incoming_message: UnboundedReceiver<Message>,
 
     #[allow(dead_code)]
     tx_output_response: UnboundedSender<(OutputId, ())>,
@@ -49,7 +49,7 @@ impl Default for ConsensusChannels {
 impl ConsensusChannels {
     pub fn new() -> Self {
         let (tx_request, rx_request) = channel(100);
-        let (tx_incoming_message, rx_incoming_message) = channel(100);
+        let (tx_incoming_message, rx_incoming_message) = unbounded_channel();
         let (tx_output_response, rx_output_response) = unbounded_channel();
         Self {
             tx_request,

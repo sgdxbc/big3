@@ -10,7 +10,7 @@ use tempfile::{TempDir, tempdir};
 use tokio::{
     process::Command,
     sync::{
-        mpsc::{Receiver, Sender, UnboundedReceiver, UnboundedSender, channel, unbounded_channel},
+        mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel},
         oneshot,
     },
     task::JoinSet,
@@ -121,8 +121,8 @@ pub struct BigStorageWorkerChannels {
     tx_key: flume::Sender<(FetchSeq, Vec<u8>, oneshot::Sender<Option<Vec<u8>>>)>,
     rx_key: flume::Receiver<(FetchSeq, Vec<u8>, oneshot::Sender<Option<Vec<u8>>>)>,
 
-    tx_message: Sender<Message>,
-    rx_message: Receiver<Message>,
+    tx_message: UnboundedSender<Message>,
+    rx_message: UnboundedReceiver<Message>,
 }
 
 impl Default for BigStorageWorkerChannels {
@@ -134,7 +134,7 @@ impl Default for BigStorageWorkerChannels {
 impl BigStorageWorkerChannels {
     pub fn new() -> Self {
         let (tx_key, rx_key) = flume::unbounded();
-        let (tx_message, rx_message) = channel(1000);
+        let (tx_message, rx_message) = unbounded_channel();
         Self {
             tx_key,
             rx_key,
@@ -325,7 +325,7 @@ impl BigStorageWorkersTask {
 
 pub struct BigStorageRetrieveWorkerTask {
     rx_fetch: flume::Receiver<(Vec<u8>, oneshot::Sender<Option<Vec<u8>>>)>,
-    rx_message: Receiver<Message>,
+    rx_message: UnboundedReceiver<Message>,
     tx_key: flume::Sender<(FetchSeq, Vec<u8>, oneshot::Sender<Option<Vec<u8>>>)>,
 
     config: BigStorageConfig,
@@ -339,7 +339,7 @@ pub struct BigStorageRetrieveWorkerTask {
 impl BigStorageRetrieveWorkerTask {
     pub fn new(
         rx_fetch: flume::Receiver<(Vec<u8>, oneshot::Sender<Option<Vec<u8>>>)>,
-        rx_message: Receiver<Message>,
+        rx_message: UnboundedReceiver<Message>,
         tx_key: flume::Sender<(FetchSeq, Vec<u8>, oneshot::Sender<Option<Vec<u8>>>)>,
         config: BigStorageConfig,
         shards: FxHashSet<u32>,
