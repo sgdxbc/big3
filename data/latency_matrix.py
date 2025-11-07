@@ -43,6 +43,6 @@ def matrix():
 
 latency_matrix = list(matrix())
 with open("control/src/configs/latency_matrix.rs", "w") as f:
-    f.write(f"pub const LATENCY_MATRIX: [[u32; {N}]; {N}] = ")
+    f.write(f"pub static LATENCY_MATRIX: [[u32; {N}]; {N}] = ")
     f.write(str(latency_matrix))
     f.write(";")

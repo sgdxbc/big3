@@ -195,6 +195,7 @@ async fn run_workload(
         let schema = big_schema::ReplicaTask {
             node_index: (i % shard_size as usize) as _,
             ips: ips[i / shard_size as usize].clone(),
+            latencies: None,
             config: big_schema::ReplicaConfig {
                 num_nodes: num_nodes(num_faulty_nodes),
                 num_faulty_nodes,

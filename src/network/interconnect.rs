@@ -7,7 +7,7 @@ use quinn::{Connection, Endpoint, TransportConfig};
 use tokio::{
     sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel},
     task::JoinSet,
-    time::interval,
+    time::{Instant, interval, timeout_at},
 };
 use tokio_util::sync::CancellationToken;
 
@@ -106,8 +106,8 @@ impl<const BATCH: bool> NetworkInterconnectTask<BATCH> {
                 let conn = endpoint.accept().await.unwrap().await?;
                 let mut client_id = [0; size_of::<NodeIndex>()];
                 conn.accept_uni().await?.read_exact(&mut client_id).await?;
-                let client_index = NodeIndex::from_le_bytes(client_id);
-                txs.insert(client_index, conn);
+                let node_index = NodeIndex::from_le_bytes(client_id);
+                txs.insert(node_index, conn);
             }
             anyhow::Ok(txs)
         };
@@ -118,7 +118,18 @@ impl<const BATCH: bool> NetworkInterconnectTask<BATCH> {
         for (node_index, conn) in txs_lower.into_iter().chain(txs_higher) {
             join_set.spawn(Self::run_connection_incoming(conn.clone(), receive.clone()));
             let (tx_outgoing, rx_outgoing) = unbounded_channel();
-            join_set.spawn(Self::run_connection_outgoing(conn, rx_outgoing));
+            if let Some(latencies) = &schema.latencies {
+                let latency = latencies[schema.node_index as usize][node_index as usize];
+                assert!(latency > 0);
+                assert!(latency < 500);
+                join_set.spawn(Self::run_connection_outgoing_with_latency(
+                    conn,
+                    rx_outgoing,
+                    latency,
+                ));
+            } else {
+                join_set.spawn(Self::run_connection_outgoing(conn, rx_outgoing));
+            }
             txs_outgoing_message.insert(node_index, tx_outgoing);
         }
         Ok(Self {
@@ -164,6 +175,34 @@ impl<const BATCH: bool> NetworkInterconnectTask<BATCH> {
         } {
             let mut send = conn.open_uni().await?;
             send.write_all_chunks(&mut buf).await?;
+        }
+        Ok(())
+    }
+
+    async fn run_connection_outgoing_with_latency(
+        conn: Connection,
+        mut rx_outgoing_message: UnboundedReceiver<Bytes>,
+        latency: u32,
+    ) -> anyhow::Result<()> {
+        let mut buckets = vec![Vec::new(); latency as _];
+        let mut bucket_index = 0;
+        let mut deadline = Instant::now();
+        while !rx_outgoing_message.is_closed() {
+            if !buckets[bucket_index].is_empty() {
+                let mut send = conn.open_uni().await?;
+                send.write_all_chunks(&mut buckets[bucket_index]).await?;
+            }
+            buckets[bucket_index].clear();
+            deadline += Duration::from_millis(1);
+            let _ = timeout_at(deadline, async {
+                while rx_outgoing_message
+                    .recv_many(&mut buckets[bucket_index], usize::MAX)
+                    .await
+                    > 0
+                {}
+            })
+            .await;
+            bucket_index = (bucket_index + 1) % latency as usize;
         }
         Ok(())
     }

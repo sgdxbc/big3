@@ -15,6 +15,7 @@ pub type ShardIndex = u8;
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ReplicaTask {
     pub ips: Vec<IpAddr>,
+    pub latencies: Option<Vec<Vec<u32>>>,
     pub config: ReplicaConfig,
     pub node_index: NodeIndex,
     pub storage: Storage,
