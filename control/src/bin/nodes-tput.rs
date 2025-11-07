@@ -2,7 +2,7 @@ use std::{fmt::Write as _, time::Duration};
 
 use big_control::{
     Cluster, Instance, PerformanceMetrics,
-    configs::{APP, NUM_KEYS, READ_RATIO, STORAGE},
+    configs::{APP, NETWORK, NUM_KEYS, READ_RATIO, STORAGE},
     load_all, run_endpoints, scrape_all, stop_all,
 };
 use big_schema::{Storage, Task};
@@ -21,22 +21,19 @@ fn num_nodes(num_faulty_nodes: u16) -> u16 {
 
 #[derive(Debug)]
 enum Setting {
-    YcsbFull,
-    YcsbSharded,
-    YcsbBig,
-    UtxoFull,
-    // UtxoSharded,
-    UtxoBig,
+    Full,
+    Sharded,
+    Big,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cluster = Cluster::from_terraform().await?;
 
-    let mut data = String::from("setting,num_nodes,tput,p50,p99,_notes\n");
+    let mut data = String::from("network,app,setting,num_nodes,tput,p50,p99,_notes\n");
     writeln!(
         &mut data,
-        ",,,,,\"num of keys = {}, read ratio = {}\"",
+        ",,,,,,,\"num of keys = {}, read ratio = {}\"",
         NUM_KEYS,
         if matches!(APP, big_schema::App::Ycsb) {
             READ_RATIO.to_string()
@@ -44,6 +41,7 @@ async fn main() -> anyhow::Result<()> {
             "n/a".to_string()
         }
     )?;
+    let t = format!("{:?},{:?}", NETWORK, APP);
     let s = |run: PerformanceMetrics| {
         format!(
             "{},{},{}",
@@ -64,8 +62,8 @@ async fn main() -> anyhow::Result<()> {
                 metrics = run(&cluster, num_faulty_nodes, 1).await?;
                 writeln!(
                     &mut data,
-                    "{:?},{},{}",
-                    Setting::YcsbFull,
+                    "{t},{:?},{},{}",
+                    Setting::Full,
                     num_nodes(num_faulty_nodes),
                     s(metrics)
                 )?;
@@ -75,8 +73,8 @@ async fn main() -> anyhow::Result<()> {
                 metrics = run(&cluster, 3, num_shards).await?;
                 writeln!(
                     &mut data,
-                    "{:?},{},{}",
-                    Setting::YcsbSharded,
+                    "{t},{:?},{},{}",
+                    Setting::Sharded,
                     num_nodes(3) * num_shards as u16,
                     s(metrics)
                 )?;
@@ -91,8 +89,8 @@ async fn main() -> anyhow::Result<()> {
                 metrics = run(&cluster, num_faulty_nodes, 1).await?;
                 writeln!(
                     &mut data,
-                    "{:?},{},{}",
-                    Setting::YcsbBig,
+                    "{t},{:?},{},{}",
+                    Setting::Big,
                     num_nodes(num_faulty_nodes),
                     s(metrics)
                 )?;
@@ -107,8 +105,8 @@ async fn main() -> anyhow::Result<()> {
                 metrics = run(&cluster, num_faulty_nodes, 1).await?;
                 writeln!(
                     &mut data,
-                    "{:?},{},{}",
-                    Setting::UtxoFull,
+                    "{t},{:?},{},{}",
+                    Setting::Full,
                     num_nodes(num_faulty_nodes),
                     s(metrics)
                 )?;
@@ -124,8 +122,8 @@ async fn main() -> anyhow::Result<()> {
                 metrics = run(&cluster, num_faulty_nodes, 1).await?;
                 writeln!(
                     &mut data,
-                    "{:?},{},{}",
-                    Setting::UtxoBig,
+                    "{t},{:?},{},{}",
+                    Setting::Big,
                     num_nodes(num_faulty_nodes),
                     s(metrics)
                 )?;
@@ -134,7 +132,10 @@ async fn main() -> anyhow::Result<()> {
     }
 
     create_dir_all("data").await?;
-    let mut data_file = File::create(format!("data/nodes-tput-{APP:?}-{STORAGE:?}.csv")).await?;
+    let mut data_file = File::create(format!(
+        "data/nodes-tput-{NETWORK:?}-{APP:?}-{STORAGE:?}.csv"
+    ))
+    .await?;
     data_file.write_all(data.as_bytes()).await?;
     Ok(())
 }

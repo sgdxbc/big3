@@ -21,6 +21,7 @@ use crate::{
     schema,
 };
 
+pub mod sharded_utxo;
 pub mod utxo;
 pub mod ycsb;
 
@@ -304,8 +305,7 @@ where
             match event {
                 ExecuteSchedEvent::RequestState(request_state) => {
                     self.handle_request_state(request_state).await?
-                }
-                // ExecuteSchedEvent::PostDone(version) => self.handle_post_done(version),
+                } // ExecuteSchedEvent::PostDone(version) => self.handle_post_done(version),
             }
         }
         Ok(())

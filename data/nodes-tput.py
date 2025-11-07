@@ -22,9 +22,6 @@ def plot(df, postfix):
     fig.savefig(f"data/nodes-tput-{postfix}.png")
 
 
-# df = pl.read_csv("data/nodes-tput-Ycsb-*.csv").filter(pl.col("_notes").is_null())
-# print(df)
-# plot(df, "ycsb")
-df = pl.read_csv("data/nodes-tput-Utxo-*.csv").filter(pl.col("_notes").is_null())
-print(df)
-plot(df, "utxo")
+df = pl.read_csv("data/nodes-tput-*.csv").filter(pl.col("_notes").is_null())
+print(df.filter(pl.col("network") == "Lan").filter(pl.col("app") == "Utxo"))
+plot(df, "lan-utxo")

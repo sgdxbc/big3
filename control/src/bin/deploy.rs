@@ -61,22 +61,20 @@ async fn build(instance: &Instance) -> anyhow::Result<()> {
         .await?;
     anyhow::ensure!(status.success());
     let status = Command::new("rsync")
-        .args([
-            "-avz",
-            "--delete",
-            "--exclude",
-            ".git",
-            "--exclude",
-            ".venv",
-            "--exclude",
-            "target",
-            "--exclude",
-            "control/terraform",
-            "--exclude",
-            "log",
-            "./",
-            &format!("{}:{BUILD_DIR}/", instance.public_dns),
-        ])
+        .args(["-avz", "--delete"])
+        .args(
+            [
+                ".git",
+                ".venv",
+                "target",
+                "control/terraform",
+                "log",
+                "data",
+            ]
+            .into_iter()
+            .flat_map(|d| ["--exclude", d]),
+        )
+        .args(["./", &format!("{}:{BUILD_DIR}/", instance.public_dns)])
         .status()
         .await?;
     anyhow::ensure!(status.success());

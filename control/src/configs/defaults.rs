@@ -13,3 +13,10 @@ pub const NUM_SHARDS: u8 = 1;
 pub const LIVE_DURATION: Duration = Duration::from_secs(10);
 
 include!("latency_matrix.rs");
+
+#[derive(Debug)]
+pub enum Network {
+    Lan,
+    Wan,
+}
+pub const NETWORK: Network = Network::Lan;
