@@ -20,3 +20,12 @@ pub enum Network {
     Wan,
 }
 pub const NETWORK: Network = Network::Lan;
+
+impl Network {
+    pub fn to_latencies(self) -> Option<Vec<Vec<u32>>> {
+        match self {
+            Network::Lan => None,
+            Network::Wan => Some(LATENCY_MATRIX.iter().map(|row| row.to_vec()).collect()),
+        }
+    }
+}

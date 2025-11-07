@@ -3,8 +3,8 @@ use std::time::Duration;
 use big_control::{
     Cluster, Instance,
     configs::{
-        APP, LIVE_DURATION, NUM_CONCURRENT, NUM_FAULTY_NODES, NUM_KEYS, NUM_SHARDS, READ_RATIO,
-        STORAGE, num_nodes,
+        APP, LIVE_DURATION, NETWORK, NUM_CONCURRENT, NUM_FAULTY_NODES, NUM_KEYS, NUM_SHARDS,
+        READ_RATIO, STORAGE, num_nodes,
     },
     load_all, run_endpoints, scrape_all, stop_all,
 };
@@ -67,7 +67,7 @@ async fn run_workload(
         let schema = big_schema::ReplicaTask {
             node_index: (i % shard_size as usize) as _,
             ips: ips[i / shard_size as usize].clone(),
-            latencies: None,
+            latencies: NETWORK.to_latencies(),
             config: big_schema::ReplicaConfig {
                 num_nodes: num_nodes(),
                 num_faulty_nodes: NUM_FAULTY_NODES,

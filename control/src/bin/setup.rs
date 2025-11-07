@@ -1,5 +1,7 @@
+use std::time::Duration;
+
 use big_control::{Cluster, Instance};
-use tokio::task::JoinSet;
+use tokio::{task::JoinSet, time::sleep};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -37,19 +39,29 @@ async fn setup_build(instance: &Instance) -> anyhow::Result<()> {
 async fn setup_storage(instance: &Instance) -> anyhow::Result<()> {
     let status = instance.ssh().arg("mount | grep /tmp").status().await?;
     if !status.success() {
-        let output = instance
-            .ssh()
-            .arg(
-                [
-                    "sudo mkfs.xfs -f /dev/nvme1n1",
-                    "sudo mount -o discard /dev/nvme1n1 /tmp",
-                    "sudo chmod 777 /tmp",
-                ]
-                .join(" && "),
-            )
-            .output()
-            .await?;
-        if !output.status.success() {
+        loop {
+            let output = instance
+                .ssh()
+                .arg(
+                    [
+                        "sudo mkfs.xfs -f /dev/nvme1n1",
+                        "sudo mount -o discard /dev/nvme1n1 /tmp",
+                        "sudo chmod 777 /tmp",
+                    ]
+                    .join(" && "),
+                )
+                .output()
+                .await?;
+            if output.status.success() {
+                break;
+            }
+            if String::from_utf8_lossy(&output.stderr).contains("Device or resource busy") {
+                println!("{} rebooting to clear busy device", instance.public_dns);
+                let status = instance.ssh().arg("sudo reboot").status().await?;
+                anyhow::ensure!(status.success(), "{} reboot failed", instance.public_dns);
+                sleep(Duration::from_secs(30)).await;
+                continue;
+            }
             anyhow::bail!(
                 "{} storage setup failed: {}",
                 instance.public_dns,

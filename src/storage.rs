@@ -1,6 +1,7 @@
 use std::{
     hash::{BuildHasher as _, BuildHasherDefault, DefaultHasher},
     sync::Arc,
+    time::Duration,
 };
 
 use rand::{SeedableRng as _, rngs::StdRng, seq::IteratorRandom as _};
@@ -14,6 +15,7 @@ use tokio::{
         oneshot,
     },
     task::JoinSet,
+    time::sleep,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -270,6 +272,7 @@ impl BigStorageWorkersTask {
             res??;
         }
         // stats if any
+        sleep(Duration::from_millis(100)).await;
         self.temp_dir.close()?;
         Ok(())
     }

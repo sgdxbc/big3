@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use rocksdb::{DB, WriteBatch};
 use tempfile::{TempDir, tempdir};
@@ -9,6 +9,7 @@ use tokio::{
         oneshot,
     },
     task::JoinSet,
+    time::sleep,
 };
 
 use crate::{common::PREFILL_PATH, storage::StorageWorkersChannels};
@@ -73,6 +74,7 @@ impl StorageWorkersTask {
             res??;
         }
         // stats if any
+        sleep(Duration::from_millis(100)).await;
         self.temp_dir.close()?;
         Ok(())
     }

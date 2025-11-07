@@ -186,7 +186,7 @@ impl<C> Bullshark<C> {
         }
     }
 
-    const MAX_BLOCK_TXNS: usize = 5_000;
+    const MAX_BLOCK_TXNS: usize = 100_000;
 }
 
 impl<C: BullsharkContext> Bullshark<C> {

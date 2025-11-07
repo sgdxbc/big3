@@ -119,8 +119,7 @@ impl<const BATCH: bool> NetworkInterconnectTask<BATCH> {
             join_set.spawn(Self::run_connection_incoming(conn.clone(), receive.clone()));
             let (tx_outgoing, rx_outgoing) = unbounded_channel();
             if let Some(latencies) = &schema.latencies {
-                let latency = latencies[schema.node_index as usize][node_index as usize];
-                assert!(latency > 0);
+                let latency = latencies[schema.node_index as usize][node_index as usize].max(1);
                 assert!(latency < 500);
                 join_set.spawn(Self::run_connection_outgoing_with_latency(
                     conn,

@@ -2,7 +2,7 @@ use std::{fmt::Write as _, time::Duration};
 
 use big_control::{
     Cluster, Instance, PerformanceMetrics,
-    configs::{APP, NETWORK, NUM_KEYS, READ_RATIO, STORAGE},
+    configs::{APP, NETWORK, NUM_KEYS, Network, READ_RATIO, STORAGE},
     load_all, run_endpoints, scrape_all, stop_all,
 };
 use big_schema::{Storage, Task};
@@ -220,10 +220,13 @@ async fn run_workload(
                 num_faulty_nodes,
             },
             workload_config: big_schema::ClientWorkloadConfig {
-                num_concurrent: match (STORAGE, num_shards) {
-                    (Storage::Full, 1) => 1000,
-                    (Storage::Big, 1) => 1000,
-                    (Storage::Full, _) => todo!(),
+                num_concurrent: match (NETWORK, STORAGE, num_shards) {
+                    (Network::Lan, Storage::Full, 1) => 1000,
+                    (Network::Lan, Storage::Big, 1) => 1000,
+                    (Network::Lan, Storage::Full, _) => 1000 * num_shards as u32,
+                    (Network::Wan, Storage::Full, 1) => 40_000,
+                    (Network::Wan, Storage::Big, 1) => 60_000,
+                    (Network::Wan, Storage::Full, _) => 30_000 * num_shards as u32,
                     _ => unimplemented!(),
                 },
                 app: match APP {
