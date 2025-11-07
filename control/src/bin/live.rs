@@ -6,12 +6,11 @@ use big_control::{
         APP, LIVE_DURATION, NETWORK, NUM_CONCURRENT, NUM_FAULTY_NODES, NUM_KEYS, NUM_SHARDS,
         READ_RATIO, STORAGE, num_nodes,
     },
-    load_all, run_endpoints, scrape_all, stop_all,
+    load_all, run_endpoints, scrape_all, start_all, stop_all,
 };
 use big_schema::Task;
 use reqwest::Client;
 use tokio::{
-    task::JoinSet,
     time::{Instant, sleep, sleep_until},
     try_join,
 };
@@ -134,21 +133,5 @@ async fn run_workload(
     println!("stop servers");
     stop_all(server_instances, control_client.clone()).await?;
     println!("done");
-    Ok(())
-}
-
-async fn start_all(
-    instances: impl IntoIterator<Item = &Instance>,
-    control_client: Client,
-) -> anyhow::Result<()> {
-    let mut tasks = JoinSet::new();
-    for instance in instances {
-        let client = control_client.clone();
-        let url = format!("http://{}:3000/start", instance.public_dns);
-        tasks.spawn(async move { client.post(url).send().await });
-    }
-    while let Some(result) = tasks.join_next().await {
-        result??.error_for_status()?;
-    }
     Ok(())
 }

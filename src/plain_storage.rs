@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
 use rocksdb::{DB, WriteBatch};
 use tempfile::{TempDir, tempdir};
@@ -9,7 +9,6 @@ use tokio::{
         oneshot,
     },
     task::JoinSet,
-    time::sleep,
 };
 
 use crate::{common::PREFILL_PATH, storage::StorageWorkersChannels};
@@ -66,16 +65,22 @@ impl StorageWorkersTask {
             let rx_get = self.channels.rx_fetch.clone();
             join_set.spawn_blocking(move || Self::get_worker(db, rx_get));
         }
-        let db = db.clone();
-        join_set.spawn_blocking(move || {
-            Self::write_worker(db, self.channels.rx_post, self.tx_post_done)
-        });
+        {
+            let db = db.clone();
+            join_set.spawn_blocking(move || {
+                Self::write_worker(db, self.channels.rx_post, self.tx_post_done)
+            });
+        }
         while let Some(res) = join_set.join_next().await {
             res??;
         }
         // stats if any
-        sleep(Duration::from_millis(100)).await;
-        self.temp_dir.close()?;
+        // sleep(Duration::from_millis(500)).await;
+        // self.temp_dir.close()?;
+        let db = Arc::into_inner(db);
+        assert!(db.is_some());
+        drop(db);
+        DB::destroy(&Default::default(), self.temp_dir.keep().as_path())?;
         Ok(())
     }
 

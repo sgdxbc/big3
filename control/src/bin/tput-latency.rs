@@ -29,10 +29,10 @@ enum Setting {
 async fn main() -> anyhow::Result<()> {
     let cluster = Cluster::from_terraform().await?;
 
-    let mut data = String::from("network,app,setting,num_nodes,tput,p50,p99,_notes\n");
+    let mut data = String::from("network,app,setting,num_nodes,tput,p50,p99,_notes,_ignore\n");
     writeln!(
         &mut data,
-        ",,,,,,,\"num of keys = {}, read ratio = {}\"",
+        ",,,,,,,\"num of keys = {}, read ratio = {}\",true",
         NUM_KEYS,
         if matches!(APP, big_schema::App::Ycsb) {
             READ_RATIO.to_string()
@@ -53,78 +53,97 @@ async fn main() -> anyhow::Result<()> {
     let mut metrics;
     match (APP, STORAGE) {
         (big_schema::App::Ycsb, Storage::Full) => {
-            for num_faulty_nodes in [1, 3, 8, 13, 18, 23, 28, 33] {
-                println!(
-                    "running YCSB Full with num_faulty_nodes = {}",
-                    num_faulty_nodes
-                );
-                metrics = run(&cluster, num_faulty_nodes, 1).await?;
+            for &num_concurrent in match NETWORK {
+                Network::Lan => &[0, 10, 50, 100, 200, 300, 500, 1000, 2000, 4000][..],
+                Network::Wan => &[
+                    0, 3000, 6000, 10_000, 13_000, 16_000, 20_000, 30_000, 40_000,
+                ],
+            } {
+                println!("running YCSB Full with num_concurrent = {}", num_concurrent);
+                metrics = run(&cluster, 33, 1, num_concurrent).await?;
                 writeln!(
                     &mut data,
-                    "{t},{:?},{},{}",
+                    "{t},{:?},{},{},\"concurrent = {}\"",
                     Setting::Full,
-                    num_nodes(num_faulty_nodes),
-                    s(metrics)
+                    num_nodes(33),
+                    s(metrics),
+                    num_concurrent
                 )?;
             }
-            for num_shards in [2, 4, 6, 8, 10] {
-                println!("running YCSB Full with num_shards = {}", num_shards,);
-                metrics = run(&cluster, 3, num_shards).await?;
+            for &num_concurrent in match NETWORK {
+                Network::Lan => &[0, 1000, 2000, 4000][..],
+                Network::Wan => &[0, 10_000, 20_000, 30_000, 40_000],
+            } {
+                println!(
+                    "running YCSB Full Sharded with num_concurrent = {}",
+                    num_concurrent
+                );
+                metrics = run(&cluster, 3, 10, num_concurrent).await?;
                 writeln!(
                     &mut data,
-                    "{t},{:?},{},{}",
+                    "{t},{:?},{},{},\"concurrent = {}\"",
                     Setting::Sharded,
-                    num_nodes(3) * num_shards as u16,
-                    s(metrics)
+                    num_nodes(3) * 10,
+                    s(metrics),
+                    num_concurrent
                 )?;
             }
         }
         (big_schema::App::Ycsb, Storage::Big) => {
-            for num_faulty_nodes in [1, 3, 8, 13, 18, 23, 28, 33] {
-                println!(
-                    "running YCSB Big with num_faulty_nodes = {}",
-                    num_faulty_nodes
-                );
-                metrics = run(&cluster, num_faulty_nodes, 1).await?;
+            for &num_concurrent in match NETWORK {
+                Network::Lan => &[0, 50, 100, 300, 600, 1000, 2000, 4000][..],
+                Network::Wan => &[
+                    0, 4000, 6000, 8000, 10_000, 13_000, 16_000, 20_000, 30_000, 40_000,
+                ],
+            } {
+                println!("running YCSB Big with num_concurrent = {}", num_concurrent);
+                metrics = run(&cluster, 33, 1, num_concurrent).await?;
                 writeln!(
                     &mut data,
-                    "{t},{:?},{},{}",
+                    "{t},{:?},{},{},\"concurrent = {}\"",
                     Setting::Big,
-                    num_nodes(num_faulty_nodes),
-                    s(metrics)
+                    num_nodes(33),
+                    s(metrics),
+                    num_concurrent
                 )?;
             }
         }
         (big_schema::App::Utxo, Storage::Full) => {
-            for num_faulty_nodes in [1, 3, 8, 13, 18, 23, 28, 33] {
-                println!(
-                    "running UTXO Full with num_faulty_nodes = {}",
-                    num_faulty_nodes
-                );
-                metrics = run(&cluster, num_faulty_nodes, 1).await?;
+            for &num_concurrent in match NETWORK {
+                Network::Lan => &[0, 10, 50, 100, 200, 300, 500, 1000, 2000, 4000][..],
+                Network::Wan => &[
+                    0, 4000, 6000, 8000, 10_000, 13_000, 16_000, 20_000, 30_000, 40_000,
+                ],
+            } {
+                println!("running UTXO Full with num_concurrent = {}", num_concurrent);
+                metrics = run(&cluster, 33, 1, num_concurrent).await?;
                 writeln!(
                     &mut data,
-                    "{t},{:?},{},{}",
+                    "{t},{:?},{},{},\"concurrent = {}\"",
                     Setting::Full,
-                    num_nodes(num_faulty_nodes),
-                    s(metrics)
+                    num_nodes(33),
+                    s(metrics),
+                    num_concurrent
                 )?;
             }
             // TODO sharded UTXO
         }
         (big_schema::App::Utxo, Storage::Big) => {
-            for num_faulty_nodes in [1, 3, 8, 13, 18, 23, 28, 33] {
-                println!(
-                    "running UTXO Big with num_faulty_nodes = {}",
-                    num_faulty_nodes
-                );
-                metrics = run(&cluster, num_faulty_nodes, 1).await?;
+            for &num_concurrent in match NETWORK {
+                Network::Lan => &[0, 10, 50, 100, 200, 300, 500, 1000, 2000, 4000][..],
+                Network::Wan => &[
+                    0, 4000, 6000, 8000, 10_000, 13_000, 16_000, 20_000, 30_000, 40_000,
+                ],
+            } {
+                println!("running UTXO Big with num_concurrent = {}", num_concurrent);
+                metrics = run(&cluster, 33, 1, num_concurrent).await?;
                 writeln!(
                     &mut data,
-                    "{t},{:?},{},{}",
+                    "{t},{:?},{},{},\"concurrent = {}\"",
                     Setting::Big,
-                    num_nodes(num_faulty_nodes),
-                    s(metrics)
+                    num_nodes(33),
+                    s(metrics),
+                    num_concurrent
                 )?;
             }
         }
@@ -132,7 +151,7 @@ async fn main() -> anyhow::Result<()> {
 
     create_dir_all("data").await?;
     let mut data_file = File::create(format!(
-        "data/nodes-tput-{NETWORK:?}-{APP:?}-{STORAGE:?}.csv"
+        "data/tput-latency-{NETWORK:?}-{APP:?}-{STORAGE:?}.csv"
     ))
     .await?;
     data_file.write_all(data.as_bytes()).await?;
@@ -143,20 +162,24 @@ async fn run(
     cluster: &Cluster,
     num_faulty_nodes: u16,
     num_shards: u8,
+    num_concurrent: u32,
 ) -> anyhow::Result<PerformanceMetrics> {
     let num_running_nodes = (2 * num_faulty_nodes + 1) * num_shards as u16;
-    let endpoints = run_endpoints(
-        [
-            &cluster.servers[..num_running_nodes as usize],
-            &cluster.clients,
-        ]
-        .concat(),
-    );
+
+    let (clients, num_concurrent) = if num_concurrent == 0 {
+        (&cluster.clients[..1], 1)
+    } else {
+        (&cluster.clients[..], num_concurrent)
+    };
+
+    let endpoints =
+        run_endpoints([&cluster.servers[..num_running_nodes as usize], &clients].concat());
     let workload = run_workload(
         &cluster.servers[..num_running_nodes as usize],
-        &cluster.clients,
+        &clients,
         num_faulty_nodes,
         num_shards,
+        num_concurrent,
     );
     let workload = async {
         let result = workload.await;
@@ -172,6 +195,7 @@ async fn run_workload(
     client_instances: &[Instance],
     num_faulty_nodes: u16,
     num_shards: u8,
+    num_concurrent: u32,
 ) -> anyhow::Result<PerformanceMetrics> {
     if num_shards > 1 {
         assert!(matches!(STORAGE, Storage::Full));
@@ -219,15 +243,7 @@ async fn run_workload(
                 num_faulty_nodes,
             },
             workload_config: big_schema::ClientWorkloadConfig {
-                num_concurrent: match (NETWORK, STORAGE, num_shards) {
-                    (Network::Lan, Storage::Full, 1) => 1000,
-                    (Network::Lan, Storage::Big, 1) => 1000,
-                    (Network::Lan, Storage::Full, _) => 1000 * num_shards as u32,
-                    (Network::Wan, Storage::Full, 1) => 40_000,
-                    (Network::Wan, Storage::Big, 1) => 60_000,
-                    (Network::Wan, Storage::Full, _) => 30_000 * num_shards as u32,
-                    _ => unimplemented!(),
-                },
+                num_concurrent,
                 app: match APP {
                     big_schema::App::Ycsb => {
                         big_schema::WorkloadConfig::Ycsb(big_schema::YcsbWorkloadConfig {

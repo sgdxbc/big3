@@ -8,7 +8,7 @@ use tokio::{
     fs,
     process::Command,
     task::JoinSet,
-    time::{Instant, timeout_at},
+    time::{Instant, sleep, timeout_at},
 };
 
 pub mod configs;
@@ -132,6 +132,7 @@ pub async fn load_all(
                     Err(err) if err.is_request() && retry > 0 => {
                         println!("load request failed: {}. retrying...", err);
                         retry -= 1;
+                        sleep(Duration::from_millis(100)).await;
                     }
                     Err(err) => Err(err)?,
                 }
@@ -220,4 +221,20 @@ pub async fn scrape_all(
         p95: agg_p95,
         p99: agg_p99,
     })
+}
+
+pub async fn start_all(
+    instances: impl IntoIterator<Item = &Instance>,
+    control_client: Client,
+) -> anyhow::Result<()> {
+    let mut tasks = JoinSet::new();
+    for instance in instances {
+        let client = control_client.clone();
+        let url = format!("http://{}:3000/start", instance.public_dns);
+        tasks.spawn(async move { client.post(url).send().await });
+    }
+    while let Some(result) = tasks.join_next().await {
+        result??.error_for_status()?;
+    }
+    Ok(())
 }
