@@ -86,6 +86,7 @@ impl ClientNodeTask {
                 scrape_state.clone(),
                 &schema.workload_config.app,
                 num_concurrent,
+                schema.workload_config.num_shards,
                 schema.node_index as u32 * num_group + group_index,
             )?;
             workloads.push(client_worker);

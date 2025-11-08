@@ -373,8 +373,8 @@ where
 }
 
 pub enum GeneralExecuteSourceTask {
-    Ycsb(ExecuteSourceTask<crate::execute::ycsb::Op>),
-    Utxo(ExecuteSourceTask<crate::execute::utxo::Op>),
+    Ycsb(ExecuteSourceTask<crate::execute::ycsb::YcsbOp>),
+    Utxo(ExecuteSourceTask<crate::execute::utxo::UtxoOp>),
 }
 
 impl GeneralExecuteSourceTask {

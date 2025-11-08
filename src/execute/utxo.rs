@@ -8,19 +8,19 @@ pub type TxnId = [u8; 32];
 pub type OutputIndex = (TxnId, u32);
 pub type Output = ([u8; 32], u64);
 
-#[derive(Encode, Decode)]
-pub struct Op {
+#[derive(Encode, Decode, Clone)]
+pub struct UtxoOp {
     pub inputs: Vec<OutputIndex>,
     pub outputs: Vec<Output>,
 }
 
 #[derive(Encode, Decode)]
-pub enum Res {
+pub enum UtxoRes {
     Ok,
     Invalid,
 }
 
-impl Op {
+impl UtxoOp {
     pub fn id(&self) -> TxnId {
         use sha2::{Digest as _, Sha256};
 
@@ -41,7 +41,7 @@ pub fn key(output_index: &OutputIndex) -> Vec<u8> {
     [&output_index.0[..], &output_index.1.to_be_bytes()].concat()
 }
 
-impl AbstractOp for Op {
+impl AbstractOp for UtxoOp {
     fn read_set(&self) -> Vec<Vec<u8>> {
         self.inputs.iter().map(key).collect()
     }
@@ -50,8 +50,8 @@ impl AbstractOp for Op {
 pub struct UtxoExecute;
 
 impl AbstractExecute for UtxoExecute {
-    type Op = Op;
-    type Res = Res;
+    type Op = UtxoOp;
+    type Res = UtxoRes;
 
     fn execute(
         &mut self,
@@ -62,7 +62,7 @@ impl AbstractExecute for UtxoExecute {
             // TODO check signature script
             if !state.contains_key(&key(input)) {
                 warn!("invalid UTXO");
-                return (Res::Invalid, Vec::new());
+                return (UtxoRes::Invalid, Vec::new());
             }
         }
         // TODO check sum(input) >= sum(output)
@@ -77,11 +77,11 @@ impl AbstractExecute for UtxoExecute {
                 Some([&pub_key[..], &amount.to_le_bytes()].concat()),
             ));
         }
-        (Res::Ok, updates)
+        (UtxoRes::Ok, updates)
     }
 }
 
-impl Op {
+impl UtxoOp {
     pub fn prefilled(index: u64) -> Self {
         Self {
             inputs: Vec::new(),

@@ -18,6 +18,8 @@ pub struct ReplicaTask {
     pub latencies: Option<Vec<Vec<u32>>>,
     pub config: ReplicaConfig,
     pub node_index: NodeIndex,
+    pub num_shards: ShardIndex,
+    pub shard_index: ShardIndex,
     pub storage: Storage,
     pub app: App,
 }
@@ -71,6 +73,7 @@ pub struct ClientConfig {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ClientWorkloadConfig {
     pub num_concurrent: u32,
+    pub num_shards: ShardIndex,
     pub app: WorkloadConfig,
 }
 
@@ -96,7 +99,6 @@ pub enum WorkloadConfig {
 pub struct YcsbWorkloadConfig {
     pub num_keys: u64,
     pub read_ratio: f64,
-    pub num_shards: ShardIndex,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

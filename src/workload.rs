@@ -70,6 +70,7 @@ impl WorkloadTask {
         scrape_state: Arc<Mutex<ClientScrapeState>>,
         schema: &schema::WorkloadConfig,
         num_concurrent: u32,
+        num_shards: schema::ShardIndex,
         workload_index: u32,
     ) -> anyhow::Result<Self> {
         let context = ClientWorkerTaskContext::new(client_worker_channels.invoke_contexts(clients));
@@ -78,6 +79,7 @@ impl WorkloadTask {
             scrape_state,
             schema,
             num_concurrent,
+            num_shards,
             workload_index,
         );
         Ok(Self::new(client_worker_channels, state))
