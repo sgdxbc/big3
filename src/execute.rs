@@ -375,6 +375,7 @@ where
 pub enum GeneralExecuteSourceTask {
     Ycsb(ExecuteSourceTask<crate::execute::ycsb::YcsbOp>),
     Utxo(ExecuteSourceTask<crate::execute::utxo::UtxoOp>),
+    ShardedUtxo(ExecuteSourceTask<crate::execute::sharded_utxo::ShardedUtxoOp>),
 }
 
 impl GeneralExecuteSourceTask {
@@ -382,6 +383,7 @@ impl GeneralExecuteSourceTask {
         match self {
             GeneralExecuteSourceTask::Ycsb(task) => task.run(stop).await,
             GeneralExecuteSourceTask::Utxo(task) => task.run(stop).await,
+            GeneralExecuteSourceTask::ShardedUtxo(task) => task.run(stop).await,
         }
     }
 }
@@ -389,6 +391,7 @@ impl GeneralExecuteSourceTask {
 pub enum GeneralExecuteSchedTask {
     Ycsb(ExecuteSchedTask<crate::execute::ycsb::YcsbExecute>),
     Utxo(ExecuteSchedTask<crate::execute::utxo::UtxoExecute>),
+    ShardedUtxo(ExecuteSchedTask<crate::execute::sharded_utxo::ShardedUtxoExecute>),
 }
 
 impl GeneralExecuteSchedTask {
@@ -396,6 +399,7 @@ impl GeneralExecuteSchedTask {
         match self {
             GeneralExecuteSchedTask::Ycsb(task) => task.run(stop).await,
             GeneralExecuteSchedTask::Utxo(task) => task.run(stop).await,
+            GeneralExecuteSchedTask::ShardedUtxo(task) => task.run(stop).await,
         }
     }
 }

@@ -93,6 +93,7 @@ impl BigReplicaNodeTask {
     }
 
     pub async fn load(schema: schema::ReplicaTask) -> anyhow::Result<Self> {
+        assert_eq!(schema.num_shards, 1);
         match &schema.app {
             schema::App::Ycsb => {
                 Self::load_inner(

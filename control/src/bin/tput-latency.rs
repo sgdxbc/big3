@@ -206,6 +206,9 @@ async fn run_workload(
     sleep(Duration::from_millis(2000)).await;
 
     let shard_size = 2 * num_faulty_nodes + 1;
+    assert!(server_instances.len().is_multiple_of(shard_size as usize));
+    let num_shards = (server_instances.len() / shard_size as usize) as _;
+
     let ips = server_instances
         .iter()
         .map(|instance| instance.private_ip)
@@ -216,9 +219,12 @@ async fn run_workload(
 
     println!("load servers");
     let replica_items = server_instances.iter().enumerate().map(|(i, instance)| {
+        let shard_index = (i / shard_size as usize) as _;
         let schema = big_schema::ReplicaTask {
             node_index: (i % shard_size as usize) as _,
-            ips: ips[i / shard_size as usize].clone(),
+            num_shards,
+            shard_index,
+            ips: ips[shard_index as usize].clone(),
             latencies: NETWORK.to_latencies(),
             config: big_schema::ReplicaConfig {
                 num_nodes: num_nodes(num_faulty_nodes),
@@ -244,12 +250,12 @@ async fn run_workload(
             },
             workload_config: big_schema::ClientWorkloadConfig {
                 num_concurrent,
+                num_shards,
                 app: match APP {
                     big_schema::App::Ycsb => {
                         big_schema::WorkloadConfig::Ycsb(big_schema::YcsbWorkloadConfig {
                             num_keys: NUM_KEYS,
                             read_ratio: READ_RATIO,
-                            num_shards,
                         })
                     }
                     big_schema::App::Utxo => {

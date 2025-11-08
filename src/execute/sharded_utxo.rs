@@ -6,7 +6,7 @@ use crate::{execute::utxo, schema};
 
 use super::{
     AbstractExecute, AbstractOp,
-    utxo::{OutputIndex, UtxoOp},
+    utxo::{OutputIndex, TxnId, UtxoOp},
 };
 
 #[derive(Encode, Decode)]
@@ -17,8 +17,8 @@ pub enum ShardedUtxoOp {
 
 #[derive(Encode, Decode)]
 pub enum ShardedUtxoRes {
-    Prepare(bool),
-    Committed,
+    Prepare(schema::ShardIndex, bool),
+    Committed(schema::ShardIndex),
 }
 
 impl AbstractOp for ShardedUtxoOp {
@@ -30,8 +30,7 @@ impl AbstractOp for ShardedUtxoOp {
     }
 }
 
-pub fn shard_of(num_shards: schema::ShardIndex, output_index: &OutputIndex) -> schema::ShardIndex {
-    let (txn_id, _) = output_index;
+pub fn shard_of(num_shards: schema::ShardIndex, txn_id: &TxnId) -> schema::ShardIndex {
     let x = u64::from_be_bytes([
         txn_id[0], txn_id[1], txn_id[2], txn_id[3], txn_id[4], txn_id[5], txn_id[6], txn_id[7],
     ]);
@@ -66,7 +65,7 @@ impl AbstractExecute for ShardedUtxoExecute {
         match op {
             ShardedUtxoOp::Prepare(op) => {
                 for input in &op.inputs {
-                    if shard_of(self.num_shards, input) != self.shard_index {
+                    if shard_of(self.num_shards, &input.0) != self.shard_index {
                         continue;
                     }
                     if !self.locked.contains(input)
@@ -78,16 +77,16 @@ impl AbstractExecute for ShardedUtxoExecute {
                             "UTXO prepare failed: input {:?} is missing or locked",
                             input
                         );
-                        return (ShardedUtxoRes::Prepare(false), vec![]);
+                        return (ShardedUtxoRes::Prepare(self.shard_index, false), vec![]);
                     }
                 }
                 for input in op.inputs {
-                    if shard_of(self.num_shards, &input) != self.shard_index {
+                    if shard_of(self.num_shards, &input.0) != self.shard_index {
                         continue;
                     }
                     self.locked.insert(input);
                 }
-                (ShardedUtxoRes::Prepare(true), vec![])
+                (ShardedUtxoRes::Prepare(self.shard_index, true), vec![])
             }
             ShardedUtxoOp::Commit(op, success) => {
                 for input in &op.inputs {
@@ -96,26 +95,25 @@ impl AbstractExecute for ShardedUtxoExecute {
                 let updates = if success {
                     let mut updates = vec![];
                     for input in &op.inputs {
-                        if shard_of(self.num_shards, input) != self.shard_index {
+                        if shard_of(self.num_shards, &input.0) != self.shard_index {
                             continue;
                         }
                         updates.push((utxo::key(input), None));
                     }
                     let txn_id = op.id();
-                    for (i, output) in op.outputs.into_iter().enumerate() {
-                        if shard_of(self.num_shards, &(txn_id, i as _)) != self.shard_index {
-                            continue;
+                    if shard_of(self.num_shards, &txn_id) == self.shard_index {
+                        for (i, output) in op.outputs.into_iter().enumerate() {
+                            updates.push((
+                                utxo::key(&(txn_id, i as _)),
+                                Some([&output.0[..], &output.1.to_le_bytes()].concat()),
+                            ));
                         }
-                        updates.push((
-                            utxo::key(&(txn_id, i as _)),
-                            Some([&output.0[..], &output.1.to_le_bytes()].concat()),
-                        ));
                     }
                     updates
                 } else {
                     vec![]
                 };
-                (ShardedUtxoRes::Committed, updates)
+                (ShardedUtxoRes::Committed(self.shard_index), updates)
             }
         }
     }

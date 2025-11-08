@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{Arc, Mutex},
     time::Instant,
 };
@@ -16,7 +16,7 @@ use crate::{
     execute::{
         self,
         sharded_utxo::{self, ShardedUtxoOp, ShardedUtxoRes},
-        utxo::{OutputIndex, UtxoOp, UtxoRes},
+        utxo::{OutputIndex, TxnId, UtxoOp, UtxoRes},
         ycsb::{VALUE_SIZE, YcsbConfig, YcsbOp},
     },
     schema,
@@ -194,13 +194,13 @@ pub struct UtxoWorkload<C, WS = UtxoWorkingState> {
     num_shards: schema::ShardIndex,
     scrape_state: Arc<Mutex<ClientScrapeState>>,
 
-    working: HashMap<InvokeId, WS>,
+    working: HashMap<TxnId, WS>,
+    invoke_txns: HashMap<InvokeId, TxnId>,
     output_pool: Vec<OutputIndex>,
 }
 
 pub struct UtxoWorkingState {
     start: Instant,
-    output_indexes: Vec<OutputIndex>,
 }
 
 impl<C, WS> UtxoWorkload<C, WS> {
@@ -230,6 +230,7 @@ impl<C, WS> UtxoWorkload<C, WS> {
             scrape_state,
             output_pool,
             working: Default::default(),
+            invoke_txns: Default::default(),
         }
     }
 }
@@ -242,8 +243,9 @@ impl<C: WorkloadContext> UtxoWorkload<C, UtxoWorkingState> {
     }
 
     pub fn on_invoke_response(&mut self, invoke_id: InvokeId, res: Vec<u8>) {
-        let working = self.working.remove(&invoke_id).expect("no ongoing work");
-        let res = bincode::decode_from_slice::<UtxoRes, _>(&res, bincode::config::standard())
+        let txn_id = self.invoke_txns.remove(&invoke_id).unwrap();
+        let working = self.working.remove(&txn_id).expect("no ongoing work");
+        let res = bincode::decode_from_slice(&res, bincode::config::standard())
             .expect("failed to decode response")
             .0;
         if matches!(res, UtxoRes::Ok) {
@@ -252,7 +254,7 @@ impl<C: WorkloadContext> UtxoWorkload<C, UtxoWorkingState> {
                 let mut scrape_state = self.scrape_state.lock().unwrap();
                 scrape_state.latency_histogram += latency.as_nanos() as u64;
             }
-            self.output_pool.extend(working.output_indexes);
+            self.output_pool.extend([(txn_id, 0)]);
         } else {
             // probably should not put the outputs back to the pool; retrying to spend them is
             // likely to fail again
@@ -273,12 +275,12 @@ impl<C: WorkloadContext> UtxoWorkload<C, UtxoWorkingState> {
         assert_eq!(self.num_shards, 1);
         let invoke_id = self.context.invoke(0, command);
         self.working.insert(
-            invoke_id,
+            txn_id,
             UtxoWorkingState {
                 start: Instant::now(),
-                output_indexes: vec![(txn_id, 0)],
             },
         );
+        self.invoke_txns.insert(invoke_id, txn_id);
     }
 }
 
@@ -289,8 +291,8 @@ pub struct ShardedUtxoWorkingState {
 }
 
 enum ShardedUtxoStatus {
-    Prepraring,
-    Committing(bool),
+    Preparing(HashSet<ShardIndex>, bool),
+    Committing(bool, HashSet<ShardIndex>),
 }
 
 impl<C: WorkloadContext> UtxoWorkload<C, ShardedUtxoWorkingState> {
@@ -301,51 +303,63 @@ impl<C: WorkloadContext> UtxoWorkload<C, ShardedUtxoWorkingState> {
     }
 
     pub fn on_invoke_response(&mut self, invoke_id: InvokeId, res: Vec<u8>) {
-        let working = self.working.remove(&invoke_id).expect("no ongoing work");
-        let res =
-            bincode::decode_from_slice::<ShardedUtxoRes, _>(&res, bincode::config::standard())
-                .expect("failed to decode response")
-                .0;
-        match (working.status, res) {
-            (ShardedUtxoStatus::Prepraring, ShardedUtxoRes::Prepare(success)) => {
-                let command = bincode::encode_to_vec(
-                    &ShardedUtxoOp::Commit(working.op.clone(), success),
-                    bincode::config::standard(),
-                )
-                .unwrap();
-                let invoke_id = self.context.invoke(
-                    sharded_utxo::shard_of(self.num_shards, &(working.op.id(), 0)),
-                    command,
-                );
-                self.working.insert(
-                    invoke_id,
-                    ShardedUtxoWorkingState {
-                        start: working.start,
-                        op: working.op,
-                        status: ShardedUtxoStatus::Committing(success),
-                    },
-                );
-            }
-            (ShardedUtxoStatus::Committing(success), ShardedUtxoRes::Committed) => {
-                if success {
-                    let latency = working.start.elapsed();
-                    {
-                        let mut scrape_state = self.scrape_state.lock().unwrap();
-                        scrape_state.latency_histogram += latency.as_nanos() as u64;
+        let txn_id = self.invoke_txns.remove(&invoke_id).unwrap();
+        let working = self.working.get_mut(&txn_id).expect("no ongoing work");
+        let res = bincode::decode_from_slice(&res, bincode::config::standard())
+            .expect("failed to decode response")
+            .0;
+        match (&mut working.status, res) {
+            (
+                ShardedUtxoStatus::Preparing(pending_shards, success),
+                ShardedUtxoRes::Prepare(shard, shard_success),
+            ) => {
+                pending_shards.remove(&shard);
+                *success &= shard_success;
+                if pending_shards.is_empty() {
+                    let command = bincode::encode_to_vec(
+                        &ShardedUtxoOp::Commit(working.op.clone(), *success),
+                        bincode::config::standard(),
+                    )
+                    .unwrap();
+                    let mut pending_shards = HashSet::new();
+                    for input in &working.op.inputs {
+                        let shard = sharded_utxo::shard_of(self.num_shards, &input.0);
+                        if pending_shards.insert(shard) {
+                            let invoke_id = self.context.invoke(shard, command.clone());
+                            self.invoke_txns.insert(invoke_id, txn_id);
+                        }
                     }
-                    self.output_pool.extend(
-                        working
-                            .op
-                            .outputs
-                            .iter()
-                            .enumerate()
-                            .map(|(i, _)| (working.op.id(), i as u32)),
-                    );
-                } else {
-                    // probably should not put the outputs back to the pool; retrying to spend them is
-                    // likely to fail again
+                    if *success {
+                        let shard = sharded_utxo::shard_of(self.num_shards, &working.op.id());
+                        if pending_shards.insert(shard) {
+                            let invoke_id = self.context.invoke(shard, command.clone());
+                            self.invoke_txns.insert(invoke_id, txn_id);
+                        }
+                    }
+                    working.status = ShardedUtxoStatus::Committing(*success, pending_shards);
+                }
+            }
+            (
+                ShardedUtxoStatus::Committing(success, pending_shards),
+                ShardedUtxoRes::Committed(shard),
+            ) => {
+                pending_shards.remove(&shard);
+                if pending_shards.is_empty() {
+                    if *success {
+                        let latency = working.start.elapsed();
+                        {
+                            let mut scrape_state = self.scrape_state.lock().unwrap();
+                            scrape_state.latency_histogram += latency.as_nanos() as u64;
+                        }
+                        self.output_pool
+                            .extend((0..working.op.outputs.len()).map(|i| (txn_id, i as _)));
+                    } else {
+                        // probably should not put the outputs back to the pool; retrying to spend them is
+                        // likely to fail again
+                    }
                 }
 
+                self.working.remove(&txn_id);
                 self.invoke();
             }
             _ => unimplemented!(),
@@ -354,28 +368,28 @@ impl<C: WorkloadContext> UtxoWorkload<C, ShardedUtxoWorkingState> {
 
     fn invoke(&mut self) {
         let i = rng().random_range(0..self.output_pool.len());
-        let output_index = self.output_pool.swap_remove(i);
+        let input = self.output_pool.swap_remove(i);
         let op = UtxoOp {
-            inputs: vec![output_index],
+            inputs: vec![input],
             outputs: vec![([0u8; 32], 0)],
         };
+        let txn_id = op.id();
         let command = bincode::encode_to_vec(
             &ShardedUtxoOp::Prepare(op.clone()),
             bincode::config::standard(),
         )
         .unwrap();
-        let invoke_id = self.context.invoke(
-            sharded_utxo::shard_of(self.num_shards, &output_index),
-            command,
-        );
+        let shard = sharded_utxo::shard_of(self.num_shards, &input.0);
+        let invoke_id = self.context.invoke(shard, command);
         self.working.insert(
-            invoke_id,
+            txn_id,
             ShardedUtxoWorkingState {
                 start: Instant::now(),
                 op,
-                status: ShardedUtxoStatus::Prepraring,
+                status: ShardedUtxoStatus::Preparing([shard].into(), true),
             },
         );
+        self.invoke_txns.insert(invoke_id, txn_id);
     }
 }
 
