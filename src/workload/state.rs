@@ -318,7 +318,7 @@ impl<C: WorkloadContext> UtxoWorkload<C, ShardedUtxoWorkingState> {
                 *success &= shard_success;
                 if pending_shards.is_empty() {
                     let command = bincode::encode_to_vec(
-                        &ShardedUtxoOp::Commit(working.op.clone(), *success),
+                        ShardedUtxoOp::Commit(working.op.clone(), *success),
                         bincode::config::standard(),
                     )
                     .unwrap();
@@ -378,7 +378,7 @@ impl<C: WorkloadContext> UtxoWorkload<C, ShardedUtxoWorkingState> {
         };
         let txn_id = op.id();
         let command = bincode::encode_to_vec(
-            &ShardedUtxoOp::Prepare(op.clone()),
+            ShardedUtxoOp::Prepare(op.clone()),
             bincode::config::standard(),
         )
         .unwrap();

@@ -173,10 +173,10 @@ async fn run(
     };
 
     let endpoints =
-        run_endpoints([&cluster.servers[..num_running_nodes as usize], &clients].concat());
+        run_endpoints([&cluster.servers[..num_running_nodes as usize], clients].concat());
     let workload = run_workload(
         &cluster.servers[..num_running_nodes as usize],
-        &clients,
+        clients,
         num_faulty_nodes,
         num_shards,
         num_concurrent,

@@ -1,5 +1,6 @@
 pub use big_schema as schema;
 
+pub mod archive;
 pub mod cert;
 pub mod client;
 pub mod common;

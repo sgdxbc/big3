@@ -66,9 +66,9 @@ impl StorageWorkersChannels {
 
 #[derive(Clone)]
 pub struct BigStorageConfig {
-    num_nodes: NodeIndex,
-    // num_faulty_nodes: NodeIndex,
-    num_stripes: u32,
+    pub num_nodes: NodeIndex,
+    pub num_faulty_nodes: NodeIndex,
+    pub num_stripes: u32,
     num_secondary_nodes: NodeIndex,
 }
 
@@ -76,7 +76,7 @@ impl From<&schema::ReplicaConfig> for BigStorageConfig {
     fn from(value: &schema::ReplicaConfig) -> Self {
         let config = Self {
             num_nodes: value.num_nodes,
-            // num_faulty_nodes: value.num_faulty_nodes,
+            num_faulty_nodes: value.num_faulty_nodes,
             num_stripes: 100,
             num_secondary_nodes: 6,
         };
@@ -92,20 +92,24 @@ impl From<&schema::ReplicaConfig> for BigStorageConfig {
 }
 
 impl BigStorageConfig {
-    fn num_shards(&self) -> u32 {
-        self.num_stripes * self.num_nodes as u32
+    pub fn num_shards(&self) -> u32 {
+        self.num_stripes * self.num_shards_per_stripe()
     }
 
-    fn shard_of_key(&self, key: &[u8]) -> u32 {
+    pub fn num_shards_per_stripe(&self) -> u32 {
+        self.num_nodes as _
+    }
+
+    pub fn shard_of_key(&self, key: &[u8]) -> u32 {
         (BuildHasherDefault::<DefaultHasher>::default().hash_one(key) % self.num_shards() as u64)
             as _
     }
 
-    fn primary_node_of_shard(&self, shard: u32) -> NodeIndex {
+    pub fn primary_node_of_shard(&self, shard: u32) -> NodeIndex {
         (shard % self.num_nodes as u32) as _
     }
 
-    fn secondary_nodes_of_shard(&self, shard: u32) -> impl Iterator<Item = NodeIndex> {
+    pub fn secondary_nodes_of_shard(&self, shard: u32) -> impl Iterator<Item = NodeIndex> {
         (0..self.num_nodes - 1)
             .choose_multiple(
                 // &mut StdRng::seed_from_u64(shard as _),
@@ -114,6 +118,10 @@ impl BigStorageConfig {
             )
             .into_iter()
             .map(move |n| n + (n >= self.primary_node_of_shard(shard)) as NodeIndex)
+    }
+
+    pub fn stripe_of_shard(&self, shard: u32) -> u32 {
+        shard / self.num_stripes
     }
 }
 
