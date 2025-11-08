@@ -18,6 +18,7 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 use crate::{
+    archive::{ArchiveChannels, ArchiveConfig, ArchiveTask},
     common::{NodeIndex, PREFILL_PATH},
     network::interconnect::{NetworkInterconnectHandle, ReceiveHandle},
     schema,
@@ -164,10 +165,12 @@ pub struct BigStorageWorkersTask {
 
     config: BigStorageConfig,
     // node_index: NodeIndex,
-    primary_shards: FxHashSet<u32>,
-    secondary_shards: FxHashSet<u32>,
+    storing_shards: FxHashSet<u32>,
+    pushing_shards: FxHashSet<u32>,
     temp_dir: TempDir,
-    db: DB,
+    db: Arc<DB>,
+
+    archive: ArchiveTask,
 }
 
 type FetchSeq = u64;
@@ -183,17 +186,31 @@ impl BigStorageWorkersTask {
         node_index: NodeIndex,
         temp_dir: TempDir,
         db: DB,
+
+        archive_channels: ArchiveChannels,
+        archive_network_interconnect: NetworkInterconnectHandle,
+        archive_config: ArchiveConfig,
     ) -> Self {
         let primary_shards = (0..config.num_shards())
             .filter(|&shard| config.primary_node_of_shard(shard) == node_index)
-            .collect();
+            .collect::<FxHashSet<_>>();
         let secondary_shards = (0..config.num_shards())
             .filter(|&shard| {
                 config
                     .secondary_nodes_of_shard(shard)
                     .any(|n| n == node_index)
             })
-            .collect();
+            .collect::<FxHashSet<_>>();
+
+        let db = Arc::new(db);
+        let archive = ArchiveTask::new(
+            archive_channels,
+            archive_network_interconnect,
+            archive_config,
+            config.clone(),
+            db.clone(),
+            node_index,
+        );
 
         Self {
             channels,
@@ -202,13 +219,16 @@ impl BigStorageWorkersTask {
             network_interconnect,
             config,
             // node_index,
-            primary_shards,
-            secondary_shards,
+            storing_shards: &primary_shards | &secondary_shards,
+            pushing_shards: &primary_shards | &secondary_shards,
             temp_dir,
             db,
+
+            archive,
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn load(
         channels: StorageWorkersChannels,
         big_channels: BigStorageWorkerChannels,
@@ -216,6 +236,10 @@ impl BigStorageWorkersTask {
         network_interconnect: NetworkInterconnectHandle,
         config: BigStorageConfig,
         node_index: NodeIndex,
+
+        archive_channels: ArchiveChannels,
+        archive_network_interconnect: NetworkInterconnectHandle,
+        archive_config: ArchiveConfig,
     ) -> anyhow::Result<Self> {
         let temp_dir = tempdir()?;
         let status = Command::new("cp")
@@ -235,6 +259,9 @@ impl BigStorageWorkersTask {
             node_index,
             temp_dir,
             db,
+            archive_channels,
+            archive_network_interconnect,
+            archive_config,
         ))
     }
 
@@ -244,24 +271,21 @@ impl BigStorageWorkersTask {
         drop(self.channels.tx_fetch);
         drop(self.channels.tx_post);
 
-        let db = Arc::new(self.db);
-        let shards = &self.primary_shards | &self.secondary_shards;
-
         let mut join_set = JoinSet::new();
         for _ in 0..Self::NUM_GET_WORKER_THREADS {
-            let db = db.clone();
+            let db = self.db.clone();
             let config = self.config.clone();
             let rx_key = self.big_channels.rx_key.clone();
             let network_interconnect = self.network_interconnect.clone();
-            let shards = shards.clone();
+            let shards = self.pushing_shards.clone();
             join_set.spawn_blocking(move || {
                 Self::get_worker(db, config, shards, rx_key, network_interconnect)
             });
         }
         {
-            let db = db.clone();
+            let db = self.db.clone();
             let config = self.config.clone();
-            let shards = shards.clone();
+            let shards = self.storing_shards.clone();
             join_set.spawn_blocking(move || {
                 Self::write_worker(db, config, shards, self.channels.rx_post, self.tx_post_done)
             });
@@ -271,16 +295,20 @@ impl BigStorageWorkersTask {
             self.big_channels.rx_message,
             self.big_channels.tx_key,
             self.config,
-            shards,
+            self.storing_shards,
         );
-        join_set.spawn(async move { retrieve.run(cancel).await });
+        {
+            let cancel = cancel.clone();
+            join_set.spawn(async move { retrieve.run(cancel).await });
+        }
+        join_set.spawn(async move { self.archive.run(cancel).await });
         while let Some(res) = join_set.join_next().await {
             res??;
         }
         // stats if any
         // sleep(Duration::from_millis(500)).await;
         // self.temp_dir.close()?;
-        let db = Arc::into_inner(db);
+        let db = Arc::into_inner(self.db);
         assert!(db.is_some());
         drop(db);
         DB::destroy(&Default::default(), self.temp_dir.keep().as_path())?;
@@ -290,17 +318,19 @@ impl BigStorageWorkersTask {
     fn get_worker(
         db: Arc<DB>,
         config: BigStorageConfig,
-        shards: FxHashSet<u32>,
+        pushing_shards: FxHashSet<u32>,
         rx_key: flume::Receiver<(FetchSeq, Vec<u8>, oneshot::Sender<Option<Vec<u8>>>)>,
         network_interconnect: NetworkInterconnectHandle,
     ) -> anyhow::Result<()> {
         while let Ok((seq, key, tx)) = rx_key.recv() {
-            assert!(shards.contains(&config.shard_of_key(&key)));
+            // assert!(pushing_shards.contains(&config.shard_of_key(&key)));
             let value = db.get(&key)?;
             let _ = tx.send(value.clone());
 
-            let push_value = message::PushValue { seq, key, value };
-            network_interconnect.send_to_all(Message::PushValue(push_value));
+            if pushing_shards.contains(&config.shard_of_key(&key)) {
+                let push_value = message::PushValue { seq, key, value };
+                network_interconnect.send_to_all(Message::PushValue(push_value));
+            }
         }
         Ok(())
     }
@@ -308,7 +338,7 @@ impl BigStorageWorkersTask {
     fn write_worker(
         db: Arc<DB>,
         config: BigStorageConfig,
-        shards: FxHashSet<u32>,
+        storing_shards: FxHashSet<u32>,
         mut rx_updates: UnboundedReceiver<Vec<(Vec<u8>, Option<Vec<u8>>)>>,
         tx_write_done: UnboundedSender<u64>,
     ) -> anyhow::Result<()> {
@@ -319,7 +349,7 @@ impl BigStorageWorkersTask {
             let mut batch = WriteBatch::new();
             for updates in updates_buf.drain(..) {
                 for (key, value) in updates {
-                    if !shards.contains(&config.shard_of_key(&key)) {
+                    if !storing_shards.contains(&config.shard_of_key(&key)) {
                         continue;
                     }
                     match value {
@@ -342,7 +372,7 @@ pub struct BigStorageRetrieveWorkerTask {
     tx_key: flume::Sender<(FetchSeq, Vec<u8>, oneshot::Sender<Option<Vec<u8>>>)>,
 
     config: BigStorageConfig,
-    shards: FxHashSet<u32>,
+    storing_shards: FxHashSet<u32>,
 
     retrieving: FxHashMap<FetchSeq, (Vec<u8>, oneshot::Sender<Option<Vec<u8>>>)>,
     fetch_seq: FetchSeq,
@@ -362,7 +392,7 @@ impl BigStorageRetrieveWorkerTask {
             rx_message,
             tx_key,
             config,
-            shards,
+            storing_shards: shards,
             retrieving: Default::default(),
             fetch_seq: 0,
             reorder_push_value: Default::default(),
@@ -389,7 +419,10 @@ impl BigStorageRetrieveWorkerTask {
 
     fn handle_fetch(&mut self, key: Vec<u8>, tx: oneshot::Sender<Option<Vec<u8>>>) {
         self.fetch_seq += 1;
-        if self.shards.contains(&self.config.shard_of_key(&key)) {
+        if self
+            .storing_shards
+            .contains(&self.config.shard_of_key(&key))
+        {
             let _ = self.tx_key.send((self.fetch_seq, key, tx));
         } else {
             self.retrieving.insert(self.fetch_seq, (key, tx));

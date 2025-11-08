@@ -26,7 +26,21 @@ pub struct ArchiveChannels {
     rx_message: UnboundedReceiver<Message>,
 }
 
+impl Default for ArchiveChannels {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ArchiveChannels {
+    pub fn new() -> Self {
+        let (tx_message, rx_message) = tokio::sync::mpsc::unbounded_channel();
+        Self {
+            tx_message,
+            rx_message,
+        }
+    }
+
     pub fn receive_handle(&self) -> ReceiveHandle<Message> {
         ReceiveHandle::new(self.tx_message.clone())
     }
@@ -34,6 +48,14 @@ impl ArchiveChannels {
 
 pub struct ArchiveConfig {
     stripe_interval: Duration,
+}
+
+impl From<&crate::schema::ReplicaTask> for ArchiveConfig {
+    fn from(_schema: &crate::schema::ReplicaTask) -> Self {
+        Self {
+            stripe_interval: Duration::from_hours(1),
+        }
+    }
 }
 
 pub struct ArchiveTask {

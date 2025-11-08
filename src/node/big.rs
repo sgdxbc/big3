@@ -1,6 +1,7 @@
 use tokio_util::sync::CancellationToken;
 
 use crate::{
+    archive::ArchiveChannels,
     consensus::{ConsensusChannels, ConsensusTask},
     execute::{
         AbstractExecute, ExecuteSchedChannels, ExecuteSchedTask, ExecuteSourceChannels,
@@ -19,6 +20,7 @@ pub struct BigReplicaNodeTask {
     network_outgoing: NetworkOutgoingTask,
     network_interconnect_consensus: NetworkInterconnectTask,
     network_interconnect_big: NetworkInterconnectTask<true>,
+    network_interconnect_archive: NetworkInterconnectTask,
     consensus: ConsensusTask,
     execute_source: GeneralExecuteSourceTask,
     execute_sched: GeneralExecuteSchedTask,
@@ -38,6 +40,7 @@ impl BigReplicaNodeTask {
         let execute_sched_channels = ExecuteSchedChannels::new();
         let storage_channels = StorageWorkersChannels::new();
         let big_storage_channels = BigStorageWorkerChannels::new();
+        let archive_channels = ArchiveChannels::new();
 
         let network_accept = NetworkAcceptTask::load(
             consensus_channels.handle().submit,
@@ -51,6 +54,9 @@ impl BigReplicaNodeTask {
         let network_interconnect_big =
             NetworkInterconnectTask::load(big_storage_channels.receive_handle(), &schema, 5002)
                 .await?;
+        let network_interconnect_archive =
+            NetworkInterconnectTask::load(archive_channels.receive_handle(), &schema, 5003).await?;
+
         let consensus = ConsensusTask::load(
             consensus_channels,
             execute_source_channels.handle(),
@@ -78,6 +84,9 @@ impl BigReplicaNodeTask {
             network_interconnect_big.handle(),
             (&schema.config).into(),
             schema.node_index,
+            archive_channels,
+            network_interconnect_archive.handle(),
+            (&schema).into(),
         )
         .await?;
         Ok(Self {
@@ -85,6 +94,7 @@ impl BigReplicaNodeTask {
             network_outgoing,
             network_interconnect_consensus,
             network_interconnect_big,
+            network_interconnect_archive,
             consensus,
             execute_source: into_execute_source(execute_source),
             execute_sched: into_execute_sched(execute_sched),
@@ -122,6 +132,7 @@ impl BigReplicaNodeTask {
             self.network_accept.run(stop.clone()),
             self.network_interconnect_consensus.run(stop.clone()),
             self.network_interconnect_big.run(stop.clone()),
+            self.network_interconnect_archive.run(stop.clone()),
             self.consensus.run(stop.clone()),
             self.execute_source.run(stop.clone()),
             self.execute_sched.run(stop.clone()),
