@@ -124,6 +124,21 @@ impl BigStorageConfig {
     pub fn stripe_of_shard(&self, shard: u32) -> u32 {
         shard / self.num_stripes
     }
+
+    pub fn storing_shards(&self, node_index: NodeIndex) -> FxHashSet<u32> {
+        (0..self.num_shards())
+            .filter(|&shard| {
+                self.primary_node_of_shard(shard) == node_index
+                    || self
+                        .secondary_nodes_of_shard(shard)
+                        .any(|n| n == node_index)
+            })
+            .collect::<FxHashSet<_>>()
+    }
+
+    pub fn pushing_shards(&self, node_index: NodeIndex) -> FxHashSet<u32> {
+        self.storing_shards(node_index)
+    }
 }
 
 pub struct BigStorageWorkerChannels {
@@ -164,9 +179,7 @@ pub struct BigStorageWorkersTask {
     network_interconnect: NetworkInterconnectHandle,
 
     config: BigStorageConfig,
-    // node_index: NodeIndex,
-    storing_shards: FxHashSet<u32>,
-    pushing_shards: FxHashSet<u32>,
+    node_index: NodeIndex,
     temp_dir: TempDir,
     db: Arc<DB>,
 
@@ -191,17 +204,6 @@ impl BigStorageWorkersTask {
         archive_network_interconnect: NetworkInterconnectHandle,
         archive_config: ArchiveConfig,
     ) -> Self {
-        let primary_shards = (0..config.num_shards())
-            .filter(|&shard| config.primary_node_of_shard(shard) == node_index)
-            .collect::<FxHashSet<_>>();
-        let secondary_shards = (0..config.num_shards())
-            .filter(|&shard| {
-                config
-                    .secondary_nodes_of_shard(shard)
-                    .any(|n| n == node_index)
-            })
-            .collect::<FxHashSet<_>>();
-
         let db = Arc::new(db);
         let archive = ArchiveTask::new(
             archive_channels,
@@ -218,9 +220,7 @@ impl BigStorageWorkersTask {
             tx_post_done,
             network_interconnect,
             config,
-            // node_index,
-            storing_shards: &primary_shards | &secondary_shards,
-            pushing_shards: &primary_shards | &secondary_shards,
+            node_index,
             temp_dir,
             db,
 
@@ -249,7 +249,7 @@ impl BigStorageWorkersTask {
             .status()
             .await?;
         anyhow::ensure!(status.success(), "failed to copy prefill data");
-        let db = DB::open_default(temp_dir.path())?;
+        let db = DB::open_cf(&Default::default(), temp_dir.path(), ["archive"])?;
         Ok(Self::new(
             channels,
             big_channels,
@@ -271,13 +271,15 @@ impl BigStorageWorkersTask {
         drop(self.channels.tx_fetch);
         drop(self.channels.tx_post);
 
+        let pushing_shards = self.config.pushing_shards(self.node_index);
+        let storing_shards = self.config.storing_shards(self.node_index);
         let mut join_set = JoinSet::new();
         for _ in 0..Self::NUM_GET_WORKER_THREADS {
             let db = self.db.clone();
             let config = self.config.clone();
             let rx_key = self.big_channels.rx_key.clone();
             let network_interconnect = self.network_interconnect.clone();
-            let shards = self.pushing_shards.clone();
+            let shards = pushing_shards.clone();
             join_set.spawn_blocking(move || {
                 Self::get_worker(db, config, shards, rx_key, network_interconnect)
             });
@@ -285,7 +287,7 @@ impl BigStorageWorkersTask {
         {
             let db = self.db.clone();
             let config = self.config.clone();
-            let shards = self.storing_shards.clone();
+            let shards = storing_shards.clone();
             join_set.spawn_blocking(move || {
                 Self::write_worker(db, config, shards, self.channels.rx_post, self.tx_post_done)
             });
@@ -295,7 +297,7 @@ impl BigStorageWorkersTask {
             self.big_channels.rx_message,
             self.big_channels.tx_key,
             self.config,
-            self.storing_shards,
+            storing_shards,
         );
         {
             let cancel = cancel.clone();
@@ -324,10 +326,11 @@ impl BigStorageWorkersTask {
     ) -> anyhow::Result<()> {
         while let Ok((seq, key, tx)) = rx_key.recv() {
             // assert!(pushing_shards.contains(&config.shard_of_key(&key)));
-            let value = db.get(&key)?;
+            let shard = config.shard_of_key(&key);
+            let value = db.get([&shard.to_be_bytes()[..], &key].concat())?;
             let _ = tx.send(value.clone());
 
-            if pushing_shards.contains(&config.shard_of_key(&key)) {
+            if pushing_shards.contains(&shard) {
                 let push_value = message::PushValue { seq, key, value };
                 network_interconnect.send_to_all(Message::PushValue(push_value));
             }
@@ -349,9 +352,11 @@ impl BigStorageWorkersTask {
             let mut batch = WriteBatch::new();
             for updates in updates_buf.drain(..) {
                 for (key, value) in updates {
-                    if !storing_shards.contains(&config.shard_of_key(&key)) {
+                    let shard = config.shard_of_key(&key);
+                    if !storing_shards.contains(&shard) {
                         continue;
                     }
+                    let key = [&shard.to_be_bytes()[..], &key[..]].concat();
                     match value {
                         Some(v) => batch.put(key, v),
                         None => batch.delete(key),

@@ -1,5 +1,4 @@
 use std::{
-    collections::{HashMap, HashSet},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -7,6 +6,7 @@ use std::{
 use big_schema::NodeIndex;
 use log::info;
 use rocksdb::DB;
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use tokio::{
     sync::mpsc::{UnboundedReceiver, UnboundedSender},
     time::sleep,
@@ -64,7 +64,7 @@ pub struct ArchiveTask {
 
     config: ArchiveConfig,
     storage_config: BigStorageConfig,
-    shards: HashSet<u32>,
+    storing_shards: HashSet<u32>,
     db: Arc<DB>,
     node_index: NodeIndex,
 
@@ -90,25 +90,18 @@ impl ArchiveTask {
         db: Arc<DB>,
         node_index: NodeIndex,
     ) -> Self {
-        let shards = (0..storage_config.num_shards())
-            .filter(|shard| {
-                storage_config.primary_node_of_shard(*shard) == node_index
-                    || storage_config
-                        .secondary_nodes_of_shard(*shard)
-                        .any(|n| n == node_index)
-            })
-            .collect();
+        let storing_shards = storage_config.storing_shards(node_index);
         Self {
             channels,
             network_interconnect,
             config,
             storage_config,
-            shards,
+            storing_shards,
             db,
             node_index,
             current_round: 0,
-            node_rounds: HashMap::new(),
-            reorder_push_shards: HashMap::new(),
+            node_rounds: Default::default(),
+            reorder_push_shards: Default::default(),
             metrics: ArchiveMetrics {
                 round_start: Instant::now(),
                 round: Latency::new(),
@@ -124,6 +117,9 @@ impl ArchiveTask {
     }
 
     async fn run_inner(&mut self) -> anyhow::Result<()> {
+        let Some(cf) = self.db.cf_handle("archive") else {
+            anyhow::bail!("archive column family not found");
+        };
         loop {
             info!("Voting to start archive for round {}", self.current_round);
             let vote = message::Vote {
@@ -168,20 +164,20 @@ impl ArchiveTask {
             let mut iter = self.db.raw_iterator();
             for stripe in 0..self.storage_config.num_stripes {
                 sleep(self.config.stripe_interval).await;
-                let mut stripe_shards = HashMap::new();
-                for &shard in &self.shards {
+                let mut stripe_shards = HashMap::default();
+                for &shard in &self.storing_shards {
                     if !self.storage_config.stripe_of_shard(shard) == stripe {
                         continue;
                     }
 
-                    let prefix = [b"shard.", &shard.to_be_bytes()[..]].concat();
-                    iter.seek(&prefix);
+                    let prefix = shard.to_be_bytes();
+                    iter.seek(prefix);
                     iter.status()?;
                     let mut data = Vec::new();
                     while let Some((key, value)) = iter.item() {
-                        if !key.starts_with(&prefix) {
+                        let Some(key) = key.strip_prefix(&prefix[..]) else {
                             break;
-                        }
+                        };
                         data.push((key.to_vec(), value.to_vec()));
                         iter.next();
                         iter.status()?;
@@ -275,8 +271,9 @@ impl ArchiveTask {
                     stripe_data.chunks_exact(stripe_data_len / k),
                 )?;
                 // TODO do not directly overwrite last round
-                self.db.put(
-                    format!("archive.{stripe}.{}", self.node_index),
+                self.db.put_cf(
+                    cf,
+                    format!("{stripe}.{}", self.node_index),
                     &encoded_chunks[self.node_index as usize],
                 )?;
                 info!(

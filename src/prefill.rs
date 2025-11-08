@@ -8,6 +8,7 @@ use crate::{
     common::PREFILL_PATH,
     execute::{utxo, ycsb},
     schema,
+    storage::BigStorageConfig,
 };
 
 pub struct PrefillTask;
@@ -30,26 +31,39 @@ impl PrefillTask {
         let mut i = 0;
         let mut join_set = JoinSet::new();
         let db = Arc::new(db);
+        let storage_config = BigStorageConfig::from(&schema.config);
+        let storing_shards = storage_config.storing_shards(schema.node_index);
         while i < schema.num_keys {
             let mut rng = StdRng::from_rng(&mut rng);
             let db = db.clone();
+            let storage_config = storage_config.clone();
+            let storing_shards = storing_shards.clone();
             join_set.spawn(async move {
                 let mut batch = WriteBatch::new();
                 let mut value = [0u8; 100];
                 for j in i..(i + batch_size).min(schema.num_keys) {
-                    match &schema.app {
+                    let (mut key, value) = match &schema.app {
                         schema::App::Ycsb => {
                             let key = ycsb::key(j);
                             rng.fill(&mut value[..ycsb::VALUE_SIZE]);
-                            batch.put(key, &value[..ycsb::VALUE_SIZE]);
+                            (key.into(), &value[..ycsb::VALUE_SIZE])
                         }
                         schema::App::Utxo => {
                             let txn = utxo::UtxoOp::prefilled(j);
                             let key = utxo::key(&(txn.id(), 0));
                             rng.fill(&mut value[..32 + 8]);
-                            batch.put(key, &value[..32 + 8]);
+                            (key, &value[..32 + 8])
                         }
+                    };
+                    // TODO deal with sharded
+                    if matches!(schema.storage, schema::Storage::Big) {
+                        let shard = storage_config.shard_of_key(&key);
+                        if !storing_shards.contains(&shard) {
+                            continue;
+                        }
+                        key = [&shard.to_be_bytes()[..], &key[..]].concat();
                     }
+                    batch.put(key, value);
                 }
                 let mut options = WriteOptions::default();
                 options.disable_wal(true);

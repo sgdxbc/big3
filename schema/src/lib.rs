@@ -37,6 +37,10 @@ pub struct PrefillTask {
     pub num_keys: u64,
     pub storage: Storage,
     pub app: App,
+    pub config: ReplicaConfig,
+    pub node_index: NodeIndex,
+    pub num_shards: ShardIndex,
+    pub shard_index: ShardIndex,
 }
 
 // response of `/scrape`
