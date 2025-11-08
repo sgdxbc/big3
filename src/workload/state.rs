@@ -8,7 +8,7 @@ use hdrhistogram::{
     Histogram,
     serialization::{Serializer as _, V2Serializer},
 };
-use log::info;
+use log::{info, warn};
 use rand::{Rng, RngCore as _, rng};
 
 use crate::{
@@ -305,6 +305,7 @@ impl<C: WorkloadContext> UtxoWorkload<C, ShardedUtxoWorkingState> {
     pub fn on_invoke_response(&mut self, invoke_id: InvokeId, res: Vec<u8>) {
         let txn_id = self.invoke_txns.remove(&invoke_id).unwrap();
         let working = self.working.get_mut(&txn_id).expect("no ongoing work");
+        assert_eq!(txn_id, working.op.id());
         let res = bincode::decode_from_slice(&res, bincode::config::standard())
             .expect("failed to decode response")
             .0;
@@ -330,12 +331,13 @@ impl<C: WorkloadContext> UtxoWorkload<C, ShardedUtxoWorkingState> {
                         }
                     }
                     if *success {
-                        let shard = sharded_utxo::shard_of(self.num_shards, &working.op.id());
+                        let shard = sharded_utxo::shard_of(self.num_shards, &txn_id);
                         if pending_shards.insert(shard) {
                             let invoke_id = self.context.invoke(shard, command.clone());
                             self.invoke_txns.insert(invoke_id, txn_id);
                         }
                     }
+                    assert!(!pending_shards.is_empty());
                     working.status = ShardedUtxoStatus::Committing(*success, pending_shards);
                 }
             }
@@ -356,11 +358,12 @@ impl<C: WorkloadContext> UtxoWorkload<C, ShardedUtxoWorkingState> {
                     } else {
                         // probably should not put the outputs back to the pool; retrying to spend them is
                         // likely to fail again
+                        warn!("Transaction {:?} aborted", txn_id);
                     }
-                }
 
-                self.working.remove(&txn_id);
-                self.invoke();
+                    self.working.remove(&txn_id);
+                    self.invoke();
+                }
             }
             _ => unimplemented!(),
         }

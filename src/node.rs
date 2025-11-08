@@ -64,7 +64,10 @@ impl Task {
                 task.run(stop).await?;
                 Stopped::Client
             }
-            Self::Prefill => anyhow::bail!("prefill has no run method"),
+            Self::Prefill => {
+                stop.cancelled().await;
+                Stopped::Replica
+            }
         };
         Ok(stopped)
     }

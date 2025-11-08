@@ -77,8 +77,6 @@ async fn setup_common(instance: &Instance) -> anyhow::Result<()> {
         .ssh()
         .arg(
             [
-                "sudo apt-get -qq update",
-                "sudo apt-get -qq install -y liburing2",
                 "sudo sysctl -w net.core.rmem_max=7500000",
                 "sudo sysctl -w net.core.wmem_max=7500000",
             ]

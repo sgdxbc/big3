@@ -50,7 +50,6 @@ pub struct Scrape {
 // response of `/stop`
 #[derive(Serialize, Deserialize)]
 pub enum Stopped {
-    BeforeStart,
     Replica,
     Client,
 }
