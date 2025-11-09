@@ -1,0 +1,3 @@
+network,app,setting,num_nodes,tput,p50,p99,_notes
+,,,,,,,"num of keys = 100000000, read ratio = n/a"
+Wan,Utxo,Full,100,49298.723090123385,16.642998271,26.206011391

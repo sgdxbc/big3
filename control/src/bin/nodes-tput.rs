@@ -2,7 +2,10 @@ use std::{fmt::Write as _, time::Duration};
 
 use big_control::{
     Cluster, Instance, PerformanceMetrics,
-    configs::{APP, NETWORK, NUM_KEYS, Network, READ_RATIO, STORAGE, STRIPE_INTERVAL},
+    configs::{
+        APP, NETWORK, NUM_CONCURRENT, NUM_FAULTY_NODES, NUM_KEYS, NUM_SHARDS, READ_RATIO, STORAGE,
+        STRIPE_INTERVAL, num_nodes,
+    },
     load_all, run_endpoints, scrape_all, start_all, stop_all,
 };
 use big_schema::{Storage, Task};
@@ -13,10 +16,6 @@ use tokio::{
     time::sleep,
     try_join,
 };
-
-fn num_nodes(num_faulty_nodes: u16) -> u16 {
-    3 * num_faulty_nodes + 1
-}
 
 #[derive(Debug)]
 enum Setting {
@@ -40,101 +39,28 @@ async fn main() -> anyhow::Result<()> {
             "n/a".to_string()
         }
     )?;
-    let t = format!("{:?},{:?}", NETWORK, APP);
-    let s = |run: PerformanceMetrics| {
-        format!(
-            "{},{},{}",
-            run.tput,
-            run.p50.as_secs_f64(),
-            run.p99.as_secs_f64(),
-        )
+
+    let setting = match STORAGE {
+        Storage::Full if NUM_SHARDS == 1 => Setting::Full,
+        Storage::Full => Setting::Sharded,
+        Storage::Big => Setting::Big,
     };
 
-    let mut metrics;
-    match (APP, STORAGE) {
-        (big_schema::App::Ycsb, Storage::Full) => {
-            for num_faulty_nodes in [1, 3, 8, 13, 18, 23, 28, 33] {
-                println!(
-                    "running YCSB Full with num_faulty_nodes = {}",
-                    num_faulty_nodes
-                );
-                metrics = run(&cluster, num_faulty_nodes, 1).await?;
-                writeln!(
-                    &mut data,
-                    "{t},{:?},{},{}",
-                    Setting::Full,
-                    num_nodes(num_faulty_nodes),
-                    s(metrics)
-                )?;
-            }
-            for num_shards in [2, 4, 6, 8, 10] {
-                println!("running YCSB Full with num_shards = {}", num_shards,);
-                metrics = run(&cluster, 3, num_shards).await?;
-                writeln!(
-                    &mut data,
-                    "{t},{:?},{},{}",
-                    Setting::Sharded,
-                    num_nodes(3) * num_shards as u16,
-                    s(metrics)
-                )?;
-            }
-        }
-        (big_schema::App::Ycsb, Storage::Big) => {
-            for num_faulty_nodes in [1, 3, 8, 13, 18, 23, 28, 33] {
-                println!(
-                    "running YCSB Big with num_faulty_nodes = {}",
-                    num_faulty_nodes
-                );
-                metrics = run(&cluster, num_faulty_nodes, 1).await?;
-                writeln!(
-                    &mut data,
-                    "{t},{:?},{},{}",
-                    Setting::Big,
-                    num_nodes(num_faulty_nodes),
-                    s(metrics)
-                )?;
-            }
-        }
-        (big_schema::App::Utxo, Storage::Full) => {
-            for num_faulty_nodes in [1, 3, 8, 13, 18, 23, 28, 33] {
-                println!(
-                    "running UTXO Full with num_faulty_nodes = {}",
-                    num_faulty_nodes
-                );
-                metrics = run(&cluster, num_faulty_nodes, 1).await?;
-                writeln!(
-                    &mut data,
-                    "{t},{:?},{},{}",
-                    Setting::Full,
-                    num_nodes(num_faulty_nodes),
-                    s(metrics)
-                )?;
-            }
-            // TODO sharded UTXO
-        }
-        (big_schema::App::Utxo, Storage::Big) => {
-            for num_faulty_nodes in [1, 3, 8, 13, 18, 23, 28, 33] {
-                println!(
-                    "running UTXO Big with num_faulty_nodes = {}",
-                    num_faulty_nodes
-                );
-                metrics = run(&cluster, num_faulty_nodes, 1).await?;
-                writeln!(
-                    &mut data,
-                    "{t},{:?},{},{}",
-                    Setting::Big,
-                    num_nodes(num_faulty_nodes),
-                    s(metrics)
-                )?;
-            }
-        }
-    }
+    let metrics = run(&cluster, NUM_FAULTY_NODES, NUM_SHARDS).await?;
+    writeln!(
+        &mut data,
+        "{:?},{:?},{:?},{},{},{},{}",
+        NETWORK,
+        APP,
+        setting,
+        num_nodes() * NUM_SHARDS as u16,
+        metrics.tput,
+        metrics.p50.as_secs_f64(),
+        metrics.p99.as_secs_f64(),
+    )?;
 
     create_dir_all("data").await?;
-    let mut data_file = File::create(format!(
-        "data/nodes-tput-{NETWORK:?}-{APP:?}-{STORAGE:?}.csv"
-    ))
-    .await?;
+    let mut data_file = File::create(format!("data/nodes-tput-scratch.csv")).await?;
     data_file.write_all(data.as_bytes()).await?;
     Ok(())
 }
@@ -155,8 +81,6 @@ async fn run(
     let workload = run_workload(
         &cluster.servers[..num_running_nodes as usize],
         &cluster.clients,
-        num_faulty_nodes,
-        num_shards,
     );
     let workload = async {
         let result = workload.await;
@@ -170,21 +94,22 @@ async fn run(
 async fn run_workload(
     server_instances: &[Instance],
     client_instances: &[Instance],
-    num_faulty_nodes: u16,
-    num_shards: u8,
 ) -> anyhow::Result<PerformanceMetrics> {
-    if num_shards > 1 {
+    if NUM_SHARDS > 1 {
         assert!(matches!(STORAGE, Storage::Full));
     }
-    assert_eq!(STRIPE_INTERVAL, Duration::ZERO);
+    assert!(STRIPE_INTERVAL >= Duration::from_hours(1));
 
     let control_client = Client::new();
     println!("wait for servers to boot");
     sleep(Duration::from_millis(2000)).await;
 
-    let shard_size = 2 * num_faulty_nodes + 1;
+    let shard_size = 2 * NUM_FAULTY_NODES + 1;
     assert!(server_instances.len().is_multiple_of(shard_size as usize));
-    let num_shards = (server_instances.len() / shard_size as usize) as _;
+    assert_eq!(
+        server_instances.len(),
+        shard_size as usize * NUM_SHARDS as usize
+    );
 
     let ips = server_instances
         .iter()
@@ -199,13 +124,13 @@ async fn run_workload(
         let shard_index = (i / shard_size as usize) as _;
         let schema = big_schema::ReplicaTask {
             node_index: (i % shard_size as usize) as _,
-            num_shards,
+            num_shards: NUM_SHARDS,
             shard_index,
             ips: ips[shard_index as usize].clone(),
             latencies: NETWORK.to_latencies(),
             config: big_schema::ReplicaConfig {
-                num_nodes: num_nodes(num_faulty_nodes),
-                num_faulty_nodes,
+                num_nodes: num_nodes(),
+                num_faulty_nodes: NUM_FAULTY_NODES,
             },
             storage: STORAGE,
             app: APP,
@@ -223,20 +148,12 @@ async fn run_workload(
         let client_task = big_schema::ClientTask {
             ips: ips.clone(),
             config: big_schema::ClientConfig {
-                num_nodes: num_nodes(num_faulty_nodes),
-                num_faulty_nodes,
+                num_nodes: num_nodes(),
+                num_faulty_nodes: NUM_FAULTY_NODES,
             },
             workload_config: big_schema::ClientWorkloadConfig {
-                num_concurrent: match (NETWORK, STORAGE, num_shards) {
-                    (Network::Lan, Storage::Full, 1) => 1000,
-                    (Network::Lan, Storage::Big, 1) => 1000,
-                    (Network::Lan, Storage::Full, _) => 1000 * num_shards as u32,
-                    (Network::Wan, Storage::Full, 1) => 40_000,
-                    (Network::Wan, Storage::Big, 1) => 60_000,
-                    (Network::Wan, Storage::Full, _) => 30_000 * num_shards as u32,
-                    _ => unimplemented!(),
-                },
-                num_shards,
+                num_concurrent: NUM_CONCURRENT,
+                num_shards: NUM_SHARDS,
                 app: match APP {
                     big_schema::App::Ycsb => {
                         big_schema::WorkloadConfig::Ycsb(big_schema::YcsbWorkloadConfig {
