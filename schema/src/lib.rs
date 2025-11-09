@@ -22,6 +22,7 @@ pub struct ReplicaTask {
     pub shard_index: ShardIndex,
     pub storage: Storage,
     pub app: App,
+    pub stripe_interval: Duration,
 }
 
 #[derive(Clone, Serialize, Deserialize)]

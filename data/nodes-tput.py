@@ -26,7 +26,7 @@ def plot(df, postfix):
     fig.savefig(f"data/nodes-tput-{postfix}.png")
 
 
-df = pl.read_csv("data/nodes-tput-*.csv").filter(pl.col("_notes").is_null())
+df = pl.read_csv("data/nodes-tput.csv").filter(pl.col("_notes").is_null())
 print(df.filter(pl.col("app") == "Utxo"))
 plot(df.filter(pl.col("app") == "Utxo"), "utxo")
 print(df.filter(pl.col("app") == "Ycsb"))

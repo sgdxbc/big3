@@ -121,23 +121,36 @@ impl BigStorageConfig {
             .map(move |n| n + (n >= self.primary_node_of_shard(shard)) as NodeIndex)
     }
 
+    pub fn nodes_of_shard(&self, shard: u32) -> impl Iterator<Item = NodeIndex> {
+        let primary = self.primary_node_of_shard(shard);
+        let secondary = self.secondary_nodes_of_shard(shard);
+        std::iter::once(primary).chain(secondary)
+    }
+
     pub fn stripe_of_shard(&self, shard: u32) -> u32 {
         shard / self.num_stripes
     }
 
     pub fn storing_shards(&self, node_index: NodeIndex) -> FxHashSet<u32> {
         (0..self.num_shards())
-            .filter(|&shard| {
-                self.primary_node_of_shard(shard) == node_index
-                    || self
-                        .secondary_nodes_of_shard(shard)
-                        .any(|n| n == node_index)
-            })
+            .filter(|&shard| self.nodes_of_shard(shard).any(|n| n == node_index))
             .collect::<FxHashSet<_>>()
     }
 
     pub fn pushing_shards(&self, node_index: NodeIndex) -> FxHashSet<u32> {
-        self.storing_shards(node_index)
+        (0..self.num_shards())
+            .filter(|&shard| {
+                for n in self.nodes_of_shard(shard) {
+                    if n == node_index {
+                        return true;
+                    }
+                    if n < self.num_nodes - self.num_faulty_nodes {
+                        return false;
+                    }
+                }
+                false
+            })
+            .collect::<FxHashSet<_>>()
     }
 }
 
@@ -249,7 +262,8 @@ impl BigStorageWorkersTask {
             .status()
             .await?;
         anyhow::ensure!(status.success(), "failed to copy prefill data");
-        let db = DB::open_cf(&Default::default(), temp_dir.path(), ["archive"])?;
+        let mut db = DB::open_default(temp_dir.path())?;
+        db.create_cf("archive", &Default::default())?;
         Ok(Self::new(
             channels,
             big_channels,

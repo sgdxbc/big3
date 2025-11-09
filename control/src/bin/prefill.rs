@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use big_control::{
     Cluster, Instance,
-    configs::{APP, NUM_FAULTY_NODES, NUM_KEYS, STORAGE, num_nodes},
+    configs::{APP, NUM_FAULTY_NODES, NUM_KEYS, NUM_SHARDS, STORAGE, num_nodes},
     load_all, run_endpoints, stop_all,
 };
 use big_schema::{PrefillTask, ReplicaConfig, Task};
@@ -12,8 +12,9 @@ use tokio::{time::sleep, try_join};
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cluster = Cluster::from_terraform().await?;
-    let endpoints = run_endpoints(cluster.servers.clone());
-    let workload = run_workload(cluster.servers);
+    let servers = &cluster.servers[..((2 * NUM_FAULTY_NODES + 1) * NUM_SHARDS as u16) as usize];
+    let endpoints = run_endpoints(servers.to_vec());
+    let workload = run_workload(servers.to_vec());
     let workload = async {
         let result = workload.await;
         sleep(Duration::from_millis(3000)).await;

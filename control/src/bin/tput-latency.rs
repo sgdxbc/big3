@@ -2,7 +2,7 @@ use std::{fmt::Write as _, time::Duration};
 
 use big_control::{
     Cluster, Instance, PerformanceMetrics,
-    configs::{APP, NETWORK, NUM_KEYS, Network, READ_RATIO, STORAGE},
+    configs::{APP, NETWORK, NUM_KEYS, Network, READ_RATIO, STORAGE, STRIPE_INTERVAL},
     load_all, run_endpoints, scrape_all, start_all, stop_all,
 };
 use big_schema::{Storage, Task};
@@ -200,6 +200,7 @@ async fn run_workload(
     if num_shards > 1 {
         assert!(matches!(STORAGE, Storage::Full));
     }
+    assert_eq!(STRIPE_INTERVAL, Duration::ZERO);
 
     let control_client = Client::new();
     println!("wait for servers to boot");
@@ -232,6 +233,7 @@ async fn run_workload(
             },
             storage: STORAGE,
             app: APP,
+            stripe_interval: STRIPE_INTERVAL,
         };
         (instance, Task::Replica(schema))
     });

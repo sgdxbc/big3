@@ -20,7 +20,7 @@ pub struct BigReplicaNodeTask {
     network_outgoing: NetworkOutgoingTask,
     network_interconnect_consensus: NetworkInterconnectTask,
     network_interconnect_big: NetworkInterconnectTask<true>,
-    network_interconnect_archive: NetworkInterconnectTask,
+    network_interconnect_archive: NetworkInterconnectTask<false>,
     consensus: ConsensusTask,
     execute_source: GeneralExecuteSourceTask,
     execute_sched: GeneralExecuteSchedTask,

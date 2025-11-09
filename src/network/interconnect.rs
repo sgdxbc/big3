@@ -1,7 +1,7 @@
 use std::{collections::HashMap, time::Duration};
 
 use bincode::{Decode, Encode};
-use bytes::Bytes;
+use bytes::{Buf as _, Bytes};
 use log::error;
 use quinn::{Connection, Endpoint, TransportConfig};
 use tokio::{
@@ -45,7 +45,7 @@ impl<M> ReceiveHandle<M> {
     }
 }
 
-pub struct NetworkInterconnectTask<const BATCH: bool = false> {
+pub struct NetworkInterconnectTask<const BATCH: bool = false, const THROTTLE: bool = false> {
     txs_outgoing_message: HashMap<NodeIndex, UnboundedSender<Bytes>>,
     join_set: JoinSet<anyhow::Result<()>>,
 }
@@ -70,7 +70,7 @@ impl NetworkInterconnectHandle {
     }
 }
 
-impl<const BATCH: bool> NetworkInterconnectTask<BATCH> {
+impl<const BATCH: bool, const THROTTLE: bool> NetworkInterconnectTask<BATCH, THROTTLE> {
     pub async fn load<M: Decode<()> + Send + Sync + 'static>(
         receive: ReceiveHandle<M>,
         schema: &schema::ReplicaTask,
@@ -126,6 +126,8 @@ impl<const BATCH: bool> NetworkInterconnectTask<BATCH> {
                     rx_outgoing,
                     latency,
                 ));
+            } else if THROTTLE {
+                join_set.spawn(Self::run_connection_outgoing_throttled(conn, rx_outgoing));
             } else {
                 join_set.spawn(Self::run_connection_outgoing(conn, rx_outgoing));
             }
@@ -202,6 +204,23 @@ impl<const BATCH: bool> NetworkInterconnectTask<BATCH> {
             })
             .await;
             bucket_index = (bucket_index + 1) % latency as usize;
+        }
+        Ok(())
+    }
+
+    async fn run_connection_outgoing_throttled(
+        conn: Connection,
+        mut rx_outgoing_message: UnboundedReceiver<Bytes>,
+    ) -> anyhow::Result<()> {
+        let mut interval = interval(Duration::from_millis(4));
+        while let Some(mut message) = rx_outgoing_message.recv().await {
+            let mut send = conn.open_uni().await?;
+            while !message.is_empty() {
+                interval.tick().await;
+                let chunk_size = message.len().min(1 * 1024);
+                send.write_all(&message[..chunk_size]).await?;
+                message.advance(chunk_size);
+            }
         }
         Ok(())
     }

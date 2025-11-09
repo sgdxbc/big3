@@ -11,6 +11,7 @@ pub const STORAGE: Storage = Storage::Full;
 pub const APP: App = App::Ycsb;
 pub const NUM_SHARDS: u8 = 1;
 pub const LIVE_DURATION: Duration = Duration::from_secs(10);
+pub const STRIPE_INTERVAL: Duration = Duration::from_hours(1);
 
 include!("latency_matrix.rs");
 

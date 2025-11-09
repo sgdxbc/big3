@@ -4,7 +4,7 @@ use big_control::{
     Cluster, Instance,
     configs::{
         APP, LIVE_DURATION, NETWORK, NUM_CONCURRENT, NUM_FAULTY_NODES, NUM_KEYS, NUM_SHARDS,
-        READ_RATIO, STORAGE, num_nodes,
+        READ_RATIO, STORAGE, STRIPE_INTERVAL, num_nodes,
     },
     load_all, run_endpoints, scrape_all, start_all, stop_all,
 };
@@ -37,7 +37,7 @@ async fn run(cluster: &Cluster) -> anyhow::Result<()> {
     );
     let workload = async {
         let result = workload.await;
-        sleep(Duration::from_millis(2000)).await;
+        sleep(Duration::from_millis(5000)).await;
         result
     };
     try_join!(endpoints, workload)?;
@@ -79,6 +79,7 @@ async fn run_workload(
             },
             storage: STORAGE,
             app: APP,
+            stripe_interval: STRIPE_INTERVAL,
         };
         (instance, Task::Replica(schema))
     });

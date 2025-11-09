@@ -81,6 +81,7 @@ async fn build(instance: &Instance) -> anyhow::Result<()> {
     let status = instance
         .ssh()
         .arg(format!(
+            // "cd {BUILD_DIR} && /bin/bash -l -c 'RUSTFLAGS=\"-C target-cpu=native\" cargo build -r'"
             "cd {BUILD_DIR} && /bin/bash -l -c 'cargo build -r'"
         ))
         .status()
