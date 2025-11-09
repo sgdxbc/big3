@@ -15,7 +15,7 @@ def plot(df, postfix, ylim=None):
             label=f"{app}-{setting}",
         )
     ax.legend()
-    ax.set_xlim(0, 150_000)
+    ax.set_xlim(0, 500_000)
     # ax.set_ylim(0, None)
     ax.set_ylim(0, ylim)
     ax.set_xlabel("Throughput (ops/s)")
@@ -25,7 +25,7 @@ def plot(df, postfix, ylim=None):
     fig.savefig(f"data/tput-latency-{postfix}.png")
 
 
-df = pl.read_csv("data/tput-latency-*.csv")  # .filter(pl.col("_ignore") != True)
+df = pl.read_csv("data/tput-latency.csv")  # .filter(pl.col("_ignore") != True)
 print(df)
 plot(df.filter((pl.col("network") == "Lan")), "lan", ylim=1.5)
 plot(df.filter((pl.col("network") == "Wan")), "wan", ylim=15)

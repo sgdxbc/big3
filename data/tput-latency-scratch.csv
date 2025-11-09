@@ -1,0 +1,4 @@
+network,app,setting,num_nodes,tput,p50,p99,_notes,_ignore
+,,,,,,,"num of keys = 100000000, read ratio = n/a",true
+Wan,Utxo,Sharded,100,81329.03176402499,7.071596543,7.377780735,"concurrent = 30000"
+Wan,Utxo,Sharded,100,159594.3797880777,7.147094015,7.574913023,"concurrent = 60000"

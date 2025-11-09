@@ -109,24 +109,42 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         (big_schema::App::Utxo, Storage::Full) => {
+            // for &num_concurrent in match NETWORK {
+            //     Network::Lan => &[0, 10, 50, 100, 200, 300, 500, 1000, 2000, 4000][..],
+            //     Network::Wan => &[
+            //         0, 4000, 6000, 8000, 10_000, 13_000, 16_000, 20_000, 30_000, 40_000,
+            //     ],
+            // } {
+            //     println!("running UTXO Full with num_concurrent = {}", num_concurrent);
+            //     metrics = run(&cluster, 33, 1, num_concurrent).await?;
+            //     writeln!(
+            //         &mut data,
+            //         "{t},{:?},{},{},\"concurrent = {}\"",
+            //         Setting::Full,
+            //         num_nodes(33),
+            //         s(metrics),
+            //         num_concurrent
+            //     )?;
+            // }
             for &num_concurrent in match NETWORK {
-                Network::Lan => &[0, 10, 50, 100, 200, 300, 500, 1000, 2000, 4000][..],
-                Network::Wan => &[
-                    0, 4000, 6000, 8000, 10_000, 13_000, 16_000, 20_000, 30_000, 40_000,
-                ],
+                Network::Lan => &[0, 1000, 2000, 4000, 6000, 8000, 10_000, 15_000][..],
+                // Network::Wan => &[0, 100_000, 200_000, 300_000],
+                Network::Wan => &[30_000, 60_000],
             } {
-                println!("running UTXO Full with num_concurrent = {}", num_concurrent);
-                metrics = run(&cluster, 33, 1, num_concurrent).await?;
+                println!(
+                    "running UTXO Full Sharded with num_concurrent = {}",
+                    num_concurrent
+                );
+                metrics = run(&cluster, 3, 10, num_concurrent).await?;
                 writeln!(
                     &mut data,
                     "{t},{:?},{},{},\"concurrent = {}\"",
-                    Setting::Full,
-                    num_nodes(33),
+                    Setting::Sharded,
+                    num_nodes(3) * 10,
                     s(metrics),
                     num_concurrent
                 )?;
             }
-            // TODO sharded UTXO
         }
         (big_schema::App::Utxo, Storage::Big) => {
             for &num_concurrent in match NETWORK {
@@ -150,10 +168,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     create_dir_all("data").await?;
-    let mut data_file = File::create(format!(
-        "data/tput-latency-{NETWORK:?}-{APP:?}-{STORAGE:?}.csv"
-    ))
-    .await?;
+    let mut data_file = File::create(format!("data/tput-latency-scratch.csv")).await?;
     data_file.write_all(data.as_bytes()).await?;
     Ok(())
 }
@@ -200,7 +215,7 @@ async fn run_workload(
     if num_shards > 1 {
         assert!(matches!(STORAGE, Storage::Full));
     }
-    assert_eq!(STRIPE_INTERVAL, Duration::ZERO);
+    assert!(STRIPE_INTERVAL >= Duration::from_hours(1));
 
     let control_client = Client::new();
     println!("wait for servers to boot");
