@@ -60,7 +60,7 @@ async fn main() -> anyhow::Result<()> {
     )?;
 
     create_dir_all("data").await?;
-    let mut data_file = File::create(format!("data/nodes-tput-scratch.csv")).await?;
+    let mut data_file = File::create("data/nodes-tput-scratch.csv").await?;
     data_file.write_all(data.as_bytes()).await?;
     Ok(())
 }

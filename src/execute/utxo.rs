@@ -56,7 +56,7 @@ impl AbstractExecute for UtxoExecute {
     fn execute(
         &mut self,
         op: Self::Op,
-        state: FxHashMap<Vec<u8>, Option<Vec<u8>>>,
+        state: &FxHashMap<Vec<u8>, Option<Vec<u8>>>,
     ) -> (Self::Res, Vec<(Vec<u8>, Option<Vec<u8>>)>) {
         for input in &op.inputs {
             // TODO check signature script

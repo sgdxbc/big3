@@ -217,7 +217,7 @@ impl<const BATCH: bool, const THROTTLE: bool> NetworkInterconnectTask<BATCH, THR
             let mut send = conn.open_uni().await?;
             while !message.is_empty() {
                 interval.tick().await;
-                let chunk_size = message.len().min(1 * 1024);
+                let chunk_size = message.len().min(1 << 10);
                 send.write_all(&message[..chunk_size]).await?;
                 message.advance(chunk_size);
             }

@@ -35,7 +35,7 @@ pub trait AbstractExecute {
     fn execute(
         &mut self,
         op: Self::Op,
-        state: FxHashMap<Vec<u8>, Option<Vec<u8>>>,
+        state: &FxHashMap<Vec<u8>, Option<Vec<u8>>>,
     ) -> (Self::Res, Vec<(Vec<u8>, Option<Vec<u8>>)>);
 }
 
@@ -373,7 +373,7 @@ where
             };
             state.insert(key, value);
         }
-        let (res, updates) = self.state.execute(request_state.op, state);
+        let (res, updates) = self.state.execute(request_state.op, &state);
         if self.reply_flag <= self.config.num_faulty_nodes {
             let reply = Reply {
                 client_seq: request_state.client_seq,
