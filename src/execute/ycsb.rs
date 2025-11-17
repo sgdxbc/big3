@@ -59,6 +59,7 @@ impl AbstractExecute for YcsbExecute {
             YcsbOp::Put(key, value) => (YcsbRes::Put, vec![(key.as_bytes().to_vec(), Some(value))]),
             YcsbOp::Get(key) => {
                 let value = state[key.as_bytes()].clone().expect("key not found");
+                // let value = vec![0; 100 - 16];
                 (YcsbRes::Get(value), Vec::new())
             }
         }

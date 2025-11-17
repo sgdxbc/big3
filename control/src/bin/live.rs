@@ -37,7 +37,9 @@ async fn run(cluster: &Cluster) -> anyhow::Result<()> {
     );
     let workload = async {
         let result = workload.await;
-        sleep(Duration::from_millis(5000)).await;
+        if result.is_err() {
+            sleep(Duration::from_millis(5000)).await;
+        }
         result
     };
     try_join!(endpoints, workload)?;

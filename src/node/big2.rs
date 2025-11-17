@@ -6,7 +6,8 @@ use crate::{
     consensus::{Block, ConsensusChannels, ConsensusTask},
     execute::{
         AbstractExecute, ExecuteSchedTask, ExecuteSourceHandle, ExecuteSourceTask,
-        GeneralExecuteSchedTask, GeneralExecuteSourceTask, ycsb::YcsbRes,
+        GeneralExecuteSchedTask, GeneralExecuteSourceTask,
+        ycsb::{YcsbOp, YcsbRes},
     },
     network::{
         interconnect::NetworkInterconnectTask,
@@ -21,6 +22,7 @@ struct ExecuteTask {
     rx_blocks: UnboundedReceiver<Vec<Block>>,
     network_outgoing: NetworkOutgoingHandle,
     node_index: NodeIndex,
+    num_faulty_nodes: NodeIndex,
 }
 
 impl ExecuteTask {
@@ -30,16 +32,29 @@ impl ExecuteTask {
     }
 
     async fn run_inner(&mut self) {
+        let mut reply_flag = self.node_index;
         while let Some(blocks) = self.rx_blocks.recv().await {
             for block in blocks {
                 for request in block.txns {
-                    let res = YcsbRes::Get(vec![0; 100 - 16]);
-                    let reply = Reply {
-                        client_seq: request.client_seq,
-                        res: bincode::encode_to_vec(res, bincode::config::standard()).unwrap(),
-                        node_index: self.node_index,
+                    let res = match bincode::decode_from_slice(
+                        &request.command,
+                        bincode::config::standard(),
+                    )
+                    .unwrap()
+                    .0
+                    {
+                        YcsbOp::Get(_) => YcsbRes::Get(vec![0; 100 - 16]),
+                        YcsbOp::Put(_, _) => YcsbRes::Put,
                     };
-                    let _ = self.network_outgoing.send_message(request.client_id, reply);
+                    if reply_flag <= self.num_faulty_nodes {
+                        let reply = Reply {
+                            client_seq: request.client_seq,
+                            res: bincode::encode_to_vec(res, bincode::config::standard()).unwrap(),
+                            node_index: self.node_index,
+                        };
+                        let _ = self.network_outgoing.send_message(request.client_id, reply);
+                    }
+                    reply_flag = (reply_flag + 1) % (2 * self.num_faulty_nodes + 1);
                 }
             }
         }
@@ -70,6 +85,7 @@ impl BigReplicaNodeTask {
             rx_blocks,
             network_outgoing: network_outgoing_channels.handle(),
             node_index: schema.node_index,
+            num_faulty_nodes: schema.config.num_faulty_nodes,
         };
         let execute_handle = ExecuteSourceHandle {
             tx_blocks,

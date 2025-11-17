@@ -208,6 +208,7 @@ impl<Op: AbstractOp + Send + 'static + Decode<()>> ExecuteSourceTask<Op> {
         for key in op.read_set() {
             let (tx, rx) = oneshot::channel();
             let _ = self.tx_fetch.send((key.clone(), tx));
+            // let _ = tx.send(Some(vec![0; 100 - 16]));
             read_set.insert(key, rx);
         }
         let op_state = RequestState {
@@ -281,13 +282,14 @@ pub struct ExecuteSchedTask<E: AbstractExecute> {
     recent_updates: FxHashMap<Vec<u8>, (u64, Option<Vec<u8>>)>,
     current_version: u64,
     evict_queue: VecDeque<(u64, Vec<u8>)>,
-    send_flag: NodeIndex,
+    reply_flag: NodeIndex,
 
     metrics: ExecuteSchedMetrics,
 }
 
 struct ExecuteSchedMetrics {
     handle: Latency,
+    delayed_fetch: u64,
 }
 
 impl<E: AbstractExecute> ExecuteSchedTask<E> {
@@ -308,15 +310,19 @@ impl<E: AbstractExecute> ExecuteSchedTask<E> {
             recent_updates: Default::default(),
             current_version: 0,
             evict_queue: Default::default(),
-            send_flag: send_count,
+            reply_flag: send_count,
             metrics: ExecuteSchedMetrics {
                 handle: Latency::new(),
+                delayed_fetch: 0,
             },
         }
     }
 
     pub fn log_metrics(&self) {
-        info!("ExecuteSched Metrics:\nhandle {}", self.metrics.handle)
+        info!(
+            "ExecuteSched Metrics:\nhandle {}\ndelayed_fetch {}",
+            self.metrics.handle, self.metrics.delayed_fetch
+        )
     }
 }
 
@@ -359,22 +365,26 @@ where
             let value = if let Some((_, value)) = self.recent_updates.get(&key) {
                 value.clone()
             } else {
+                if rx_value.is_empty() {
+                    self.metrics.delayed_fetch += 1;
+                }
                 rx_value.await?
+                // Some(vec![0; 100 - 16])
             };
             state.insert(key, value);
         }
         let (res, updates) = self.state.execute(request_state.op, state);
-        let reply = Reply {
-            client_seq: request_state.client_seq,
-            res: bincode::encode_to_vec(&res, bincode::config::standard()).unwrap(),
-            node_index: self.config.node_index,
-        };
-        if self.send_flag <= self.config.num_faulty_nodes {
+        if self.reply_flag <= self.config.num_faulty_nodes {
+            let reply = Reply {
+                client_seq: request_state.client_seq,
+                res: bincode::encode_to_vec(&res, bincode::config::standard()).unwrap(),
+                node_index: self.config.node_index,
+            };
             let _ = self
                 .network_outgoing
                 .send_message(request_state.client_id, reply);
         }
-        self.send_flag = (self.send_flag + 1) % (self.config.num_faulty_nodes * 2 + 1);
+        self.reply_flag = (self.reply_flag + 1) % (self.config.num_faulty_nodes * 2 + 1);
 
         // 1-1 mapping between requests and versions is necessary for skipping
         // TODO implement skipping
