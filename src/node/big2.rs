@@ -1,3 +1,4 @@
+use rustc_hash::FxHashMap;
 use tokio::{spawn, sync::mpsc::UnboundedReceiver};
 use tokio_util::sync::CancellationToken;
 
@@ -5,9 +6,9 @@ use crate::{
     common::{NodeIndex, Reply},
     consensus::{Block, ConsensusChannels, ConsensusTask},
     execute::{
-        AbstractExecute, ExecuteSchedTask, ExecuteSourceHandle, ExecuteSourceTask,
+        AbstractExecute, AbstractOp as _, ExecuteSchedTask, ExecuteSourceHandle, ExecuteSourceTask,
         GeneralExecuteSchedTask, GeneralExecuteSourceTask,
-        ycsb::{YcsbOp, YcsbRes},
+        ycsb::{YcsbExecute, YcsbOp},
     },
     network::{
         interconnect::NetworkInterconnectTask,
@@ -36,16 +37,24 @@ impl ExecuteTask {
         while let Some(blocks) = self.rx_blocks.recv().await {
             for block in blocks {
                 for request in block.txns {
-                    let res = match bincode::decode_from_slice(
+                    let op = bincode::decode_from_slice::<YcsbOp, _>(
                         &request.command,
                         bincode::config::standard(),
                     )
                     .unwrap()
-                    .0
-                    {
-                        YcsbOp::Get(_) => YcsbRes::Get(vec![0; 100 - 16]),
-                        YcsbOp::Put(_, _) => YcsbRes::Put,
-                    };
+                    .0;
+                    let mut fetching = FxHashMap::default();
+                    for key in op.read_set() {
+                        let (tx, rx) = tokio::sync::oneshot::channel();
+                        let _ = tx.send(Some(vec![0; 100 - 16]));
+                        fetching.insert(key.clone(), rx);
+                    }
+                    let mut state = FxHashMap::default();
+                    for (key, rx) in fetching {
+                        let value = rx.await.unwrap();
+                        state.insert(key, value);
+                    }
+                    let (res, _updates) = YcsbExecute.execute(op, &state);
                     if reply_flag <= self.num_faulty_nodes {
                         let reply = Reply {
                             client_seq: request.client_seq,
