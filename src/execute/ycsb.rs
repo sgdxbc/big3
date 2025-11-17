@@ -12,7 +12,7 @@ pub enum YcsbOp {
 }
 
 #[derive(Encode, Decode)]
-pub enum Res {
+pub enum YcsbRes {
     Put,
     Get(Vec<u8>),
 }
@@ -48,7 +48,7 @@ pub struct YcsbExecute;
 
 impl AbstractExecute for YcsbExecute {
     type Op = YcsbOp;
-    type Res = Res;
+    type Res = YcsbRes;
 
     fn execute(
         &mut self,
@@ -56,10 +56,10 @@ impl AbstractExecute for YcsbExecute {
         state: FxHashMap<Vec<u8>, Option<Vec<u8>>>,
     ) -> (Self::Res, Vec<(Vec<u8>, Option<Vec<u8>>)>) {
         match op {
-            YcsbOp::Put(key, value) => (Res::Put, vec![(key.as_bytes().to_vec(), Some(value))]),
+            YcsbOp::Put(key, value) => (YcsbRes::Put, vec![(key.as_bytes().to_vec(), Some(value))]),
             YcsbOp::Get(key) => {
                 let value = state[key.as_bytes()].clone().expect("key not found");
-                (Res::Get(value), Vec::new())
+                (YcsbRes::Get(value), Vec::new())
             }
         }
     }

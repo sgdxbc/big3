@@ -1,9 +1,7 @@
-use std::{
-    cmp::Reverse,
-    collections::{BinaryHeap, VecDeque},
-};
+use std::{collections::VecDeque, time::Instant};
 
 use bincode::{Decode, Encode};
+use log::info;
 use rustc_hash::FxHashMap;
 use tokio::{
     select,
@@ -17,6 +15,7 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     common::{ClientId, ClientSeq, NodeIndex, Reply, Request},
     consensus::Block,
+    metrics::Latency,
     network::server::NetworkOutgoingHandle,
     schema,
 };
@@ -49,7 +48,7 @@ pub struct ExecuteSourceChannels {
 }
 
 pub struct ExecuteSourceHandle {
-    tx_blocks: UnboundedSender<Vec<Block>>,
+    pub tx_blocks: UnboundedSender<Vec<Block>>,
     pub tx_post_done: UnboundedSender<u64>,
 }
 
@@ -111,6 +110,13 @@ pub struct ExecuteSourceTask<Op> {
     fetch_version: u64,
     post_version: u64,
     pending_requests: VecDeque<Request>,
+
+    metrics: ExecuteSourceMetrics,
+}
+
+struct ExecuteSourceMetrics {
+    fetch: Latency,
+    pending_count: u64,
 }
 
 enum ExecuteSchedEvent<Op> {
@@ -140,7 +146,18 @@ impl<Op> ExecuteSourceTask<Op> {
             fetch_version: 0,
             post_version: 0,
             pending_requests: Default::default(),
+            metrics: ExecuteSourceMetrics {
+                fetch: Latency::new(),
+                pending_count: 0,
+            },
         }
+    }
+
+    pub fn log_metrics(&self) {
+        info!(
+            "ExecuteSource Metrics:\nfetch {}\npending_count {}",
+            self.metrics.fetch, self.metrics.pending_count
+        )
     }
 }
 
@@ -148,6 +165,7 @@ impl<Op: AbstractOp + Send + 'static + Decode<()>> ExecuteSourceTask<Op> {
     pub async fn run(mut self, stop: CancellationToken) -> anyhow::Result<()> {
         tokio::spawn(async move {
             stop.run_until_cancelled(self.run_inner()).await;
+            self.log_metrics();
         })
         .await?;
         Ok(())
@@ -168,6 +186,7 @@ impl<Op: AbstractOp + Send + 'static + Decode<()>> ExecuteSourceTask<Op> {
                 if self.fetch_version - self.post_version
                     >= self.config.num_max_concurrent_fetches as u64
                 {
+                    self.metrics.pending_count += 1;
                     self.pending_requests.push_back(request);
                     continue;
                 }
@@ -178,6 +197,8 @@ impl<Op: AbstractOp + Send + 'static + Decode<()>> ExecuteSourceTask<Op> {
     }
 
     fn fetch(&mut self, request: Request) {
+        let start = Instant::now();
+
         self.fetch_version += 1;
 
         let op = bincode::decode_from_slice::<Op, _>(&request.command, bincode::config::standard())
@@ -196,6 +217,8 @@ impl<Op: AbstractOp + Send + 'static + Decode<()>> ExecuteSourceTask<Op> {
             client_seq: request.client_seq,
         };
         self.sched.emit(ExecuteSchedEvent::RequestState(op_state));
+
+        self.metrics.fetch += start.elapsed();
     }
 
     fn handle_post_done(&mut self, version: u64) {
@@ -257,8 +280,14 @@ pub struct ExecuteSchedTask<E: AbstractExecute> {
     state: E,
     recent_updates: FxHashMap<Vec<u8>, (u64, Option<Vec<u8>>)>,
     current_version: u64,
-    evict_queue: BinaryHeap<Reverse<(u64, Vec<u8>)>>,
+    evict_queue: VecDeque<(u64, Vec<u8>)>,
     send_flag: NodeIndex,
+
+    metrics: ExecuteSchedMetrics,
+}
+
+struct ExecuteSchedMetrics {
+    handle: Latency,
 }
 
 impl<E: AbstractExecute> ExecuteSchedTask<E> {
@@ -280,7 +309,14 @@ impl<E: AbstractExecute> ExecuteSchedTask<E> {
             current_version: 0,
             evict_queue: Default::default(),
             send_flag: send_count,
+            metrics: ExecuteSchedMetrics {
+                handle: Latency::new(),
+            },
         }
+    }
+
+    pub fn log_metrics(&self) {
+        info!("ExecuteSched Metrics:\nhandle {}", self.metrics.handle)
     }
 }
 
@@ -295,6 +331,7 @@ where
     {
         tokio::spawn(async move {
             stop.run_until_cancelled(self.run_inner()).await;
+            self.log_metrics();
         })
         .await?;
         Ok(())
@@ -302,9 +339,11 @@ where
 
     async fn run_inner(&mut self) -> anyhow::Result<()> {
         while let Some(event) = self.channels.rx_request_state.recv().await {
+            let start = Instant::now();
             match event {
                 ExecuteSchedEvent::RequestState(request_state) => {
-                    self.handle_request_state(request_state).await?
+                    self.handle_request_state(request_state).await?;
+                    self.metrics.handle += start.elapsed();
                 } // ExecuteSchedEvent::PostDone(version) => self.handle_post_done(version),
             }
         }
@@ -345,7 +384,7 @@ where
             self.recent_updates
                 .insert(key.clone(), (self.current_version, value.clone()));
             self.evict_queue
-                .push(Reverse((self.current_version, key.clone())));
+                .push_back((self.current_version, key.clone()));
         }
         let _ = self.tx_post.send(updates);
         // }
@@ -359,12 +398,8 @@ where
     }
 
     fn handle_post_done(&mut self, version: u64) {
-        while self
-            .evict_queue
-            .peek()
-            .is_some_and(|&Reverse((v, _))| v <= version)
-        {
-            let Reverse((v, key)) = self.evict_queue.pop().unwrap();
+        while self.evict_queue.front().is_some_and(|&(v, _)| v <= version) {
+            let (v, key) = self.evict_queue.pop_front().unwrap();
             if self.recent_updates[&key].0 == v {
                 self.recent_updates.remove(&key);
             }

@@ -48,7 +48,7 @@ impl Default for ConsensusChannels {
 
 impl ConsensusChannels {
     pub fn new() -> Self {
-        let (tx_request, rx_request) = channel(100);
+        let (tx_request, rx_request) = channel(10_000);
         let (tx_incoming_message, rx_incoming_message) = unbounded_channel();
         let (tx_output_response, rx_output_response) = unbounded_channel();
         Self {

@@ -111,7 +111,7 @@ impl<const BATCH: bool> NetworkAcceptTask<BATCH> {
                 interval.tick().await;
             }
             buf = Vec::new();
-            rx_outgoing_message.recv_many(&mut buf, usize::MAX).await > 0
+            rx_outgoing_message.recv_many(&mut buf, 1_000).await > 0
         } {
             let mut send = conn.open_uni().await?;
             send.write_all_chunks(&mut buf).await?;
