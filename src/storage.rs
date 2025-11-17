@@ -3,7 +3,6 @@ use std::{
     sync::Arc,
 };
 
-use rand::{SeedableRng as _, rngs::StdRng, seq::IteratorRandom as _};
 use rocksdb::{DB, WriteBatch};
 use rustc_hash::{FxHashMap, FxHashSet};
 use tempfile::{TempDir, tempdir};
@@ -83,10 +82,9 @@ impl From<&schema::ReplicaConfig> for BigStorageConfig {
         };
         let num_faulty_nodes = value.num_faulty_nodes;
         assert!((0..config.num_shards()).all(|shard| {
-            config.primary_node_of_shard(shard) < config.num_nodes - num_faulty_nodes
-                || config
-                    .secondary_nodes_of_shard(shard)
-                    .any(|n| n < config.num_nodes - num_faulty_nodes)
+            config
+                .nodes_of_shard(shard)
+                .any(|n| n < config.num_nodes - num_faulty_nodes)
         }));
         config
     }
@@ -98,7 +96,8 @@ impl BigStorageConfig {
     }
 
     pub fn num_shards_per_stripe(&self) -> u32 {
-        self.num_nodes as _
+        // self.num_nodes as _
+        100
     }
 
     pub fn shard_of_key(&self, key: &[u8]) -> u32 {
@@ -106,25 +105,10 @@ impl BigStorageConfig {
             as _
     }
 
-    pub fn primary_node_of_shard(&self, shard: u32) -> NodeIndex {
-        (shard % self.num_nodes as u32) as _
-    }
-
-    pub fn secondary_nodes_of_shard(&self, shard: u32) -> impl Iterator<Item = NodeIndex> {
-        (0..self.num_nodes - 1)
-            .choose_multiple(
-                // &mut StdRng::seed_from_u64(shard as _),
-                &mut StdRng::seed_from_u64((shard % self.num_stripes) as _),
-                self.num_secondary_nodes as _,
-            )
-            .into_iter()
-            .map(move |n| n + (n >= self.primary_node_of_shard(shard)) as NodeIndex)
-    }
-
     pub fn nodes_of_shard(&self, shard: u32) -> impl Iterator<Item = NodeIndex> {
-        let primary = self.primary_node_of_shard(shard);
-        let secondary = self.secondary_nodes_of_shard(shard);
-        std::iter::once(primary).chain(secondary)
+        (0..)
+            .map(move |i| ((shard + i * self.num_faulty_nodes as u32) % self.num_nodes as u32) as _)
+            .take((1 + self.num_secondary_nodes) as _)
     }
 
     pub fn stripe_of_shard(&self, shard: u32) -> u32 {

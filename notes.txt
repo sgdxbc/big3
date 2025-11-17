@@ -81,3 +81,6 @@ However, the current status is that when execution takes ~7s in a run storage ta
 ----
 
 Well, when there are many nodes, network time is much larger than local storage read time (9.3s vs 4.1s, for example). I will have to build a storage that can concurrently collect remote states from network messages while locally read from storage for the following fetches. Essentially, that is a storage that perform concurrent fetches.
+
+----
+
