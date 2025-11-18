@@ -10,13 +10,14 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     common::{ClientId, ClientSeq, NodeIndex, Reply},
-    consensus::Block,
+    consensus::{Block, DeliverHandle},
     execute::{AbstractExecute, AbstractOp},
     network::server::NetworkOutgoingHandle,
+    storage2::{FetchedHandle, PostDoneHandle},
 };
 
 pub struct ExecuteChannels {
-    tx_blocks: UnboundedSender<Vec<Block>>,
+    pub tx_blocks: UnboundedSender<Vec<Block>>,
     rx_blocks: UnboundedReceiver<Vec<Block>>,
 
     rx_fetched: UnboundedReceiver<FxHashMap<Vec<u8>, Option<Vec<u8>>>>,
@@ -48,10 +49,28 @@ impl ExecuteChannels {
             rx_post_done,
         }
     }
+
+    pub fn deliver_handle(&self) -> DeliverHandle {
+        DeliverHandle {
+            tx_blocks: self.tx_blocks.clone(),
+        }
+    }
+
+    pub fn fetched_handle(&self) -> FetchedHandle {
+        FetchedHandle {
+            tx_fetched: self.tx_fetched.clone(),
+        }
+    }
+
+    pub fn post_done_handle(&self) -> PostDoneHandle {
+        PostDoneHandle {
+            tx_post_done: self.tx_post_done.clone(),
+        }
+    }
 }
 
 pub struct ExecuteTask<E: AbstractExecute> {
-    channels: ExecuteChannels,
+    pub channels: ExecuteChannels,
     fetch_handle: FetchHandle,
     post_handle: PostHandle,
     network_outgoing: NetworkOutgoingHandle,
@@ -138,6 +157,10 @@ where
             return;
         }
 
+        if let Some(blocks) = self.pending_blocks.pop_front() {
+            self.parse_blocks(blocks);
+        }
+
         update_intersection_move(&mut state, take(&mut self.last_state));
         let mut updates = Vec::new();
         for (op, client_id, client_seq) in self.fetching_requests.drain(..) {
@@ -158,10 +181,6 @@ where
         let _ = self.post_handle.tx_post.send(updates);
         self.last_state = state;
         self.last_state_posted = false;
-
-        if let Some(blocks) = self.pending_blocks.pop_front() {
-            self.parse_blocks(blocks);
-        }
     }
 
     fn handle_post_done(&mut self) {

@@ -8,7 +8,6 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     common::{NodeIndex, Request},
-    execute::ExecuteSourceHandle,
     network::{
         interconnect::{NetworkInterconnectHandle, ReceiveHandle},
         server::SubmitHandle,
@@ -74,6 +73,10 @@ pub struct ConsensusTask {
     state: Bullshark<ConsensusTaskContext>,
 }
 
+pub struct DeliverHandle {
+    pub tx_blocks: UnboundedSender<Vec<Block>>,
+}
+
 impl ConsensusTask {
     fn new(channels: ConsensusChannels, state: Bullshark<ConsensusTaskContext>) -> Self {
         Self { channels, state }
@@ -81,7 +84,7 @@ impl ConsensusTask {
 
     pub async fn load(
         channels: ConsensusChannels,
-        execute: ExecuteSourceHandle,
+        execute: DeliverHandle,
         network_connect: NetworkInterconnectHandle,
         schema: &schema::ReplicaTask,
     ) -> anyhow::Result<Self> {
@@ -118,12 +121,12 @@ impl ConsensusTask {
 }
 
 struct ConsensusTaskContext {
-    execute: ExecuteSourceHandle,
+    execute: DeliverHandle,
     network_connect: NetworkInterconnectHandle,
 }
 
 impl ConsensusTaskContext {
-    fn new(execute: ExecuteSourceHandle, network_connect: NetworkInterconnectHandle) -> Self {
+    fn new(execute: DeliverHandle, network_connect: NetworkInterconnectHandle) -> Self {
         Self {
             execute,
             network_connect,
@@ -133,7 +136,7 @@ impl ConsensusTaskContext {
 
 impl BullsharkContext for ConsensusTaskContext {
     fn output(&mut self, blocks: Vec<Block>) -> OutputId {
-        self.execute.execute(blocks);
+        let _ = self.execute.tx_blocks.send(blocks);
         0
     }
 

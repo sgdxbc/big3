@@ -12,7 +12,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     common::{NodeIndex, PREFILL_PATH},
-    network::interconnect::NetworkInterconnectHandle,
+    execute2::{FetchHandle, PostHandle},
+    network::interconnect::{NetworkInterconnectHandle, ReceiveHandle},
     storage::BigStorageConfig,
 };
 
@@ -49,6 +50,22 @@ impl StorageChannels {
             rx_post,
             tx_message,
             rx_message,
+        }
+    }
+
+    pub fn receive_handle(&self) -> ReceiveHandle<Message> {
+        ReceiveHandle::new(self.tx_message.clone())
+    }
+
+    pub fn fetch_handle(&self) -> FetchHandle {
+        FetchHandle {
+            tx_keys: self.tx_fetch.clone(),
+        }
+    }
+
+    pub fn post_handle(&self) -> PostHandle {
+        PostHandle {
+            tx_post: self.tx_post.clone(),
         }
     }
 }

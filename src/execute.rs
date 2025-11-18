@@ -14,7 +14,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     common::{ClientId, ClientSeq, NodeIndex, Reply, Request},
-    consensus::Block,
+    consensus::{Block, DeliverHandle},
     metrics::Latency,
     network::server::NetworkOutgoingHandle,
     schema,
@@ -74,6 +74,12 @@ impl ExecuteSourceChannels {
         ExecuteSourceHandle {
             tx_blocks: self.tx_blocks.clone(),
             tx_post_done: self.tx_post_done.clone(),
+        }
+    }
+
+    pub fn deliver_handle(&self) -> DeliverHandle {
+        DeliverHandle {
+            tx_blocks: self.tx_blocks.clone(),
         }
     }
 }

@@ -6,10 +6,12 @@ use crate::prefill::PrefillTask;
 use crate::schema::{self, Stopped};
 use crate::workload::ClientScrapeState;
 
-use self::{big2::BigReplicaNodeTask, client::ClientNodeTask, full::FullReplicaNodeTask};
+use self::{big3::BigReplicaNodeTask, client::ClientNodeTask, full::FullReplicaNodeTask};
 
+#[allow(dead_code)]
 mod big;
-mod big2;
+// mod big2;
+mod big3;
 mod client;
 mod full;
 

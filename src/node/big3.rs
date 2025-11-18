@@ -3,17 +3,29 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     archive::ArchiveChannels,
     consensus::{ConsensusChannels, ConsensusTask},
-    execute::{
-        AbstractExecute, ExecuteSchedChannels, ExecuteSchedTask, ExecuteSourceChannels,
-        ExecuteSourceTask, GeneralExecuteSchedTask, GeneralExecuteSourceTask,
-    },
+    execute::AbstractExecute,
+    execute2::{ExecuteChannels, ExecuteTask},
     network::{
         interconnect::NetworkInterconnectTask,
         server::{NetworkAcceptTask, NetworkOutgoingChannels, NetworkOutgoingTask},
     },
     schema,
-    storage::{BigStorageWorkerChannels, BigStorageWorkersTask, StorageWorkersChannels},
+    storage2::{StorageChannels, StorageTask},
 };
+
+enum GeneralExecuteTask {
+    Utxo(ExecuteTask<crate::execute::utxo::UtxoExecute>),
+    Ycsb(ExecuteTask<crate::execute::ycsb::YcsbExecute>),
+}
+
+impl GeneralExecuteTask {
+    pub async fn run(self, stop: CancellationToken) -> anyhow::Result<()> {
+        match self {
+            Self::Utxo(task) => task.run(stop).await,
+            Self::Ycsb(task) => task.run(stop).await,
+        }
+    }
+}
 
 pub struct BigReplicaNodeTask {
     network_accept: NetworkAcceptTask<true>,
@@ -22,25 +34,21 @@ pub struct BigReplicaNodeTask {
     network_interconnect_big: NetworkInterconnectTask,
     network_interconnect_archive: NetworkInterconnectTask,
     consensus: ConsensusTask,
-    execute_source: GeneralExecuteSourceTask,
-    execute_sched: GeneralExecuteSchedTask,
-    storage: BigStorageWorkersTask,
+    execute: GeneralExecuteTask,
+    storage: StorageTask,
 }
 
 impl BigReplicaNodeTask {
     async fn load_inner<E: AbstractExecute>(
         schema: schema::ReplicaTask,
         execute: E,
-        into_execute_source: impl FnOnce(ExecuteSourceTask<E::Op>) -> GeneralExecuteSourceTask,
-        into_execute_sched: impl FnOnce(ExecuteSchedTask<E>) -> GeneralExecuteSchedTask,
+        into_execute: impl FnOnce(ExecuteTask<E>) -> GeneralExecuteTask,
     ) -> anyhow::Result<Self> {
         let network_outgoing_channels = NetworkOutgoingChannels::new();
         let consensus_channels = ConsensusChannels::new();
-        let execute_source_channels = ExecuteSourceChannels::new();
-        let execute_sched_channels = ExecuteSchedChannels::new();
-        let storage_channels = StorageWorkersChannels::new();
-        let big_storage_channels = BigStorageWorkerChannels::new();
         let archive_channels = ArchiveChannels::new();
+        let execute_channels = ExecuteChannels::new();
+        let storage_channels = StorageChannels::new();
 
         let network_accept = NetworkAcceptTask::load(
             consensus_channels.handle().submit,
@@ -52,43 +60,36 @@ impl BigReplicaNodeTask {
             NetworkInterconnectTask::load(consensus_channels.handle().receive, &schema, 5001)
                 .await?;
         let network_interconnect_big =
-            NetworkInterconnectTask::load(big_storage_channels.receive_handle(), &schema, 5002)
-                .await?;
+            NetworkInterconnectTask::load(storage_channels.receive_handle(), &schema, 5002).await?;
         let network_interconnect_archive =
             NetworkInterconnectTask::load(archive_channels.receive_handle(), &schema, 5003).await?;
 
         let consensus = ConsensusTask::load(
             consensus_channels,
-            execute_source_channels.deliver_handle(),
+            execute_channels.deliver_handle(),
             network_interconnect_consensus.handle(),
             &schema,
         )
         .await?;
-        let execute_source = ExecuteSourceTask::new(
-            execute_source_channels,
-            storage_channels.handle().tx_fetch,
-            execute_sched_channels.handle(),
-            (&schema).into(),
-        );
-        let execute_sched = ExecuteSchedTask::new(
-            execute_sched_channels,
-            storage_channels.handle().tx_post,
+        let execute = ExecuteTask::new(
+            execute_channels,
+            storage_channels.fetch_handle(),
+            storage_channels.post_handle(),
             network_outgoing.channels.handle(),
-            (&schema).into(),
+            schema.node_index,
+            schema.config.num_faulty_nodes,
             execute,
         );
-        let storage = BigStorageWorkersTask::load(
+        let storage = StorageTask::load(
             storage_channels,
-            big_storage_channels,
-            execute_source.channels.handle().tx_post_done,
+            execute.channels.fetched_handle(),
+            execute.channels.post_done_handle(),
             network_interconnect_big.handle(),
             (&schema.config).into(),
             schema.node_index,
-            archive_channels,
-            network_interconnect_archive.handle(),
-            (&schema).into(),
         )
         .await?;
+
         Ok(Self {
             network_accept,
             network_outgoing,
@@ -96,8 +97,7 @@ impl BigReplicaNodeTask {
             network_interconnect_big,
             network_interconnect_archive,
             consensus,
-            execute_source: into_execute_source(execute_source),
-            execute_sched: into_execute_sched(execute_sched),
+            execute: into_execute(execute),
             storage,
         })
     }
@@ -109,8 +109,7 @@ impl BigReplicaNodeTask {
                 Self::load_inner(
                     schema,
                     crate::execute::ycsb::YcsbExecute,
-                    GeneralExecuteSourceTask::Ycsb,
-                    GeneralExecuteSchedTask::Ycsb,
+                    GeneralExecuteTask::Ycsb,
                 )
                 .await
             }
@@ -118,8 +117,7 @@ impl BigReplicaNodeTask {
                 Self::load_inner(
                     schema,
                     crate::execute::utxo::UtxoExecute,
-                    GeneralExecuteSourceTask::Utxo,
-                    GeneralExecuteSchedTask::Utxo,
+                    GeneralExecuteTask::Utxo,
                 )
                 .await
             }
@@ -134,8 +132,7 @@ impl BigReplicaNodeTask {
             self.network_interconnect_big.run(stop.clone()),
             self.network_interconnect_archive.run(stop.clone()),
             self.consensus.run(stop.clone()),
-            self.execute_source.run(stop.clone()),
-            self.execute_sched.run(stop.clone()),
+            self.execute.run(stop.clone()),
             self.storage.run(stop.clone()),
         )?;
         Ok(())

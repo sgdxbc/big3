@@ -49,7 +49,7 @@ impl FullReplicaNodeTask {
                 .await?;
         let consensus = ConsensusTask::load(
             consensus_channels,
-            execute_source_channels.handle(),
+            execute_source_channels.deliver_handle(),
             network_connect.handle(),
             &schema,
         )
