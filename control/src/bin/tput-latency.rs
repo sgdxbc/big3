@@ -92,9 +92,7 @@ async fn main() -> anyhow::Result<()> {
         (big_schema::App::Ycsb, Storage::Big) => {
             for &num_concurrent in match NETWORK {
                 Network::Lan => &[0, 100, 300, 600, 1000, 3000, 6000, 10_000, 20_000, 30_000][..],
-                Network::Wan => &[
-                    0, 4000, 6000, 8000, 10_000, 13_000, 16_000, 20_000, 30_000, 40_000,
-                ],
+                Network::Wan => &[0, 1_000, 5_000, 10_000, 30_000, 60_000, 100_000, 130_000],
             } {
                 println!("running YCSB Big with num_concurrent = {}", num_concurrent);
                 metrics = run(&cluster, 33, 1, num_concurrent).await?;
@@ -128,8 +126,7 @@ async fn main() -> anyhow::Result<()> {
             }
             for &num_concurrent in match NETWORK {
                 Network::Lan => &[0, 1000, 2000, 4000, 6000, 8000, 10_000, 15_000][..],
-                // Network::Wan => &[0, 100_000, 200_000, 300_000],
-                Network::Wan => &[30_000, 60_000],
+                Network::Wan => &[0, 30_000, 60_000, 100_000, 200_000, 300_000],
             } {
                 println!(
                     "running UTXO Full Sharded with num_concurrent = {}",
