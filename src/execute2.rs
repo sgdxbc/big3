@@ -1,4 +1,4 @@
-use std::mem::take;
+use std::{mem::take, time::Instant};
 
 use bincode::{Decode, Encode};
 use log::info;
@@ -13,6 +13,7 @@ use crate::{
     common::{ClientId, ClientSeq, NodeIndex, Reply},
     consensus::{Block, DeliverHandle},
     execute::{AbstractExecute, AbstractOp},
+    metrics::Latency,
     network::server::NetworkOutgoingHandle,
     storage2::{FetchedHandle, PostDoneHandle},
 };
@@ -82,6 +83,14 @@ pub struct ExecuteTask<E: AbstractExecute> {
     state: E,
     fetching_requests: Vec<(E::Op, ClientId, ClientSeq)>,
     reply_flag: NodeIndex,
+
+    metrics: ExecuteMetrics,
+}
+
+struct ExecuteMetrics {
+    fetch: Latency,
+    execute: Latency,
+    post: Latency,
 }
 
 impl<E: AbstractExecute> ExecuteTask<E> {
@@ -104,7 +113,19 @@ impl<E: AbstractExecute> ExecuteTask<E> {
             state,
             fetching_requests: Default::default(),
             reply_flag: node_index,
+            metrics: ExecuteMetrics {
+                fetch: Latency::new(),
+                execute: Latency::new(),
+                post: Latency::new(),
+            },
         }
+    }
+
+    fn log_metrics(&self) {
+        info!(
+            "execute\nfetch: {}\nexecute: {}\npost: {}",
+            self.metrics.fetch, self.metrics.execute, self.metrics.post
+        );
     }
 }
 
@@ -181,12 +202,17 @@ where
         E: 'static + Send,
         E::Op: 'static + Send,
     {
-        spawn(async move { cancel.run_until_cancelled(self.run_inner()).await }).await?;
+        spawn(async move {
+            cancel.run_until_cancelled(self.run_inner()).await;
+            self.log_metrics();
+        })
+        .await?;
         Ok(())
     }
 
     async fn run_inner(&mut self) {
         while let Some(blocks) = self.channels.rx_blocks.recv().await {
+            let start = Instant::now();
             self.handle_blocks(blocks);
             if self.fetching_requests.is_empty() {
                 continue;
@@ -194,11 +220,18 @@ where
             let Some(state) = self.channels.rx_fetched.recv().await else {
                 return;
             };
+            self.metrics.fetch += start.elapsed();
+
+            let start = Instant::now();
             self.handle_fetched(state);
+            self.metrics.execute += start.elapsed();
+
+            let start = Instant::now();
             let Some(()) = self.channels.rx_post_done.recv().await else {
                 return;
             };
             self.handle_post_done();
+            self.metrics.post += start.elapsed();
         }
     }
 }

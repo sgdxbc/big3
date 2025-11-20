@@ -91,7 +91,7 @@ async fn main() -> anyhow::Result<()> {
         }
         (big_schema::App::Ycsb, Storage::Big) => {
             for &num_concurrent in match NETWORK {
-                Network::Lan => &[0, 50, 100, 300, 600, 1000, 2000, 4000][..],
+                Network::Lan => &[0, 100, 300, 600, 1000, 3000, 6000, 10_000, 20_000, 30_000][..],
                 Network::Wan => &[
                     0, 4000, 6000, 8000, 10_000, 13_000, 16_000, 20_000, 30_000, 40_000,
                 ],
