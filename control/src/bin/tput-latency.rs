@@ -109,23 +109,23 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         (big_schema::App::Utxo, Storage::Full) => {
-            // for &num_concurrent in match NETWORK {
-            //     Network::Lan => &[0, 10, 50, 100, 200, 300, 500, 1000, 2000, 4000][..],
-            //     Network::Wan => &[
-            //         0, 4000, 6000, 8000, 10_000, 13_000, 16_000, 20_000, 30_000, 40_000,
-            //     ],
-            // } {
-            //     println!("running UTXO Full with num_concurrent = {}", num_concurrent);
-            //     metrics = run(&cluster, 33, 1, num_concurrent).await?;
-            //     writeln!(
-            //         &mut data,
-            //         "{t},{:?},{},{},\"concurrent = {}\"",
-            //         Setting::Full,
-            //         num_nodes(33),
-            //         s(metrics),
-            //         num_concurrent
-            //     )?;
-            // }
+            for &num_concurrent in match NETWORK {
+                Network::Lan => &[0, 10, 50, 100, 200, 300, 500, 1000, 2000, 4000][..],
+                Network::Wan => &[
+                    0, 4000, 6000, 8000, 10_000, 13_000, 16_000, 20_000, 30_000, 40_000,
+                ],
+            } {
+                println!("running UTXO Full with num_concurrent = {}", num_concurrent);
+                metrics = run(&cluster, 33, 1, num_concurrent).await?;
+                writeln!(
+                    &mut data,
+                    "{t},{:?},{},{},\"concurrent = {}\"",
+                    Setting::Full,
+                    num_nodes(33),
+                    s(metrics),
+                    num_concurrent
+                )?;
+            }
             for &num_concurrent in match NETWORK {
                 Network::Lan => &[0, 1000, 2000, 4000, 6000, 8000, 10_000, 15_000][..],
                 // Network::Wan => &[0, 100_000, 200_000, 300_000],
@@ -148,10 +148,8 @@ async fn main() -> anyhow::Result<()> {
         }
         (big_schema::App::Utxo, Storage::Big) => {
             for &num_concurrent in match NETWORK {
-                Network::Lan => &[0, 10, 50, 100, 200, 300, 500, 1000, 2000, 4000][..],
-                Network::Wan => &[
-                    0, 4000, 6000, 8000, 10_000, 13_000, 16_000, 20_000, 30_000, 40_000,
-                ],
+                Network::Lan => &[0, 100, 300, 600, 1000, 3000, 6000, 10_000, 20_000, 30_000][..],
+                Network::Wan => &[0, 1_000, 5_000, 10_000, 30_000, 60_000, 100_000, 130_000],
             } {
                 println!("running UTXO Big with num_concurrent = {}", num_concurrent);
                 metrics = run(&cluster, 33, 1, num_concurrent).await?;
