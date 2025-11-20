@@ -74,7 +74,7 @@ pub async fn run_endpoints(
             let output = instance
                 .ssh()
                 .arg("RUST_LOG=info ./big > big.log")
-                // .arg("RUST_BACKTRACE=1 RUST_LOG=info,big ./big > big.log")
+                // .arg("RUST_BACKTRACE=1 RUST_LOG=info,big::storage2 ./big > big.log")
                 .output()
                 .await?;
             anyhow::Ok((instance.public_dns, output))

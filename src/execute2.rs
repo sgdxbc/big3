@@ -1,9 +1,10 @@
-use std::{collections::VecDeque, mem::take};
+use std::mem::take;
 
 use bincode::{Decode, Encode};
+use log::info;
 use rustc_hash::{FxHashMap, FxHashSet};
 use tokio::{
-    select, spawn,
+    spawn,
     sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel},
 };
 use tokio_util::sync::CancellationToken;
@@ -79,11 +80,7 @@ pub struct ExecuteTask<E: AbstractExecute> {
     num_faulty_nodes: NodeIndex,
 
     state: E,
-    pending_blocks: VecDeque<Vec<Block>>,
     fetching_requests: Vec<(E::Op, ClientId, ClientSeq)>,
-    last_state: FxHashMap<Vec<u8>, Option<Vec<u8>>>,
-    last_state_posted: bool,
-    fetched_state: FxHashMap<Vec<u8>, Option<Vec<u8>>>,
     reply_flag: NodeIndex,
 }
 
@@ -105,12 +102,8 @@ impl<E: AbstractExecute> ExecuteTask<E> {
             node_index,
             num_faulty_nodes,
             state,
-            pending_blocks: Default::default(),
             fetching_requests: Default::default(),
-            last_state: Default::default(),
-            last_state_posted: false,
-            fetched_state: Default::default(),
-            reply_flag: 0,
+            reply_flag: node_index,
         }
     }
 }
@@ -121,10 +114,6 @@ where
     E::Res: Encode,
 {
     fn handle_blocks(&mut self, blocks: Vec<Block>) {
-        if !self.fetching_requests.is_empty() {
-            self.pending_blocks.push_back(blocks);
-            return;
-        }
         self.parse_blocks(blocks);
     }
 
@@ -147,23 +136,25 @@ where
                     .push((op, request.client_id, request.client_seq));
             }
         }
+        if self.fetching_requests.is_empty() {
+            return;
+        }
+        info!(
+            "request number {} fetching {} keys",
+            self.fetching_requests.len(),
+            keys.len()
+        );
         let _ = self.fetch_handle.tx_keys.send(keys);
     }
 
     fn handle_fetched(&mut self, mut state: FxHashMap<Vec<u8>, Option<Vec<u8>>>) {
-        assert!(self.fetched_state.is_empty());
-        if !self.last_state_posted {
-            self.fetched_state = state;
-            return;
-        }
+        info!("fetched state with {} entries", state.len());
 
-        if let Some(blocks) = self.pending_blocks.pop_front() {
-            self.parse_blocks(blocks);
-        }
+        let fetching_requests = take(&mut self.fetching_requests);
 
-        update_intersection_move(&mut state, take(&mut self.last_state));
+        // update_intersection_move(&mut state, take(&mut self.last_state));
         let mut updates = Vec::new();
-        for (op, client_id, client_seq) in self.fetching_requests.drain(..) {
+        for (op, client_id, client_seq) in fetching_requests {
             let (res, op_updates) = self.state.execute(op, &state);
             updates.extend(op_updates.clone());
             state.extend(op_updates);
@@ -179,17 +170,10 @@ where
             self.reply_flag = (self.reply_flag + 1) % (2 * self.num_faulty_nodes + 1);
         }
         let _ = self.post_handle.tx_post.send(updates);
-        self.last_state = state;
-        self.last_state_posted = false;
     }
 
     fn handle_post_done(&mut self) {
-        assert!(!self.last_state_posted);
-        self.last_state_posted = true;
-        if !self.fetched_state.is_empty() {
-            let state = take(&mut self.fetched_state);
-            self.handle_fetched(state);
-        }
+        //
     }
 
     pub async fn run(mut self, cancel: CancellationToken) -> anyhow::Result<()>
@@ -202,18 +186,19 @@ where
     }
 
     async fn run_inner(&mut self) {
-        loop {
-            select! {
-                Some(blocks) = self.channels.rx_blocks.recv() => {
-                    self.handle_blocks(blocks);
-                }
-                Some(state) = self.channels.rx_fetched.recv() => {
-                    self.handle_fetched(state);
-                }
-                Some(()) = self.channels.rx_post_done.recv() => {
-                    self.handle_post_done();
-                }
+        while let Some(blocks) = self.channels.rx_blocks.recv().await {
+            self.handle_blocks(blocks);
+            if self.fetching_requests.is_empty() {
+                continue;
             }
+            let Some(state) = self.channels.rx_fetched.recv().await else {
+                return;
+            };
+            self.handle_fetched(state);
+            let Some(()) = self.channels.rx_post_done.recv().await else {
+                return;
+            };
+            self.handle_post_done();
         }
     }
 }

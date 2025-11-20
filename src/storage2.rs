@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use log::{debug, info};
 use rocksdb::{DB, WriteBatch};
 use rustc_hash::{FxHashMap, FxHashSet};
 use tempfile::tempdir;
@@ -244,36 +245,55 @@ struct RetrieveWorker {
 impl RetrieveWorker {
     async fn handle_fetch(&mut self, keys: FxHashSet<Vec<u8>>) -> anyhow::Result<()> {
         self.version += 1;
+        info!("version {} start", self.version);
 
         let (tx, rx) = flume::unbounded();
         for key in keys {
             let shard = self.config.shard_of_key(&key);
             if !self.storing_shards.contains(&shard) {
+                // if !self.pushing_shards.contains(&shard) {
                 continue;
             }
             let _ = self.tx_fetch_dispatch.send((key, tx.clone()));
         }
         drop(tx);
-        let mut shard_states = FxHashMap::<_, Vec<_>>::default();
+        let mut shard_states = self
+            .storing_shards
+            .iter()
+            .map(|&shard| (shard, Vec::new()))
+            .collect::<FxHashMap<_, _>>();
         while let Ok((key, value)) = rx.recv() {
             let shard = self.config.shard_of_key(&key);
-            shard_states.entry(shard).or_default().push((key, value));
+            shard_states.get_mut(&shard).unwrap().push((key, value));
         }
-        for (shard, state) in &shard_states {
-            if self.pushing_shards.contains(shard) {
-                let push_value = message::PushValue {
-                    version: self.version,
-                    shard: *shard,
-                    state: state.clone(),
-                };
-                let message = Message::PushValue(push_value);
-                self.network_interconnect.send_to_all(message);
-            }
-        }
+        info!("version {} storage done", self.version);
+        let push_value = message::PushValue {
+            version: self.version,
+            state: self
+                .pushing_shards
+                .iter()
+                .map(|shard| {
+                    let state = shard_states[shard].clone();
+                    (*shard, state)
+                })
+                .collect(),
+        };
+        debug!(
+            "version {} pushing to network {} shards",
+            self.version,
+            push_value.state.len()
+        );
+        let message = Message::PushValue(push_value);
+        self.network_interconnect.send_to_all(message);
 
         if let Some(push_values) = self.reorder_push_values.remove(&self.version) {
             for push_value in push_values {
-                shard_states.insert(push_value.shard, push_value.state);
+                shard_states.extend(push_value.state);
+                debug!(
+                    "version {} reordered push value applied; {} shards",
+                    self.version,
+                    shard_states.len()
+                );
             }
         }
         while shard_states.len() < self.config.num_shards() as usize {
@@ -283,6 +303,10 @@ impl RetrieveWorker {
             match message {
                 Message::PushValue(push_value) => {
                     if push_value.version > self.version {
+                        debug!(
+                            "version {} push value reordered; waiting for version {}",
+                            self.version, push_value.version
+                        );
                         self.reorder_push_values
                             .entry(push_value.version)
                             .or_default()
@@ -290,15 +314,18 @@ impl RetrieveWorker {
                         continue;
                     }
                     if push_value.version == self.version {
-                        shard_states.insert(push_value.shard, push_value.state);
+                        shard_states.extend(push_value.state);
+                        debug!(
+                            "version {} push value applied; {} shards",
+                            self.version,
+                            shard_states.len()
+                        );
                     }
                 }
             }
         }
-        let state = shard_states
-            .into_values()
-            .flatten()
-            .collect::<FxHashMap<_, _>>();
+        info!("version {} network done", self.version);
+        let state = shard_states.into_values().flatten().collect();
         let _ = self.fetched_handle.tx_fetched.send(state);
         Ok(())
     }
@@ -322,7 +349,6 @@ mod message {
     #[derive(Decode, Encode)]
     pub struct PushValue {
         pub version: u64,
-        pub shard: u32,
-        pub state: Vec<(Vec<u8>, Option<Vec<u8>>)>,
+        pub state: Vec<(u32, Vec<(Vec<u8>, Option<Vec<u8>>)>)>,
     }
 }

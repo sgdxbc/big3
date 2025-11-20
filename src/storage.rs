@@ -111,6 +111,15 @@ impl BigStorageConfig {
             .take((1 + self.num_secondary_nodes) as _)
     }
 
+    pub fn pushing_node_of_shard(&self, shard: u32) -> NodeIndex {
+        for n in self.nodes_of_shard(shard) {
+            if n < self.num_nodes - self.num_faulty_nodes {
+                return n;
+            }
+        }
+        panic!("no pushing node for shard {}", shard);
+    }
+
     pub fn stripe_of_shard(&self, shard: u32) -> u32 {
         shard / self.num_stripes
     }
@@ -123,17 +132,7 @@ impl BigStorageConfig {
 
     pub fn pushing_shards(&self, node_index: NodeIndex) -> FxHashSet<u32> {
         (0..self.num_shards())
-            .filter(|&shard| {
-                for n in self.nodes_of_shard(shard) {
-                    if n == node_index {
-                        return true;
-                    }
-                    if n < self.num_nodes - self.num_faulty_nodes {
-                        return false;
-                    }
-                }
-                false
-            })
+            .filter(|&shard| self.pushing_node_of_shard(shard) == node_index)
             .collect::<FxHashSet<_>>()
     }
 }
