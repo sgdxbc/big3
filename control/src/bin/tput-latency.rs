@@ -54,7 +54,7 @@ async fn main() -> anyhow::Result<()> {
     match (APP, STORAGE) {
         (big_schema::App::Ycsb, Storage::Full) => {
             for &num_concurrent in match NETWORK {
-                Network::Lan => &[0, 10, 50, 100, 200, 300, 500, 1000, 2000, 4000][..],
+                Network::Lan => &[0, 10, 50, 100, 300, 600, 1000, 2000, 4000][..],
                 Network::Wan => &[
                     0, 3000, 6000, 10_000, 13_000, 16_000, 20_000, 30_000, 40_000,
                 ],
@@ -70,24 +70,24 @@ async fn main() -> anyhow::Result<()> {
                     num_concurrent
                 )?;
             }
-            for &num_concurrent in match NETWORK {
-                Network::Lan => &[0, 1000, 2000, 4000][..],
-                Network::Wan => &[0, 10_000, 20_000, 30_000, 40_000],
-            } {
-                println!(
-                    "running YCSB Full Sharded with num_concurrent = {}",
-                    num_concurrent
-                );
-                metrics = run(&cluster, 3, 10, num_concurrent).await?;
-                writeln!(
-                    &mut data,
-                    "{t},{:?},{},{},\"concurrent = {}\"",
-                    Setting::Sharded,
-                    num_nodes(3) * 10,
-                    s(metrics),
-                    num_concurrent
-                )?;
-            }
+            // for &num_concurrent in match NETWORK {
+            //     Network::Lan => &[0, 1000, 2000, 4000][..],
+            //     Network::Wan => &[0, 10_000, 20_000, 30_000, 40_000],
+            // } {
+            //     println!(
+            //         "running YCSB Full Sharded with num_concurrent = {}",
+            //         num_concurrent
+            //     );
+            //     metrics = run(&cluster, 3, 10, num_concurrent).await?;
+            //     writeln!(
+            //         &mut data,
+            //         "{t},{:?},{},{},\"concurrent = {}\"",
+            //         Setting::Sharded,
+            //         num_nodes(3) * 10,
+            //         s(metrics),
+            //         num_concurrent
+            //     )?;
+            // }
         }
         (big_schema::App::Ycsb, Storage::Big) => {
             for &num_concurrent in match NETWORK {
@@ -124,24 +124,24 @@ async fn main() -> anyhow::Result<()> {
                     num_concurrent
                 )?;
             }
-            for &num_concurrent in match NETWORK {
-                Network::Lan => &[0, 1000, 2000, 4000, 6000, 8000, 10_000, 15_000][..],
-                Network::Wan => &[0, 30_000, 60_000, 100_000, 200_000, 300_000],
-            } {
-                println!(
-                    "running UTXO Full Sharded with num_concurrent = {}",
-                    num_concurrent
-                );
-                metrics = run(&cluster, 3, 10, num_concurrent).await?;
-                writeln!(
-                    &mut data,
-                    "{t},{:?},{},{},\"concurrent = {}\"",
-                    Setting::Sharded,
-                    num_nodes(3) * 10,
-                    s(metrics),
-                    num_concurrent
-                )?;
-            }
+            // for &num_concurrent in match NETWORK {
+            //     Network::Lan => &[0, 1000, 2000, 4000, 6000, 8000, 10_000, 15_000][..],
+            //     Network::Wan => &[0, 30_000, 60_000, 100_000, 200_000, 300_000],
+            // } {
+            //     println!(
+            //         "running UTXO Full Sharded with num_concurrent = {}",
+            //         num_concurrent
+            //     );
+            //     metrics = run(&cluster, 3, 10, num_concurrent).await?;
+            //     writeln!(
+            //         &mut data,
+            //         "{t},{:?},{},{},\"concurrent = {}\"",
+            //         Setting::Sharded,
+            //         num_nodes(3) * 10,
+            //         s(metrics),
+            //         num_concurrent
+            //     )?;
+            // }
         }
         (big_schema::App::Utxo, Storage::Big) => {
             for &num_concurrent in match NETWORK {

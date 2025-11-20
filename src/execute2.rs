@@ -258,3 +258,17 @@ where
         // `b` is dropped here
     }
 }
+
+pub enum GeneralExecuteTask {
+    Utxo(ExecuteTask<crate::execute::utxo::UtxoExecute>),
+    Ycsb(ExecuteTask<crate::execute::ycsb::YcsbExecute>),
+}
+
+impl GeneralExecuteTask {
+    pub async fn run(self, stop: CancellationToken) -> anyhow::Result<()> {
+        match self {
+            Self::Utxo(task) => task.run(stop).await,
+            Self::Ycsb(task) => task.run(stop).await,
+        }
+    }
+}

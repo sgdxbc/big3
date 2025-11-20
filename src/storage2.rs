@@ -21,11 +21,11 @@ use crate::{
 pub use message::Message;
 
 pub struct StorageChannels {
-    tx_fetch: UnboundedSender<FxHashSet<Vec<u8>>>,
-    rx_fetch: UnboundedReceiver<FxHashSet<Vec<u8>>>,
+    pub tx_fetch: UnboundedSender<FxHashSet<Vec<u8>>>,
+    pub rx_fetch: UnboundedReceiver<FxHashSet<Vec<u8>>>,
 
-    tx_post: UnboundedSender<Vec<(Vec<u8>, Option<Vec<u8>>)>>,
-    rx_post: UnboundedReceiver<Vec<(Vec<u8>, Option<Vec<u8>>)>>,
+    pub tx_post: UnboundedSender<Vec<(Vec<u8>, Option<Vec<u8>>)>>,
+    pub rx_post: UnboundedReceiver<Vec<(Vec<u8>, Option<Vec<u8>>)>>,
 
     tx_message: UnboundedSender<Message>,
     rx_message: UnboundedReceiver<Message>,

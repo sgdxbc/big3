@@ -10,10 +10,11 @@ pub mod execute2;
 pub mod metrics;
 pub mod node;
 pub mod plain_storage;
+pub mod plain_storage2;
 pub mod prefill;
 pub mod storage;
-pub mod workload;
 pub mod storage2;
+pub mod workload;
 
 pub mod network {
     pub mod interconnect;

@@ -1,7 +1,6 @@
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    archive::ArchiveChannels,
     consensus::{ConsensusChannels, ConsensusTask},
     execute::AbstractExecute,
     execute2::{ExecuteChannels, ExecuteTask, GeneralExecuteTask},
@@ -9,22 +8,21 @@ use crate::{
         interconnect::NetworkInterconnectTask,
         server::{NetworkAcceptTask, NetworkOutgoingChannels, NetworkOutgoingTask},
     },
+    plain_storage2::PlainStorageTask,
     schema,
-    storage2::{StorageChannels, StorageTask},
+    storage2::StorageChannels,
 };
 
-pub struct BigReplicaNodeTask {
+pub struct FullReplicaNodeTask {
     network_accept: NetworkAcceptTask<true>,
     network_outgoing: NetworkOutgoingTask,
-    network_interconnect_consensus: NetworkInterconnectTask,
-    network_interconnect_big: NetworkInterconnectTask,
-    network_interconnect_archive: NetworkInterconnectTask,
+    network_connect: NetworkInterconnectTask,
     consensus: ConsensusTask,
     execute: GeneralExecuteTask,
-    storage: StorageTask,
+    storage: PlainStorageTask,
 }
 
-impl BigReplicaNodeTask {
+impl FullReplicaNodeTask {
     async fn load_inner<E: AbstractExecute>(
         schema: schema::ReplicaTask,
         execute: E,
@@ -32,7 +30,6 @@ impl BigReplicaNodeTask {
     ) -> anyhow::Result<Self> {
         let network_outgoing_channels = NetworkOutgoingChannels::new();
         let consensus_channels = ConsensusChannels::new();
-        let archive_channels = ArchiveChannels::new();
         let execute_channels = ExecuteChannels::new();
         let storage_channels = StorageChannels::new();
 
@@ -42,54 +39,45 @@ impl BigReplicaNodeTask {
         )
         .await?;
         let network_outgoing = NetworkOutgoingTask::load(network_outgoing_channels).await?;
-        let network_interconnect_consensus =
+        let network_connect =
             NetworkInterconnectTask::load(consensus_channels.handle().receive, &schema, 5001)
                 .await?;
-        let network_interconnect_big =
-            NetworkInterconnectTask::load(storage_channels.receive_handle(), &schema, 5002).await?;
-        let network_interconnect_archive =
-            NetworkInterconnectTask::load(archive_channels.receive_handle(), &schema, 5003).await?;
-
         let consensus = ConsensusTask::load(
             consensus_channels,
             execute_channels.deliver_handle(),
-            network_interconnect_consensus.handle(),
+            network_connect.handle(),
             &schema,
         )
         .await?;
+        let storage = PlainStorageTask::load(
+            storage_channels,
+            execute_channels.fetched_handle(),
+            execute_channels.post_done_handle(),
+        )
+        .await?;
+
         let execute = ExecuteTask::new(
             execute_channels,
-            storage_channels.fetch_handle(),
-            storage_channels.post_handle(),
+            storage.channels.fetch_handle(),
+            storage.channels.post_handle(),
             network_outgoing.channels.handle(),
             schema.node_index,
             schema.config.num_faulty_nodes,
             execute,
         );
-        let storage = StorageTask::load(
-            storage_channels,
-            execute.channels.fetched_handle(),
-            execute.channels.post_done_handle(),
-            network_interconnect_big.handle(),
-            (&schema.config).into(),
-            schema.node_index,
-        )
-        .await?;
 
         Ok(Self {
-            network_accept,
             network_outgoing,
-            network_interconnect_consensus,
-            network_interconnect_big,
-            network_interconnect_archive,
-            consensus,
+            network_accept,
+            network_connect,
             execute: into_execute(execute),
             storage,
+            consensus,
         })
     }
 
     pub async fn load(schema: schema::ReplicaTask) -> anyhow::Result<Self> {
-        assert_eq!(schema.num_shards, 1);
+        assert!(schema.num_shards >= 1);
         match &schema.app {
             schema::App::Ycsb => {
                 Self::load_inner(
@@ -99,13 +87,27 @@ impl BigReplicaNodeTask {
                 )
                 .await
             }
-            schema::App::Utxo => {
+            schema::App::Utxo if schema.num_shards == 1 => {
                 Self::load_inner(
                     schema,
                     crate::execute::utxo::UtxoExecute,
                     GeneralExecuteTask::Utxo,
                 )
                 .await
+            }
+            schema::App::Utxo => {
+                // let execute = crate::execute::sharded_utxo::ShardedUtxoExecute::new(
+                //     schema.num_shards,
+                //     schema.shard_index,
+                // );
+                // Self::load_inner(
+                //     schema,
+                //     execute,
+                //     GeneralExecuteSourceTask::ShardedUtxo,
+                //     GeneralExecuteSchedTask::ShardedUtxo,
+                // )
+                // .await
+                todo!()
             }
         }
     }
@@ -114,12 +116,10 @@ impl BigReplicaNodeTask {
         tokio::try_join!(
             self.network_outgoing.run(stop.clone()),
             self.network_accept.run(stop.clone()),
-            self.network_interconnect_consensus.run(stop.clone()),
-            self.network_interconnect_big.run(stop.clone()),
-            self.network_interconnect_archive.run(stop.clone()),
+            self.network_connect.run(stop.clone()),
             self.consensus.run(stop.clone()),
+            self.storage.run(),
             self.execute.run(stop.clone()),
-            self.storage.run(stop.clone()),
         )?;
         Ok(())
     }

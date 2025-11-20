@@ -6,14 +6,15 @@ use crate::prefill::PrefillTask;
 use crate::schema::{self, Stopped};
 use crate::workload::ClientScrapeState;
 
-use self::{big3::BigReplicaNodeTask, client::ClientNodeTask, full::FullReplicaNodeTask};
+use self::{big3::BigReplicaNodeTask, client::ClientNodeTask, full2::FullReplicaNodeTask};
 
-#[allow(dead_code)]
-mod big;
+// #[allow(dead_code)]
+// mod big;
 // mod big2;
 mod big3;
 mod client;
-mod full;
+// mod full;
+mod full2;
 
 #[allow(clippy::large_enum_variant)]
 pub enum Task {
