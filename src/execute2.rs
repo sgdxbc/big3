@@ -134,28 +134,22 @@ where
     E::Op: Decode<()>,
     E::Res: Encode,
 {
-    fn handle_blocks(&mut self, blocks: Vec<Block>) {
-        self.parse_blocks(blocks);
-    }
-
-    fn parse_blocks(&mut self, blocks: Vec<Block>) {
+    fn parse_block(&mut self, block: Block) {
         assert!(self.fetching_requests.is_empty());
 
         let mut keys = HashSet::default();
-        for block in blocks {
-            for request in block.txns {
-                let op = bincode::decode_from_slice::<E::Op, _>(
-                    &request.command,
-                    bincode::config::standard(),
-                )
-                .unwrap()
-                .0;
-                for key in op.read_set() {
-                    keys.insert(key);
-                }
-                self.fetching_requests
-                    .push((op, request.client_id, request.client_seq));
+        for request in block.txns {
+            let op = bincode::decode_from_slice::<E::Op, _>(
+                &request.command,
+                bincode::config::standard(),
+            )
+            .unwrap()
+            .0;
+            for key in op.read_set() {
+                keys.insert(key);
             }
+            self.fetching_requests
+                .push((op, request.client_id, request.client_seq));
         }
         if self.fetching_requests.is_empty() {
             return;
@@ -193,10 +187,6 @@ where
         let _ = self.post_handle.tx_post.send(updates);
     }
 
-    fn handle_post_done(&mut self) {
-        //
-    }
-
     pub async fn run(mut self, cancel: CancellationToken) -> anyhow::Result<()>
     where
         E: 'static + Send,
@@ -212,52 +202,53 @@ where
 
     async fn run_inner(&mut self) {
         while let Some(blocks) = self.channels.rx_blocks.recv().await {
-            let start = Instant::now();
-            self.handle_blocks(blocks);
-            if self.fetching_requests.is_empty() {
-                continue;
+            for block in blocks {
+                let start = Instant::now();
+                self.parse_block(block);
+                if self.fetching_requests.is_empty() {
+                    continue;
+                }
+                let Some(state) = self.channels.rx_fetched.recv().await else {
+                    return;
+                };
+                self.metrics.fetch += start.elapsed();
+
+                let start = Instant::now();
+                self.handle_fetched(state);
+                self.metrics.execute += start.elapsed();
+
+                let start = Instant::now();
+                let Some(()) = self.channels.rx_post_done.recv().await else {
+                    return;
+                };
+                self.metrics.post += start.elapsed();
             }
-            let Some(state) = self.channels.rx_fetched.recv().await else {
-                return;
-            };
-            self.metrics.fetch += start.elapsed();
-
-            let start = Instant::now();
-            self.handle_fetched(state);
-            self.metrics.execute += start.elapsed();
-
-            let start = Instant::now();
-            let Some(()) = self.channels.rx_post_done.recv().await else {
-                return;
-            };
-            self.handle_post_done();
-            self.metrics.post += start.elapsed();
         }
     }
 }
 
-pub fn update_intersection_move<K, V>(a: &mut HashMap<K, V>, b: HashMap<K, V>)
-where
-    K: Eq + std::hash::Hash,
-{
-    // If B is smaller, just move from B into A
-    if b.len() <= a.len() {
-        for (k, v_b) in b {
-            if let Some(v_a) = a.get_mut(&k) {
-                *v_a = v_b;
-            }
-        }
-    } else {
-        // If A is smaller, remove from a temporary mutable B
-        let mut b = b;
-        for (k, v_a) in a.iter_mut() {
-            if let Some(v_b) = b.remove(k) {
-                *v_a = v_b;
-            }
-        }
-        // `b` is dropped here
-    }
-}
+// pub fn update_intersection_move<K, V>(a: &mut HashMap<K, V>, b: HashMap<K, V>)
+// where
+//     K: Eq + std::hash::Hash,
+// {
+//     // If B is smaller, just move from B into A
+//     if b.len() <= a.len() {
+//         for (k, v_b) in b {
+//             if let Some(v_a) = a.get_mut(&k) {
+//                 *v_a = v_b;
+//             }
+//         }
+//     } else {
+//         // If A is smaller, remove from a temporary mutable B
+//         let mut b = b;
+//         for (k, v_a) in a.iter_mut() {
+//             if let Some(v_b) = b.remove(k) {
+//                 *v_a = v_b;
+//             }
+//         }
+//         // `b` is dropped here
+//     }
+// }
 
 pub enum GeneralExecuteTask {
     Utxo(ExecuteTask<crate::execute::utxo::UtxoExecute>),
