@@ -79,15 +79,15 @@ impl FullReplicaNodeTask {
     pub async fn load(schema: schema::ReplicaTask) -> anyhow::Result<Self> {
         assert!(schema.num_shards >= 1);
         match &schema.app {
-            schema::App::Ycsb => {
-                Self::load_inner(
-                    schema,
-                    crate::execute::ycsb::YcsbExecute,
-                    GeneralExecuteTask::Ycsb,
-                )
-                .await
+            schema::App::Ycsb(num_keys) => {
+                let execute = crate::execute::ycsb::YcsbExecute::new(
+                    schema.num_shards,
+                    schema.shard_index,
+                    *num_keys,
+                );
+                Self::load_inner(schema, execute, GeneralExecuteTask::Ycsb).await
             }
-            schema::App::Utxo if schema.num_shards == 1 => {
+            schema::App::Utxo(_) if schema.num_shards == 1 => {
                 Self::load_inner(
                     schema,
                     crate::execute::utxo::UtxoExecute,
@@ -95,7 +95,7 @@ impl FullReplicaNodeTask {
                 )
                 .await
             }
-            schema::App::Utxo => {
+            schema::App::Utxo(_) => {
                 // let execute = crate::execute::sharded_utxo::ShardedUtxoExecute::new(
                 //     schema.num_shards,
                 //     schema.shard_index,

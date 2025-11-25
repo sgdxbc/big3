@@ -146,6 +146,9 @@ where
                 )
                 .unwrap()
                 .0;
+                if !self.state.should_execute(&op) {
+                    continue;
+                }
                 for key in op.read_set() {
                     keys.insert(key);
                 }

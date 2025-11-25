@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use big_control::{
     Cluster, Instance,
-    configs::{APP, NUM_FAULTY_NODES, NUM_KEYS, NUM_SHARDS, STORAGE, num_nodes},
+    configs::{APP, NUM_FAULTY_NODES, NUM_SHARDS, STORAGE, num_nodes},
     load_all, run_endpoints, stop_all,
 };
 use big_schema::{PrefillTask, ReplicaConfig, Task};
@@ -36,7 +36,6 @@ async fn run_workload(server_instances: Vec<Instance>) -> anyhow::Result<()> {
     let replica_items = server_instances.iter().enumerate().map(|(i, instance)| {
         let shard_index = (i / shard_size as usize) as _;
         let schema = PrefillTask {
-            num_keys: NUM_KEYS,
             node_index: (i % shard_size as usize) as _,
             num_shards,
             shard_index,
@@ -45,7 +44,7 @@ async fn run_workload(server_instances: Vec<Instance>) -> anyhow::Result<()> {
                 num_faulty_nodes: NUM_FAULTY_NODES,
             },
             storage: STORAGE,
-            app: APP,
+            app: APP.to_schema_app(),
         };
         (instance, Task::Prefill(schema))
     });

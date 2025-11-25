@@ -35,7 +35,6 @@ pub struct ClientTask {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct PrefillTask {
-    pub num_keys: u64,
     pub storage: Storage,
     pub app: App,
     pub config: ReplicaConfig,
@@ -89,8 +88,8 @@ pub enum Storage {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum App {
-    Ycsb,
-    Utxo,
+    Ycsb(u64),
+    Utxo(u64),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -1,3 +1,5 @@
+use std::ops::Range;
+
 use bincode::{Decode, Encode};
 use hashbrown::HashMap;
 
@@ -17,6 +19,10 @@ pub enum YcsbRes {
     Get(Vec<Vec<u8>>),
 }
 
+pub fn key(index: u64) -> String {
+    format!("key-{index:012}")
+}
+
 impl AbstractOp for YcsbOp {
     fn read_set(&self) -> impl IntoIterator<Item = Vec<u8>> {
         match self {
@@ -25,11 +31,34 @@ impl AbstractOp for YcsbOp {
     }
 }
 
-pub struct YcsbExecute;
+pub struct YcsbExecute {
+    key_range: Range<String>,
+}
+
+impl YcsbExecute {
+    pub fn new(num_shards: u8, shard_index: u8, num_keys: u64) -> Self {
+        let keys_per_shard = num_keys / num_shards as u64;
+        let start_index = shard_index as u64 * keys_per_shard;
+        let end_index = if shard_index == num_shards - 1 {
+            num_keys
+        } else {
+            start_index + keys_per_shard
+        };
+        Self {
+            key_range: key(start_index)..key(end_index),
+        }
+    }
+}
 
 impl AbstractExecute for YcsbExecute {
     type Op = YcsbOp;
     type Res = YcsbRes;
+
+    fn should_execute(&self, op: &Self::Op) -> bool {
+        match op {
+            YcsbOp::Put(key, _, _) | YcsbOp::Get(key) => self.key_range.contains(key),
+        }
+    }
 
     fn execute(
         &mut self,
@@ -57,8 +86,4 @@ impl AbstractExecute for YcsbExecute {
             }
         }
     }
-}
-
-pub fn key(index: u64) -> String {
-    format!("key-{index:012}")
 }

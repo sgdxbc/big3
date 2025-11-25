@@ -91,15 +91,15 @@ impl BigReplicaNodeTask {
     pub async fn load(schema: schema::ReplicaTask) -> anyhow::Result<Self> {
         assert_eq!(schema.num_shards, 1);
         match &schema.app {
-            schema::App::Ycsb => {
-                Self::load_inner(
-                    schema,
-                    crate::execute::ycsb::YcsbExecute,
-                    GeneralExecuteTask::Ycsb,
-                )
-                .await
+            schema::App::Ycsb(num_keys) => {
+                let execute = crate::execute::ycsb::YcsbExecute::new(
+                    schema.num_shards,
+                    schema.shard_index,
+                    *num_keys,
+                );
+                Self::load_inner(schema, execute, GeneralExecuteTask::Ycsb).await
             }
-            schema::App::Utxo => {
+            schema::App::Utxo(_) => {
                 Self::load_inner(
                     schema,
                     crate::execute::utxo::UtxoExecute,

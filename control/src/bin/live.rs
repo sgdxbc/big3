@@ -3,8 +3,8 @@ use std::time::Duration;
 use big_control::{
     Cluster, Instance,
     configs::{
-        APP, LIVE_DURATION, NETWORK, NUM_CONCURRENT, NUM_FAULTY_NODES, NUM_KEYS, NUM_SHARDS,
-        READ_RATIO, STORAGE, STRIPE_INTERVAL, num_nodes,
+        APP, LIVE_DURATION, NETWORK, NUM_CONCURRENT, NUM_FAULTY_NODES, NUM_SHARDS, STORAGE,
+        STRIPE_INTERVAL, num_nodes,
     },
     load_all, run_endpoints, scrape_all, start_all, stop_all,
 };
@@ -80,7 +80,7 @@ async fn run_workload(
                 num_faulty_nodes: NUM_FAULTY_NODES,
             },
             storage: STORAGE,
-            app: APP,
+            app: APP.to_schema_app(),
             stripe_interval: STRIPE_INTERVAL,
         };
         (instance, Task::Replica(schema))
@@ -101,19 +101,7 @@ async fn run_workload(
             workload_config: big_schema::ClientWorkloadConfig {
                 num_concurrent: NUM_CONCURRENT,
                 num_shards: NUM_SHARDS,
-                app: match APP {
-                    big_schema::App::Ycsb => {
-                        big_schema::WorkloadConfig::Ycsb(big_schema::YcsbWorkloadConfig {
-                            num_keys: NUM_KEYS,
-                            read_ratio: READ_RATIO,
-                        })
-                    }
-                    big_schema::App::Utxo => {
-                        big_schema::WorkloadConfig::Utxo(big_schema::UtxoWorkloadConfig {
-                            num_outputs: NUM_KEYS,
-                        })
-                    }
-                },
+                app: APP.to_schema_workload(),
             },
             node_index: i as _,
         };

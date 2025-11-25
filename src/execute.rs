@@ -33,6 +33,11 @@ pub trait AbstractExecute {
     type Op: AbstractOp;
     type Res;
 
+    fn should_execute(&self, op: &Self::Op) -> bool {
+        let _ = op;
+        true
+    }
+
     fn execute(
         &mut self,
         op: Self::Op,
