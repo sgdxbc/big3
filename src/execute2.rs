@@ -134,22 +134,24 @@ where
     E::Op: Decode<()>,
     E::Res: Encode,
 {
-    fn parse_block(&mut self, block: Block) {
+    fn parse_blocks(&mut self, blocks: Vec<Block>) {
         assert!(self.fetching_requests.is_empty());
 
         let mut keys = HashSet::default();
-        for request in block.txns {
-            let op = bincode::decode_from_slice::<E::Op, _>(
-                &request.command,
-                bincode::config::standard(),
-            )
-            .unwrap()
-            .0;
-            for key in op.read_set() {
-                keys.insert(key);
+        for block in blocks {
+            for request in block.txns {
+                let op = bincode::decode_from_slice::<E::Op, _>(
+                    &request.command,
+                    bincode::config::standard(),
+                )
+                .unwrap()
+                .0;
+                for key in op.read_set() {
+                    keys.insert(key);
+                }
+                self.fetching_requests
+                    .push((op, request.client_id, request.client_seq));
             }
-            self.fetching_requests
-                .push((op, request.client_id, request.client_seq));
         }
         if self.fetching_requests.is_empty() {
             return;
@@ -202,27 +204,25 @@ where
 
     async fn run_inner(&mut self) {
         while let Some(blocks) = self.channels.rx_blocks.recv().await {
-            for block in blocks {
-                let start = Instant::now();
-                self.parse_block(block);
-                if self.fetching_requests.is_empty() {
-                    continue;
-                }
-                let Some(state) = self.channels.rx_fetched.recv().await else {
-                    return;
-                };
-                self.metrics.fetch += start.elapsed();
-
-                let start = Instant::now();
-                self.handle_fetched(state);
-                self.metrics.execute += start.elapsed();
-
-                let start = Instant::now();
-                let Some(()) = self.channels.rx_post_done.recv().await else {
-                    return;
-                };
-                self.metrics.post += start.elapsed();
+            let start = Instant::now();
+            self.parse_blocks(blocks);
+            if self.fetching_requests.is_empty() {
+                continue;
             }
+            let Some(state) = self.channels.rx_fetched.recv().await else {
+                return;
+            };
+            self.metrics.fetch += start.elapsed();
+
+            let start = Instant::now();
+            self.handle_fetched(state);
+            self.metrics.execute += start.elapsed();
+
+            let start = Instant::now();
+            let Some(()) = self.channels.rx_post_done.recv().await else {
+                return;
+            };
+            self.metrics.post += start.elapsed();
         }
     }
 }

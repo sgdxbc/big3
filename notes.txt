@@ -70,9 +70,9 @@ Now the prefetch. While full replication does not require prefetch, I still need
 
 Just realize that it is different between fetching concurrently to executing and concurrent fetches. Currently only one of the execution and storage proceeds at any time. The blocks come in (to execution), execution prepares the fetching key list, then execution pauses and storage starts to work on the keys' values. After storage responds with the values the execution resumes and the storage is idle waiting for the next fetching batch.
 
-By simply (and statically) offset the fetch requests by 1 (or more presicely, -1), as my example above, the execution and storage can already proceed concurrently. Firstly execution works on #1 and storage works on #2 at the same time, then execution works on #2 and storage works on #3 at the same time, etc. The faster of the two will need to wait for the slower one, but the slower one can work for all the time instead of waiting for the faster one as current.
+By simply (and statically) offset the fetch requests by 1 (or more precisely, -1), as my example above, the execution and storage can already proceed concurrently. Firstly execution works on #1 and storage works on #2 at the same time, then execution works on #2 and storage works on #3 at the same time, etc. The faster of the two will need to wait for the slower one, but the slower one can work for all the time instead of waiting for the faster one as current.
 
-What I have been thinking for a long time is to further parellelize storage (assuming it is the slower one of the two) (hopefully is since parallelize execution would be much more harder) (through parallelize storage is not too easy neither). So that the faster of the two will also be working for all the time. As it turns out, this is not a must for improving performance based on current level.
+What I have been thinking for a long time is to further parallelize storage (assuming it is the slower one of the two) (hopefully is since parallelize execution would be much more harder) (through parallelize storage is not too easy neither). So that the faster of the two will also be working for all the time. As it turns out, this is not a must for improving performance based on current level.
 
 If execution is dominating the work time, then anything regards to storage will not be significant. On the other hand, if storage is dominating the work time, then concurrently fetching would be necessary because execution takes no time would not be significant if it is already taking minor time.
 
@@ -84,3 +84,4 @@ Well, when there are many nodes, network time is much larger than local storage 
 
 ----
 
+It is really weird that per-block execution is genuinely bad. Let's say the first block is sized B. The N nodes execute it, reply to the clients, and the close loop clients send B new requests, distributed evenly to the N nodes and results in N new blocks sized B/N. The block size goes smaller, resulting in smaller storage read batches and lower read throughput, and the block size goes even smaller.
