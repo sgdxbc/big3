@@ -1,8 +1,8 @@
 use std::{mem::take, time::Instant};
 
 use bincode::{Decode, Encode};
+use hashbrown::{HashMap, HashSet};
 use log::info;
-use rustc_hash::{FxHashMap, FxHashSet};
 use tokio::{
     spawn,
     sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel},
@@ -22,15 +22,15 @@ pub struct ExecuteChannels {
     pub tx_blocks: UnboundedSender<Vec<Block>>,
     rx_blocks: UnboundedReceiver<Vec<Block>>,
 
-    rx_fetched: UnboundedReceiver<FxHashMap<Vec<u8>, Option<Vec<u8>>>>,
-    tx_fetched: UnboundedSender<FxHashMap<Vec<u8>, Option<Vec<u8>>>>,
+    rx_fetched: UnboundedReceiver<HashMap<Vec<u8>, Option<Vec<u8>>>>,
+    tx_fetched: UnboundedSender<HashMap<Vec<u8>, Option<Vec<u8>>>>,
 
     tx_post_done: UnboundedSender<()>,
     rx_post_done: UnboundedReceiver<()>,
 }
 
 pub struct FetchHandle {
-    pub tx_keys: UnboundedSender<FxHashSet<Vec<u8>>>,
+    pub tx_keys: UnboundedSender<HashSet<Vec<u8>>>,
 }
 
 pub struct PostHandle {
@@ -141,7 +141,7 @@ where
     fn parse_blocks(&mut self, blocks: Vec<Block>) {
         assert!(self.fetching_requests.is_empty());
 
-        let mut keys = FxHashSet::default();
+        let mut keys = HashSet::default();
         for block in blocks {
             for request in block.txns {
                 let op = bincode::decode_from_slice::<E::Op, _>(
@@ -168,7 +168,7 @@ where
         let _ = self.fetch_handle.tx_keys.send(keys);
     }
 
-    fn handle_fetched(&mut self, mut state: FxHashMap<Vec<u8>, Option<Vec<u8>>>) {
+    fn handle_fetched(&mut self, mut state: HashMap<Vec<u8>, Option<Vec<u8>>>) {
         info!("fetched state with {} entries", state.len());
 
         let fetching_requests = take(&mut self.fetching_requests);
@@ -236,7 +236,7 @@ where
     }
 }
 
-pub fn update_intersection_move<K, V>(a: &mut FxHashMap<K, V>, b: FxHashMap<K, V>)
+pub fn update_intersection_move<K, V>(a: &mut HashMap<K, V>, b: HashMap<K, V>)
 where
     K: Eq + std::hash::Hash,
 {

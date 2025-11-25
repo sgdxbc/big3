@@ -23,7 +23,7 @@ use std::{
 use bincode::{Decode, Encode};
 use hdrhistogram::Histogram;
 use log::{info, trace};
-use sha2::{Digest as _, Sha256};
+use ring::digest;
 
 use crate::{
     common::{NodeIndex, Request, RequestId},
@@ -72,18 +72,18 @@ pub struct Block {
 
 impl Block {
     pub fn hash(&self) -> BlockHash {
-        let mut hasher = Sha256::new();
-        hasher.update(self.round.to_le_bytes());
-        hasher.update(self.node_index.to_le_bytes());
+        let mut hasher = digest::Context::new(&digest::SHA256);
+        hasher.update(&self.round.to_le_bytes());
+        hasher.update(&self.node_index.to_le_bytes());
         for BlockHash(link_hash) in &self.links {
             hasher.update(link_hash)
         }
         for request in &self.txns {
-            hasher.update(request.client_id.to_le_bytes());
-            hasher.update(request.client_seq.to_le_bytes());
+            hasher.update(&request.client_id.to_le_bytes());
+            hasher.update(&request.client_seq.to_le_bytes());
             hasher.update(&request.command);
         }
-        BlockHash(hasher.finalize().into())
+        BlockHash(hasher.finish().as_ref().try_into().unwrap())
     }
 
     fn from_network(block: &message::Block) -> Self {

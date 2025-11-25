@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
+use hashbrown::{HashMap, HashSet};
 use log::{debug, info};
 use rocksdb::{DB, WriteBatch};
-use rustc_hash::{FxHashMap, FxHashSet};
 use tempfile::tempdir;
 use tokio::{
     process::Command,
@@ -21,8 +21,8 @@ use crate::{
 pub use message::Message;
 
 pub struct StorageChannels {
-    pub tx_fetch: UnboundedSender<FxHashSet<Vec<u8>>>,
-    pub rx_fetch: UnboundedReceiver<FxHashSet<Vec<u8>>>,
+    pub tx_fetch: UnboundedSender<HashSet<Vec<u8>>>,
+    pub rx_fetch: UnboundedReceiver<HashSet<Vec<u8>>>,
 
     pub tx_post: UnboundedSender<Vec<(Vec<u8>, Option<Vec<u8>>)>>,
     pub rx_post: UnboundedReceiver<Vec<(Vec<u8>, Option<Vec<u8>>)>>,
@@ -32,7 +32,7 @@ pub struct StorageChannels {
 }
 
 pub struct FetchedHandle {
-    pub tx_fetched: UnboundedSender<FxHashMap<Vec<u8>, Option<Vec<u8>>>>,
+    pub tx_fetched: UnboundedSender<HashMap<Vec<u8>, Option<Vec<u8>>>>,
 }
 
 pub struct PostDoneHandle {
@@ -80,8 +80,8 @@ pub struct StorageTask {
     config: BigStorageConfig,
     #[allow(dead_code)]
     node_index: NodeIndex,
-    storing_shards: FxHashSet<u32>,
-    pushing_shards: FxHashSet<u32>,
+    storing_shards: HashSet<u32>,
+    pushing_shards: HashSet<u32>,
 
     temp_dir: tempfile::TempDir,
     db: Arc<DB>,
@@ -149,7 +149,7 @@ impl StorageTask {
     fn write_worker(
         db: Arc<DB>,
         config: BigStorageConfig,
-        storing_shards: FxHashSet<u32>,
+        storing_shards: HashSet<u32>,
         mut rx_updates: UnboundedReceiver<Vec<(Vec<u8>, Option<Vec<u8>>)>>,
         tx_write_done: UnboundedSender<()>,
     ) -> anyhow::Result<()> {
@@ -210,7 +210,7 @@ impl StorageTask {
             storing_shards: self.storing_shards,
             pushing_shards: self.pushing_shards,
             version: 0,
-            reorder_push_values: FxHashMap::default(),
+            reorder_push_values: HashMap::default(),
         };
         workers.spawn(async move {
             cancel.run_until_cancelled(retrieve.run_inner()).await;
@@ -229,21 +229,21 @@ impl StorageTask {
 
 struct RetrieveWorker {
     rx_message: UnboundedReceiver<Message>,
-    rx_fetch: UnboundedReceiver<FxHashSet<Vec<u8>>>,
+    rx_fetch: UnboundedReceiver<HashSet<Vec<u8>>>,
 
     fetched_handle: FetchedHandle,
     network_interconnect: NetworkInterconnectHandle,
     tx_fetch_dispatch: flume::Sender<(Vec<u8>, flume::Sender<(Vec<u8>, Option<Vec<u8>>)>)>,
 
     config: BigStorageConfig,
-    storing_shards: FxHashSet<u32>,
-    pushing_shards: FxHashSet<u32>,
+    storing_shards: HashSet<u32>,
+    pushing_shards: HashSet<u32>,
     version: u64,
-    reorder_push_values: FxHashMap<u64, Vec<message::PushValue>>,
+    reorder_push_values: HashMap<u64, Vec<message::PushValue>>,
 }
 
 impl RetrieveWorker {
-    async fn handle_fetch(&mut self, keys: FxHashSet<Vec<u8>>) -> anyhow::Result<()> {
+    async fn handle_fetch(&mut self, keys: HashSet<Vec<u8>>) -> anyhow::Result<()> {
         self.version += 1;
         info!("version {} start", self.version);
 
@@ -261,7 +261,7 @@ impl RetrieveWorker {
             .storing_shards
             .iter()
             .map(|&shard| (shard, Vec::new()))
-            .collect::<FxHashMap<_, _>>();
+            .collect::<HashMap<_, _>>();
         while let Ok((key, value)) = rx.recv() {
             let shard = self.config.shard_of_key(&key);
             shard_states.get_mut(&shard).unwrap().push((key, value));

@@ -4,9 +4,9 @@ use std::{
 };
 
 use big_schema::NodeIndex;
+use hashbrown::{HashMap, HashSet};
 use log::{debug, info};
 use rocksdb::{DB, WriteOptions};
-use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use tokio::{
     sync::mpsc::{Sender, UnboundedReceiver, UnboundedSender, channel},
     task::{spawn_blocking, yield_now},
@@ -168,7 +168,7 @@ impl ArchiveTask {
             let mut iter = self.db.raw_iterator();
             for stripe in 0..self.storage_config.num_stripes {
                 sleep(self.config.stripe_interval).await;
-                let mut stripe_shards = HashMap::default();
+                let mut stripe_shards = HashMap::new();
                 for &shard in &self.storing_shards {
                     if self.storage_config.stripe_of_shard(shard) != stripe {
                         continue;

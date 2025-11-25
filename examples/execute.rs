@@ -8,10 +8,10 @@ use std::{
     time::{Duration, Instant},
 };
 
+use hashbrown::HashMap;
 use log::info;
 use rand::{Rng, rng};
 use rocksdb::{DB, Options, WriteBatch};
-use rustc_hash::FxHashMap;
 use tempfile::TempDir;
 use tokio::{
     process::Command,
@@ -196,7 +196,7 @@ trait AbstractExecute {
     fn execute(
         &mut self,
         op: Self::Op,
-        state: FxHashMap<Vec<u8>, Option<Vec<u8>>>,
+        state: HashMap<Vec<u8>, Option<Vec<u8>>>,
     ) -> Vec<(Vec<u8>, Option<Vec<u8>>)>;
 }
 
@@ -236,7 +236,7 @@ impl AbstractExecute for Execute {
     fn execute(
         &mut self,
         op: Self::Op,
-        state: FxHashMap<Vec<u8>, Option<Vec<u8>>>,
+        state: HashMap<Vec<u8>, Option<Vec<u8>>>,
     ) -> Vec<(Vec<u8>, Option<Vec<u8>>)> {
         match op {
             Op::Put(key, value) => {
@@ -322,7 +322,7 @@ impl Source {
             rng().fill(&mut value[..]);
             Op::Put(key, value)
         };
-        let mut read_set = FxHashMap::default();
+        let mut read_set = HashMap::new();
         for key in op.read_set() {
             let (tx, rx) = oneshot::channel();
             let _ = self.tx_get.send((key.clone(), tx));
@@ -335,7 +335,7 @@ impl Source {
 
 struct Sched<E: AbstractExecute> {
     executor: E,
-    recent_updates: FxHashMap<Vec<u8>, (u64, Option<Vec<u8>>)>,
+    recent_updates: HashMap<Vec<u8>, (u64, Option<Vec<u8>>)>,
     current_version: u64,
     evict_queue: BinaryHeap<Reverse<(u64, Vec<u8>)>>,
 
@@ -346,7 +346,7 @@ struct Sched<E: AbstractExecute> {
 
 struct OpState<Op> {
     op: Op,
-    read_set: FxHashMap<Vec<u8>, oneshot::Receiver<Option<Vec<u8>>>>,
+    read_set: HashMap<Vec<u8>, oneshot::Receiver<Option<Vec<u8>>>>,
 }
 
 impl<E: AbstractExecute> Sched<E> {
@@ -358,7 +358,7 @@ impl<E: AbstractExecute> Sched<E> {
     ) -> Self {
         Self {
             executor,
-            recent_updates: FxHashMap::default(),
+            recent_updates: HashMap::new(),
             current_version: 0,
             evict_queue: BinaryHeap::new(),
 
@@ -394,7 +394,7 @@ impl<E: AbstractExecute> Sched<E> {
     }
 
     async fn handle_op(&mut self, op_state: OpState<E::Op>) -> anyhow::Result<()> {
-        let mut state = FxHashMap::default();
+        let mut state = HashMap::new();
         for (key, rx_value) in op_state.read_set {
             let value = if let Some((_, value)) = self.recent_updates.get(&key) {
                 value.clone()

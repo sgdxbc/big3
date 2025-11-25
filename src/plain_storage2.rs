@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
+use hashbrown::HashMap;
 use rocksdb::{DB, WriteBatch};
-use rustc_hash::FxHashMap;
 use tempfile::{TempDir, tempdir};
 use tokio::{
     process::Command,
@@ -86,7 +86,7 @@ impl PlainStorageTask {
                     let _ = tx_get.send((key, tx.clone()));
                 }
                 drop(tx);
-                let mut state = FxHashMap::default();
+                let mut state = HashMap::new();
                 while let Ok((key, value)) = rx.recv() {
                     state.insert(key, value);
                 }

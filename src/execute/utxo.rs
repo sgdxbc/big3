@@ -1,6 +1,7 @@
 use bincode::{Decode, Encode};
+use hashbrown::HashMap;
 use log::warn;
-use rustc_hash::FxHashMap;
+use ring::digest;
 
 use super::{AbstractExecute, AbstractOp};
 
@@ -22,18 +23,16 @@ pub enum UtxoRes {
 
 impl UtxoOp {
     pub fn id(&self) -> TxnId {
-        use sha2::{Digest as _, Sha256};
-
-        let mut hasher = Sha256::new();
+        let mut hasher = digest::Context::new(&digest::SHA256);
         for (input_txn_id, input_index) in &self.inputs {
             hasher.update(input_txn_id);
-            hasher.update(input_index.to_le_bytes());
+            hasher.update(&input_index.to_le_bytes());
         }
         for (output_hash, output_value) in &self.outputs {
             hasher.update(output_hash);
-            hasher.update(output_value.to_le_bytes());
+            hasher.update(&output_value.to_le_bytes());
         }
-        hasher.finalize().into()
+        hasher.finish().as_ref().try_into().unwrap()
     }
 }
 
@@ -56,7 +55,7 @@ impl AbstractExecute for UtxoExecute {
     fn execute(
         &mut self,
         op: Self::Op,
-        state: &FxHashMap<Vec<u8>, Option<Vec<u8>>>,
+        state: &HashMap<Vec<u8>, Option<Vec<u8>>>,
     ) -> (Self::Res, Vec<(Vec<u8>, Option<Vec<u8>>)>) {
         for input in &op.inputs {
             // TODO check signature script

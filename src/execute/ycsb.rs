@@ -1,5 +1,5 @@
 use bincode::{Decode, Encode};
-use rustc_hash::FxHashMap;
+use hashbrown::HashMap;
 
 use crate::schema;
 
@@ -53,7 +53,7 @@ impl AbstractExecute for YcsbExecute {
     fn execute(
         &mut self,
         op: Self::Op,
-        state: &FxHashMap<Vec<u8>, Option<Vec<u8>>>,
+        state: &HashMap<Vec<u8>, Option<Vec<u8>>>,
     ) -> (Self::Res, Vec<(Vec<u8>, Option<Vec<u8>>)>) {
         match op {
             YcsbOp::Put(key, value) => (YcsbRes::Put, vec![(key.as_bytes().to_vec(), Some(value))]),

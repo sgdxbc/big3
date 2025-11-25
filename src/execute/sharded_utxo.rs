@@ -1,6 +1,6 @@
 use bincode::{Decode, Encode};
+use hashbrown::{HashMap, HashSet};
 use log::warn;
-use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::{execute::utxo, schema};
 
@@ -40,7 +40,7 @@ pub fn shard_of(num_shards: schema::ShardIndex, txn_id: &TxnId) -> schema::Shard
 pub struct ShardedUtxoExecute {
     num_shards: schema::ShardIndex,
     shard_index: schema::ShardIndex,
-    locked: FxHashSet<OutputIndex>,
+    locked: HashSet<OutputIndex>,
 }
 
 impl ShardedUtxoExecute {
@@ -60,7 +60,7 @@ impl AbstractExecute for ShardedUtxoExecute {
     fn execute(
         &mut self,
         op: Self::Op,
-        state: &FxHashMap<Vec<u8>, Option<Vec<u8>>>,
+        state: &HashMap<Vec<u8>, Option<Vec<u8>>>,
     ) -> (Self::Res, Vec<(Vec<u8>, Option<Vec<u8>>)>) {
         match op {
             ShardedUtxoOp::Prepare(op) => {
