@@ -9,7 +9,7 @@ use hdrhistogram::{
     serialization::{Serializer as _, V2Serializer},
 };
 use log::{info, warn};
-use rand::{Rng, RngCore as _, rng};
+use rand::{Rng, RngCore as _, random_range, rng};
 
 use crate::{
     common::RequestId,
@@ -17,7 +17,7 @@ use crate::{
         self,
         sharded_utxo::{self, ShardedUtxoOp, ShardedUtxoRes},
         utxo::{OutputIndex, TxnId, UtxoOp, UtxoRes},
-        ycsb::{VALUE_SIZE, YcsbConfig, YcsbOp},
+        ycsb::{VALUE_SIZE, YcsbOp},
     },
     schema,
 };
@@ -51,7 +51,6 @@ impl<C> Workload<C> {
                 context,
                 cfg.clone(),
                 num_concurrent,
-                num_shards,
                 scrape_state,
             )),
             schema::WorkloadConfig::Utxo(cfg) if num_shards == 1 => Self::Utxo(UtxoWorkload::new(
@@ -102,7 +101,6 @@ impl<C: WorkloadContext> Workload<C> {
 pub struct YcsbWorkload<C> {
     context: C,
     config: schema::YcsbWorkloadConfig,
-    app_config: YcsbConfig,
     num_concurrent: u32,
     zipfian: ScrambledZipfian,
     scrape_state: Arc<Mutex<ClientScrapeState>>,
@@ -119,15 +117,12 @@ impl<C> YcsbWorkload<C> {
         context: C,
         config: schema::YcsbWorkloadConfig,
         num_concurrent: u32,
-        num_shards: schema::ShardIndex,
         scrape_state: Arc<Mutex<ClientScrapeState>>,
     ) -> Self {
         let zipfian = ScrambledZipfian::new_range(0, config.num_keys - 1);
-        let app_config = YcsbConfig::new(config.num_keys, num_shards);
         Self {
             context,
             config,
-            app_config,
             num_concurrent,
             zipfian,
             scrape_state,
@@ -171,14 +166,13 @@ impl<C: WorkloadContext> YcsbWorkload<C> {
         let op = if rng().random_bool(self.config.read_ratio) {
             YcsbOp::Get(key)
         } else {
+            let field = random_range(0..10);
             let mut value = vec![0; VALUE_SIZE];
             rng().fill_bytes(&mut value);
-            YcsbOp::Put(key, value)
+            YcsbOp::Put(key, field, value)
         };
         let command = bincode::encode_to_vec(&op, bincode::config::standard()).unwrap();
-        let invoke_id = self
-            .context
-            .invoke(self.app_config.shard_of(key_index), command);
+        let invoke_id = self.context.invoke(0, command);
         self.working.insert(
             invoke_id,
             WorkingState {

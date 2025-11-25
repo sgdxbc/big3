@@ -40,13 +40,13 @@ impl PrefillTask {
             let storing_shards = storing_shards.clone();
             join_set.spawn(async move {
                 let mut batch = WriteBatch::new();
-                let mut value = [0u8; 100];
+                let mut value = [0u8; 1 << 10];
                 for j in i..(i + batch_size).min(schema.num_keys) {
                     let (mut key, value) = match &schema.app {
                         schema::App::Ycsb => {
                             let key = ycsb::key(j);
-                            rng.fill(&mut value[..ycsb::VALUE_SIZE]);
-                            (key.into(), &value[..ycsb::VALUE_SIZE])
+                            rng.fill(&mut value[..ycsb::VALUE_SIZE * 10]);
+                            (key.into(), &value[..ycsb::VALUE_SIZE * 10])
                         }
                         schema::App::Utxo => {
                             let txn = utxo::UtxoOp::prefilled(j);
