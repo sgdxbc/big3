@@ -26,7 +26,7 @@ pub mod utxo;
 pub mod ycsb;
 
 pub trait AbstractOp {
-    fn read_set(&self) -> Vec<Vec<u8>>;
+    fn read_set(&self) -> impl IntoIterator<Item = Vec<u8>>;
 }
 
 pub trait AbstractExecute {
@@ -37,7 +37,10 @@ pub trait AbstractExecute {
         &mut self,
         op: Self::Op,
         state: &HashMap<Vec<u8>, Option<Vec<u8>>>,
-    ) -> (Self::Res, Vec<(Vec<u8>, Option<Vec<u8>>)>);
+    ) -> (
+        Self::Res,
+        impl IntoIterator<Item = (Vec<u8>, Option<Vec<u8>>)> + use<Self> + Clone,
+    );
 }
 
 // pub struct ExecuteSourceChannels {

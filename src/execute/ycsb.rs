@@ -18,10 +18,10 @@ pub enum YcsbRes {
 }
 
 impl AbstractOp for YcsbOp {
-    fn read_set(&self) -> Vec<Vec<u8>> {
+    fn read_set(&self) -> impl IntoIterator<Item = Vec<u8>> {
         match self {
-            YcsbOp::Put(_, _) => Vec::new(),
-            YcsbOp::Get(key) => vec![key.as_bytes().to_vec()],
+            YcsbOp::Put(_, _) => None,
+            YcsbOp::Get(key) => Some(key.as_bytes().to_vec()),
         }
     }
 }
@@ -54,13 +54,16 @@ impl AbstractExecute for YcsbExecute {
         &mut self,
         op: Self::Op,
         state: &HashMap<Vec<u8>, Option<Vec<u8>>>,
-    ) -> (Self::Res, Vec<(Vec<u8>, Option<Vec<u8>>)>) {
+    ) -> (
+        Self::Res,
+        impl IntoIterator<Item = (Vec<u8>, Option<Vec<u8>>)> + use<> + Clone,
+    ) {
         match op {
-            YcsbOp::Put(key, value) => (YcsbRes::Put, vec![(key.as_bytes().to_vec(), Some(value))]),
+            YcsbOp::Put(key, value) => (YcsbRes::Put, Some((key.as_bytes().to_vec(), Some(value)))),
             YcsbOp::Get(key) => {
                 let value = state[key.as_bytes()].clone().expect("key not found");
                 // let value = vec![0; 100 - 16];
-                (YcsbRes::Get(value), Vec::new())
+                (YcsbRes::Get(value), None)
             }
         }
     }

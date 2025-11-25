@@ -22,11 +22,13 @@ pub enum ShardedUtxoRes {
 }
 
 impl AbstractOp for ShardedUtxoOp {
-    fn read_set(&self) -> Vec<Vec<u8>> {
+    fn read_set(&self) -> impl IntoIterator<Item = Vec<u8>> {
         match self {
-            ShardedUtxoOp::Prepare(op) => op.read_set(),
-            _ => vec![],
+            ShardedUtxoOp::Prepare(op) => Some(op.read_set()),
+            _ => None,
         }
+        .into_iter()
+        .flatten()
     }
 }
 
@@ -61,7 +63,10 @@ impl AbstractExecute for ShardedUtxoExecute {
         &mut self,
         op: Self::Op,
         state: &HashMap<Vec<u8>, Option<Vec<u8>>>,
-    ) -> (Self::Res, Vec<(Vec<u8>, Option<Vec<u8>>)>) {
+    ) -> (
+        Self::Res,
+        impl IntoIterator<Item = (Vec<u8>, Option<Vec<u8>>)> + use<> + Clone,
+    ) {
         match op {
             ShardedUtxoOp::Prepare(op) => {
                 for input in &op.inputs {

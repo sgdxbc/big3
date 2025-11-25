@@ -41,8 +41,8 @@ pub fn key(output_index: &OutputIndex) -> Vec<u8> {
 }
 
 impl AbstractOp for UtxoOp {
-    fn read_set(&self) -> Vec<Vec<u8>> {
-        self.inputs.iter().map(key).collect()
+    fn read_set(&self) -> impl IntoIterator<Item = Vec<u8>> {
+        self.inputs.iter().map(key)
     }
 }
 
@@ -56,7 +56,10 @@ impl AbstractExecute for UtxoExecute {
         &mut self,
         op: Self::Op,
         state: &HashMap<Vec<u8>, Option<Vec<u8>>>,
-    ) -> (Self::Res, Vec<(Vec<u8>, Option<Vec<u8>>)>) {
+    ) -> (
+        Self::Res,
+        impl IntoIterator<Item = (Vec<u8>, Option<Vec<u8>>)> + use<> + Clone,
+    ) {
         for input in &op.inputs {
             // TODO check signature script
             if !state.contains_key(&key(input)) {
