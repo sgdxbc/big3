@@ -37,6 +37,12 @@ pub struct YcsbExecute {
 
 impl YcsbExecute {
     pub fn new(num_shards: u8, shard_index: u8, num_keys: u64) -> Self {
+        assert!(shard_index <= num_shards);
+        if shard_index == num_shards {
+            return Self {
+                key_range: "".to_string().."".to_string(),
+            };
+        }
         let keys_per_shard = num_keys / num_shards as u64;
         let start_index = shard_index as u64 * keys_per_shard;
         let end_index = if shard_index == num_shards - 1 {

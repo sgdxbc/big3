@@ -61,8 +61,8 @@ impl FullReplicaNodeTask {
             storage.channels.fetch_handle(),
             storage.channels.post_handle(),
             network_outgoing.channels.handle(),
-            schema.node_index,
-            schema.config.num_faulty_nodes,
+            schema.shard_node_index,
+            schema.num_shard_faulty_nodes,
             execute,
         );
 

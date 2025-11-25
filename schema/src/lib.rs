@@ -16,10 +16,15 @@ pub type ShardIndex = u8;
 pub struct ReplicaTask {
     pub ips: Vec<IpAddr>,
     pub latencies: Option<Vec<Vec<u32>>>,
+
     pub config: ReplicaConfig,
     pub node_index: NodeIndex,
+
     pub num_shards: ShardIndex,
     pub shard_index: ShardIndex,
+    pub num_shard_faulty_nodes: NodeIndex,
+    pub shard_node_index: NodeIndex,
+
     pub storage: Storage,
     pub app: App,
     pub stripe_interval: Duration,
@@ -69,7 +74,7 @@ pub struct ReplicaConfig {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ClientConfig {
-    pub num_nodes: NodeIndex,
+    // pub num_nodes: NodeIndex,
     pub num_faulty_nodes: NodeIndex,
 }
 

@@ -30,3 +30,19 @@ impl App {
         }
     }
 }
+
+impl Sharding {
+    pub fn num_shards(&self) -> u8 {
+        match self {
+            Sharding::Single => 1,
+            Sharding::Multi(num_shards, _) => *num_shards,
+        }
+    }
+
+    pub fn num_shard_faulty_nodes(&self) -> u16 {
+        match self {
+            Sharding::Single => NUM_FAULTY_NODES,
+            Sharding::Multi(_, num_shard_faulty_nodes) => *num_shard_faulty_nodes,
+        }
+    }
+}

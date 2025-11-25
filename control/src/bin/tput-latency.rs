@@ -257,7 +257,7 @@ async fn run_workload(
         let client_task = big_schema::ClientTask {
             ips: ips.clone(),
             config: big_schema::ClientConfig {
-                num_nodes: num_nodes(num_faulty_nodes),
+                // num_nodes: num_nodes(num_faulty_nodes),
                 num_faulty_nodes,
             },
             workload_config: big_schema::ClientWorkloadConfig {
