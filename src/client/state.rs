@@ -17,7 +17,7 @@ pub struct Client<C> {
     id: ClientId,
 
     seq: ClientSeq,
-    working_states: HashMap<ClientSeq, WorkingState>,
+    working_states: HashMap<(ClientSeq, u8), WorkingState>,
 }
 
 struct WorkingState {
@@ -38,7 +38,7 @@ impl<C> Client<C> {
 }
 
 impl<C: ClientContext> Client<C> {
-    pub fn invoke(&mut self, command: Vec<u8>, context: ResponseContext<Vec<u8>>) {
+    pub fn invoke(&mut self, command: Vec<u8>, context: HashMap<u8, ResponseContext<Vec<u8>>>) {
         self.seq += 1;
 
         let request = Request {
@@ -48,18 +48,23 @@ impl<C: ClientContext> Client<C> {
         };
         self.context.send(request);
 
-        self.working_states.insert(
-            self.seq,
-            WorkingState {
-                replies: Default::default(),
-                context,
-            },
-        );
+        for (shard_index, ctx) in context {
+            self.working_states.insert(
+                (self.seq, shard_index),
+                WorkingState {
+                    replies: Default::default(),
+                    context: ctx,
+                },
+            );
+        }
     }
 
     pub fn on_message(&mut self, message: Reply) {
         assert!(message.client_seq <= self.seq);
-        let Entry::Occupied(mut state) = self.working_states.entry(message.client_seq) else {
+        let Entry::Occupied(mut state) = self
+            .working_states
+            .entry((message.client_seq, message.shard_index))
+        else {
             warn!(
                 "stale reply for client_seq {} (no working state)",
                 message.client_seq
@@ -70,7 +75,7 @@ impl<C: ClientContext> Client<C> {
         state
             .get_mut()
             .replies
-            .insert(message.node_index, message.res.clone());
+            .insert(message.shard_node_index, message.res.clone());
         if state.get().replies.len() > self.config.num_faulty_nodes as usize {
             if state
                 .get()

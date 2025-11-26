@@ -16,7 +16,8 @@ pub struct Request {
 pub struct Reply {
     pub client_seq: ClientSeq,
     pub res: Vec<u8>,
-    pub node_index: NodeIndex,
+    pub shard_index: u8,
+    pub shard_node_index: NodeIndex,
 }
 
 pub type RequestId = u64;
@@ -56,8 +57,8 @@ impl<R, P> RequestContext<R, P> {
 }
 
 pub struct ResponseContext<T> {
-    id: RequestId,
-    tx: UnboundedSender<(RequestId, T)>,
+    pub id: RequestId,
+    pub tx: UnboundedSender<(RequestId, T)>,
 }
 
 impl<T> ResponseContext<T> {

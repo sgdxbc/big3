@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -13,16 +14,63 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     client::ClientHandle,
-    common::{RequestContext, RequestId},
+    common::{RequestId, ResponseContext},
     schema,
 };
 
-use self::state::{InvokeId, ShardIndex, Workload, WorkloadContext};
+use self::state::{InvokeId, Workload, WorkloadContext};
 
 mod state;
 mod zipfian;
 
 pub use state::ClientScrapeState;
+
+pub struct RequestContext<R, P> {
+    id: RequestId,
+    tx_request: UnboundedSender<(R, HashMap<u8, ResponseContext<P>>)>,
+    tx_response: UnboundedSender<(RequestId, P)>,
+}
+
+impl<R, P> RequestContext<R, P> {
+    pub fn new(
+        tx_request: UnboundedSender<(R, HashMap<u8, ResponseContext<P>>)>,
+        tx_response: UnboundedSender<(RequestId, P)>,
+    ) -> Self {
+        Self {
+            id: 0,
+            tx_request,
+            tx_response,
+        }
+    }
+
+    pub fn request(&mut self, shards: impl IntoIterator<Item = u8>, request: R) -> RequestId {
+        self.request_with_id(self.id + 1, shards, request)
+    }
+
+    pub fn request_with_id(
+        &mut self,
+        id: RequestId,
+        shards: impl IntoIterator<Item = u8>,
+        request: R,
+    ) -> RequestId {
+        assert!(id > self.id);
+        self.id = id;
+        let ctx = shards
+            .into_iter()
+            .map(|shard_index| {
+                (
+                    shard_index,
+                    ResponseContext {
+                        id: self.id,
+                        tx: self.tx_response.clone(),
+                    },
+                )
+            })
+            .collect();
+        let _ = self.tx_request.send((request, ctx));
+        self.id
+    }
+}
 
 pub struct ClientWorkerChannels {
     tx_invoke_response: UnboundedSender<(RequestId, Vec<u8>)>,
@@ -121,6 +169,7 @@ struct ClientWorkerTaskContext {
 
 impl ClientWorkerTaskContext {
     fn new(invokes: Vec<RequestContext<Vec<u8>, Vec<u8>>>) -> Self {
+        assert_eq!(invokes.len(), 1);
         Self {
             invokes,
             invoke_id: 0,
@@ -129,8 +178,8 @@ impl ClientWorkerTaskContext {
 }
 
 impl WorkloadContext for ClientWorkerTaskContext {
-    fn invoke(&mut self, shard: ShardIndex, command: Vec<u8>) -> InvokeId {
+    fn invoke(&mut self, shards: impl IntoIterator<Item = u8>, command: Vec<u8>) -> InvokeId {
         self.invoke_id += 1;
-        self.invokes[shard as usize].request_with_id(self.invoke_id, command)
+        self.invokes[0].request_with_id(self.invoke_id, shards, command)
     }
 }

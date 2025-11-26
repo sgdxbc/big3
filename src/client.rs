@@ -24,8 +24,8 @@ use self::state::{Client, ClientContext};
 mod state;
 
 pub struct ClientChannels {
-    tx_invoke: UnboundedSender<(Vec<u8>, ResponseContext<Vec<u8>>)>,
-    rx_invoke: UnboundedReceiver<(Vec<u8>, ResponseContext<Vec<u8>>)>,
+    tx_invoke: UnboundedSender<(Vec<u8>, HashMap<u8, ResponseContext<Vec<u8>>>)>,
+    rx_invoke: UnboundedReceiver<(Vec<u8>, HashMap<u8, ResponseContext<Vec<u8>>>)>,
 
     tx_incoming_message: Sender<Reply>,
     rx_incoming_message: Receiver<Reply>,
@@ -33,7 +33,7 @@ pub struct ClientChannels {
 
 #[derive(Clone)]
 pub struct ClientHandle {
-    pub tx_invoke: UnboundedSender<(Vec<u8>, ResponseContext<Vec<u8>>)>,
+    pub tx_invoke: UnboundedSender<(Vec<u8>, HashMap<u8, ResponseContext<Vec<u8>>>)>,
     tx_incoming_message: Sender<Reply>,
 }
 

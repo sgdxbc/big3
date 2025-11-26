@@ -77,8 +77,9 @@ pub struct ExecuteTask<E: AbstractExecute> {
     post_handle: PostHandle,
     network_outgoing: NetworkOutgoingHandle,
 
-    node_index: NodeIndex,
-    num_faulty_nodes: NodeIndex,
+    shard_index: u8,
+    shard_node_index: NodeIndex,
+    num_shard_faulty_nodes: NodeIndex,
 
     state: E,
     fetching_requests: Vec<(E::Op, ClientId, ClientSeq)>,
@@ -99,8 +100,9 @@ impl<E: AbstractExecute> ExecuteTask<E> {
         fetch_handle: FetchHandle,
         post_handle: PostHandle,
         network_outgoing: NetworkOutgoingHandle,
-        node_index: NodeIndex,
-        num_faulty_nodes: NodeIndex,
+        shard_index: u8,
+        shard_node_index: NodeIndex,
+        num_shard_faulty_nodes: NodeIndex,
         state: E,
     ) -> Self {
         Self {
@@ -108,11 +110,12 @@ impl<E: AbstractExecute> ExecuteTask<E> {
             fetch_handle,
             post_handle,
             network_outgoing,
-            node_index,
-            num_faulty_nodes,
+            shard_index,
+            shard_node_index,
+            num_shard_faulty_nodes,
             state,
             fetching_requests: Default::default(),
-            reply_flag: node_index,
+            reply_flag: shard_node_index,
             metrics: ExecuteMetrics {
                 fetch: Latency::new(),
                 execute: Latency::new(),
@@ -179,15 +182,16 @@ where
             updates.extend(op_updates.clone());
             state.extend(op_updates);
 
-            if self.reply_flag <= self.num_faulty_nodes {
+            if self.reply_flag <= self.num_shard_faulty_nodes {
                 let reply = Reply {
                     client_seq,
                     res: bincode::encode_to_vec(res, bincode::config::standard()).unwrap(),
-                    node_index: self.node_index,
+                    shard_index: self.shard_index,
+                    shard_node_index: self.shard_node_index,
                 };
                 let _ = self.network_outgoing.send_message(client_id, reply);
             }
-            self.reply_flag = (self.reply_flag + 1) % (2 * self.num_faulty_nodes + 1);
+            self.reply_flag = (self.reply_flag + 1) % (2 * self.num_shard_faulty_nodes + 1);
         }
         let _ = self.post_handle.tx_post.send(updates);
     }

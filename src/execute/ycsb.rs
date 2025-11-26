@@ -23,6 +23,16 @@ pub fn key(index: u64) -> String {
     format!("key-{index:012}")
 }
 
+pub fn shard_of_key(index: u64, num_shards: u8, num_keys: u64) -> u8 {
+    let keys_per_shard = num_keys / num_shards as u64;
+    let shard_index = index / keys_per_shard;
+    if shard_index >= num_shards as u64 {
+        num_shards - 1
+    } else {
+        shard_index as u8
+    }
+}
+
 impl AbstractOp for YcsbOp {
     fn read_set(&self) -> impl IntoIterator<Item = Vec<u8>> {
         match self {

@@ -28,7 +28,7 @@ pub type InvokeId = RequestId;
 pub type ShardIndex = crate::schema::ShardIndex;
 
 pub trait WorkloadContext {
-    fn invoke(&mut self, shard: ShardIndex, command: Vec<u8>) -> InvokeId;
+    fn invoke(&mut self, shards: impl IntoIterator<Item = u8>, command: Vec<u8>) -> InvokeId;
 }
 
 pub enum Workload<C> {
@@ -50,6 +50,7 @@ impl<C> Workload<C> {
             schema::WorkloadConfig::Ycsb(cfg) => Self::Ycsb(YcsbWorkload::new(
                 context,
                 cfg.clone(),
+                num_shards,
                 num_concurrent,
                 scrape_state,
             )),
@@ -101,6 +102,7 @@ impl<C: WorkloadContext> Workload<C> {
 pub struct YcsbWorkload<C> {
     context: C,
     config: schema::YcsbWorkloadConfig,
+    num_shards: schema::ShardIndex,
     num_concurrent: u32,
     zipfian: ScrambledZipfian,
     scrape_state: Arc<Mutex<ClientScrapeState>>,
@@ -116,6 +118,7 @@ impl<C> YcsbWorkload<C> {
     pub fn new(
         context: C,
         config: schema::YcsbWorkloadConfig,
+        num_shards: schema::ShardIndex,
         num_concurrent: u32,
         scrape_state: Arc<Mutex<ClientScrapeState>>,
     ) -> Self {
@@ -123,6 +126,7 @@ impl<C> YcsbWorkload<C> {
         Self {
             context,
             config,
+            num_shards,
             num_concurrent,
             zipfian,
             scrape_state,
@@ -172,7 +176,14 @@ impl<C: WorkloadContext> YcsbWorkload<C> {
             YcsbOp::Put(key, field, value)
         };
         let command = bincode::encode_to_vec(&op, bincode::config::standard()).unwrap();
-        let invoke_id = self.context.invoke(0, command);
+        let invoke_id = self.context.invoke(
+            [execute::ycsb::shard_of_key(
+                key_index,
+                self.num_shards,
+                self.config.num_keys,
+            )],
+            command,
+        );
         self.working.insert(
             invoke_id,
             WorkingState {
@@ -264,7 +275,7 @@ impl<C: WorkloadContext> UtxoWorkload<C, UtxoWorkingState> {
         let txn_id = op.id();
         let command = bincode::encode_to_vec(&op, bincode::config::standard()).unwrap();
         assert_eq!(self.num_shards, 1);
-        let invoke_id = self.context.invoke(0, command);
+        let invoke_id = self.context.invoke([0], command);
         self.working.insert(
             txn_id,
             UtxoWorkingState {
@@ -294,7 +305,7 @@ impl<C: WorkloadContext> UtxoWorkload<C, ShardedUtxoWorkingState> {
     }
 
     pub fn on_invoke_response(&mut self, invoke_id: InvokeId, res: Vec<u8>) {
-        let txn_id = self.invoke_txns.remove(&invoke_id).unwrap();
+        let txn_id = self.invoke_txns[&invoke_id];
         let working = self.working.get_mut(&txn_id).expect("no ongoing work");
         assert_eq!(txn_id, working.op.id());
         let res = bincode::decode_from_slice(&res, bincode::config::standard())
@@ -308,6 +319,8 @@ impl<C: WorkloadContext> UtxoWorkload<C, ShardedUtxoWorkingState> {
                 pending_shards.remove(&shard);
                 *success &= shard_success;
                 if pending_shards.is_empty() {
+                    self.invoke_txns.remove(&invoke_id);
+
                     let command = bincode::encode_to_vec(
                         ShardedUtxoOp::Commit(working.op.clone(), *success),
                         bincode::config::standard(),
@@ -316,19 +329,15 @@ impl<C: WorkloadContext> UtxoWorkload<C, ShardedUtxoWorkingState> {
                     let mut pending_shards = HashSet::new();
                     for input in &working.op.inputs {
                         let shard = sharded_utxo::shard_of(self.num_shards, &input.0);
-                        if pending_shards.insert(shard) {
-                            let invoke_id = self.context.invoke(0, command.clone());
-                            self.invoke_txns.insert(invoke_id, txn_id);
-                        }
+                        pending_shards.insert(shard);
                     }
                     if *success {
                         let shard = sharded_utxo::shard_of(self.num_shards, &txn_id);
-                        if pending_shards.insert(shard) {
-                            let invoke_id = self.context.invoke(0, command.clone());
-                            self.invoke_txns.insert(invoke_id, txn_id);
-                        }
+                        pending_shards.insert(shard);
                     }
                     assert!(!pending_shards.is_empty());
+                    let invoke_id = self.context.invoke(pending_shards.clone(), command);
+                    self.invoke_txns.insert(invoke_id, txn_id);
                     working.status = ShardedUtxoStatus::Committing(*success, pending_shards);
                 }
             }
@@ -338,6 +347,8 @@ impl<C: WorkloadContext> UtxoWorkload<C, ShardedUtxoWorkingState> {
             ) => {
                 pending_shards.remove(&shard);
                 if pending_shards.is_empty() {
+                    self.invoke_txns.remove(&invoke_id);
+
                     if *success {
                         let latency = working.start.elapsed();
                         {
@@ -374,7 +385,7 @@ impl<C: WorkloadContext> UtxoWorkload<C, ShardedUtxoWorkingState> {
         )
         .unwrap();
         let shard = sharded_utxo::shard_of(self.num_shards, &input.0);
-        let invoke_id = self.context.invoke(0, command);
+        let invoke_id = self.context.invoke([shard], command);
         self.working.insert(
             txn_id,
             ShardedUtxoWorkingState {
