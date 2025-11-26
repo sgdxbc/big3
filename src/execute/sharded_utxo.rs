@@ -59,6 +59,27 @@ impl AbstractExecute for ShardedUtxoExecute {
     type Op = ShardedUtxoOp;
     type Res = ShardedUtxoRes;
 
+    fn should_execute(&self, op: &Self::Op) -> bool {
+        match op {
+            ShardedUtxoOp::Prepare(utxo_op) | ShardedUtxoOp::Commit(utxo_op, _) => {
+                for input in &utxo_op.inputs {
+                    if shard_of(self.num_shards, &input.0) == self.shard_index {
+                        return true;
+                    }
+                }
+                if let ShardedUtxoOp::Commit(_, success) = op
+                    && *success
+                {
+                    let txn_id = utxo_op.id();
+                    if shard_of(self.num_shards, &txn_id) == self.shard_index {
+                        return true;
+                    }
+                }
+                false
+            }
+        }
+    }
+
     fn execute(
         &mut self,
         op: Self::Op,

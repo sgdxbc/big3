@@ -198,8 +198,6 @@ pub struct UtxoWorkingState {
 }
 
 impl<C, WS> UtxoWorkload<C, WS> {
-    const POOL_SIZE: u32 = 1_000_000;
-
     pub fn new(
         context: C,
         config: &schema::UtxoWorkloadConfig,
@@ -208,10 +206,9 @@ impl<C, WS> UtxoWorkload<C, WS> {
         scrape_state: Arc<Mutex<ClientScrapeState>>,
         pool_index: u32,
     ) -> Self {
-        // ensure that fresh outputs are not reused too quickly
-        assert!(num_concurrent * 2 < Self::POOL_SIZE);
-        assert!((pool_index + 1) as u64 * Self::POOL_SIZE as u64 <= config.num_outputs);
-        let output_pool = (pool_index * Self::POOL_SIZE..(pool_index + 1) * Self::POOL_SIZE)
+        let pool_size = num_concurrent;
+        assert!((pool_index + 1) as u64 * pool_size as u64 <= config.num_outputs);
+        let output_pool = (pool_index * pool_size..(pool_index + 1) * pool_size)
             .map(|i| {
                 let op = UtxoOp::prefilled(i as _);
                 (op.id(), 0)
@@ -320,14 +317,14 @@ impl<C: WorkloadContext> UtxoWorkload<C, ShardedUtxoWorkingState> {
                     for input in &working.op.inputs {
                         let shard = sharded_utxo::shard_of(self.num_shards, &input.0);
                         if pending_shards.insert(shard) {
-                            let invoke_id = self.context.invoke(shard, command.clone());
+                            let invoke_id = self.context.invoke(0, command.clone());
                             self.invoke_txns.insert(invoke_id, txn_id);
                         }
                     }
                     if *success {
                         let shard = sharded_utxo::shard_of(self.num_shards, &txn_id);
                         if pending_shards.insert(shard) {
-                            let invoke_id = self.context.invoke(shard, command.clone());
+                            let invoke_id = self.context.invoke(0, command.clone());
                             self.invoke_txns.insert(invoke_id, txn_id);
                         }
                     }
@@ -377,7 +374,7 @@ impl<C: WorkloadContext> UtxoWorkload<C, ShardedUtxoWorkingState> {
         )
         .unwrap();
         let shard = sharded_utxo::shard_of(self.num_shards, &input.0);
-        let invoke_id = self.context.invoke(shard, command);
+        let invoke_id = self.context.invoke(0, command);
         self.working.insert(
             txn_id,
             ShardedUtxoWorkingState {

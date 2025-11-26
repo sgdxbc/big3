@@ -96,18 +96,11 @@ impl FullReplicaNodeTask {
                 .await
             }
             schema::App::Utxo(_) => {
-                // let execute = crate::execute::sharded_utxo::ShardedUtxoExecute::new(
-                //     schema.num_shards,
-                //     schema.shard_index,
-                // );
-                // Self::load_inner(
-                //     schema,
-                //     execute,
-                //     GeneralExecuteSourceTask::ShardedUtxo,
-                //     GeneralExecuteSchedTask::ShardedUtxo,
-                // )
-                // .await
-                todo!()
+                let execute = crate::execute::sharded_utxo::ShardedUtxoExecute::new(
+                    schema.num_shards,
+                    schema.shard_index,
+                );
+                Self::load_inner(schema, execute, GeneralExecuteTask::ShardedUtxo).await
             }
         }
     }

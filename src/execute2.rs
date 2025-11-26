@@ -255,6 +255,7 @@ where
 
 pub enum GeneralExecuteTask {
     Utxo(ExecuteTask<crate::execute::utxo::UtxoExecute>),
+    ShardedUtxo(ExecuteTask<crate::execute::sharded_utxo::ShardedUtxoExecute>),
     Ycsb(ExecuteTask<crate::execute::ycsb::YcsbExecute>),
 }
 
@@ -262,6 +263,7 @@ impl GeneralExecuteTask {
     pub async fn run(self, stop: CancellationToken) -> anyhow::Result<()> {
         match self {
             Self::Utxo(task) => task.run(stop).await,
+            Self::ShardedUtxo(task) => task.run(stop).await,
             Self::Ycsb(task) => task.run(stop).await,
         }
     }
