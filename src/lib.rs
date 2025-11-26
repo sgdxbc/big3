@@ -10,6 +10,7 @@ pub mod execute2;
 pub mod metrics;
 pub mod node;
 // pub mod plain_storage;
+pub mod merkle;
 pub mod plain_storage2;
 pub mod prefill;
 pub mod storage;

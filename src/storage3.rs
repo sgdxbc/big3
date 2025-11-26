@@ -143,8 +143,8 @@ pub struct StorageTask {
     temp_dir: tempfile::TempDir,
     db: Arc<DB>,
 
-    tx_fetch_dispatch: flume::Sender<(Vec<u8>, flume::Sender<(Vec<u8>, Option<Vec<u8>>)>)>,
-    rx_fetch_dispatch: flume::Receiver<(Vec<u8>, flume::Sender<(Vec<u8>, Option<Vec<u8>>)>)>,
+    tx_fetch_dispatch: flume::Sender<(Vec<u8>, flume::Sender<(Vec<u8>, Option<(Vec<u8>, u32)>)>)>,
+    rx_fetch_dispatch: flume::Receiver<(Vec<u8>, flume::Sender<(Vec<u8>, Option<(Vec<u8>, u32)>)>)>,
 }
 
 impl StorageTask {
@@ -192,13 +192,19 @@ impl StorageTask {
     fn get_worker(
         db: Arc<DB>,
         config: BigStorageConfig,
-        rx_key: flume::Receiver<(Vec<u8>, flume::Sender<(Vec<u8>, Option<Vec<u8>>)>)>,
+        rx_key: flume::Receiver<(Vec<u8>, flume::Sender<(Vec<u8>, Option<(Vec<u8>, u32)>)>)>,
     ) -> anyhow::Result<()> {
         while let Ok((key, tx)) = rx_key.recv() {
             // assert!(pushing_shards.contains(&config.shard_of_key(&key)));
             let shard = config.shard_of_key(&key);
-            let value = db.get([&shard.to_be_bytes()[..], &key].concat())?;
-            let _ = tx.send((key, value.clone()));
+            let value = db
+                .get([&shard.to_be_bytes()[..], &key].concat())?
+                .map(|mut v| {
+                    let i = v.split_off(v.len() - 4);
+                    let index = u32::from_le_bytes(i.try_into().unwrap());
+                    (v, index)
+                });
+            let _ = tx.send((key, value));
         }
         Ok(())
     }
@@ -252,7 +258,7 @@ struct RetrieveWorker {
     fetched_handle: FetchedHandle,
     post_done_handle: PostDoneHandle,
     network_interconnect: NetworkInterconnectHandle,
-    tx_fetch_dispatch: flume::Sender<(Vec<u8>, flume::Sender<(Vec<u8>, Option<Vec<u8>>)>)>,
+    tx_fetch_dispatch: flume::Sender<(Vec<u8>, flume::Sender<(Vec<u8>, Option<(Vec<u8>, u32)>)>)>,
 
     config: BigStorageConfig,
     storing_shards: HashSet<u32>,
@@ -289,21 +295,29 @@ impl RetrieveWorker {
             .iter()
             .map(|&shard| (shard, Vec::new()))
             .collect::<HashMap<_, _>>();
+        let mut pushing_shard_states = self
+            .pushing_shards
+            .iter()
+            .map(|&shard| (shard, Vec::new()))
+            .collect::<HashMap<_, _>>();
         while let Ok((key, value)) = rx.recv() {
             let shard = self.config.shard_of_key(&key);
-            shard_states.get_mut(&shard).unwrap().push((key, value));
+            if self.pushing_shards.contains(&shard) {
+                pushing_shard_states
+                    .get_mut(&shard)
+                    .unwrap()
+                    // TODO prove
+                    .push((key.clone(), value.as_ref().map(|(v, _)| v.clone())));
+            }
+            shard_states
+                .get_mut(&shard)
+                .unwrap()
+                .push((key, value.map(|(v, _)| v)));
         }
         info!("version {} storage done", self.version);
         let push_value = message::PushValue {
             version: self.version,
-            state: self
-                .pushing_shards
-                .iter()
-                .map(|shard| {
-                    let state = shard_states[shard].clone();
-                    (*shard, state)
-                })
-                .collect(),
+            state: pushing_shard_states.into_iter().collect(),
         };
         debug!(
             "version {} pushing to network {} shards",

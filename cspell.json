@@ -9,6 +9,7 @@
         "Deque",
         "hashbrown",
         "hdrhistogram",
+        "merkle",
         "nanos",
         "oneshot",
         "reqwest",
