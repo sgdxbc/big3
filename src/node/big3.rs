@@ -10,7 +10,7 @@ use crate::{
         server::{NetworkAcceptTask, NetworkOutgoingChannels, NetworkOutgoingTask},
     },
     schema,
-    storage2::{StorageChannels, StorageTask},
+    storage3::{StorageChannels, StorageTask},
 };
 
 pub struct BigReplicaNodeTask {

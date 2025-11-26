@@ -201,6 +201,7 @@ dependencies = [
  "reed-solomon-simd",
  "ring",
  "rocksdb",
+ "rustc-hash",
  "rustix",
  "tempfile",
  "tikv-jemallocator",
