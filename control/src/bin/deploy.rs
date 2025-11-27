@@ -24,7 +24,19 @@ async fn main() -> anyhow::Result<()> {
     let download = async {
         sleep(Duration::from_secs(1)).await;
         let mut tasks = JoinSet::new();
-        for server in cluster.servers.into_iter().chain(cluster.clients) {
+        for server in cluster
+            .servers
+            .into_iter()
+            .chain(cluster.clients)
+            .chain([cluster.server_prefill_big])
+        {
+            if server.public_dns.is_empty() {
+                println!(
+                    "Skipping download for instance {} with no public DNS",
+                    server.private_ip
+                );
+                continue;
+            }
             tasks.spawn(
                 server
                     .ssh()

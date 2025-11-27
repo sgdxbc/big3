@@ -27,6 +27,7 @@ pub type Instance = TerraformOutputInstance;
 #[derive(Debug)]
 pub struct Cluster {
     pub servers: Vec<Instance>,
+    pub server_prefill_big: Instance,
     pub clients: Vec<Instance>,
     pub build: Instance,
 }
@@ -43,10 +44,12 @@ impl Cluster {
     pub async fn from_terraform() -> anyhow::Result<Self> {
         let servers = Self::terraform_output::<TerraformOutputInstances>("servers").await?;
         let clients = Self::terraform_output::<TerraformOutputInstances>("clients").await?;
+        let server_prefill_big = Self::terraform_output::<TerraformOutputInstance>("server_prefill_big").await?;
         let build = Self::terraform_output::<TerraformOutputInstance>("build").await?;
         Ok(Self {
             servers: servers.0,
             clients: clients.0,
+            server_prefill_big,
             build,
         })
     }

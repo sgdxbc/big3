@@ -12,6 +12,11 @@ async fn main() -> anyhow::Result<()> {
     for server in &cluster.servers {
         println!("  {:15} {}", server.private_ip, server.public_dns);
     }
+    println!("Server Prefill Big");
+    println!(
+        "  {:15} {}",
+        cluster.server_prefill_big.private_ip, cluster.server_prefill_big.public_dns
+    );
     println!("Clients");
     for client in &cluster.clients {
         println!("  {:15} {}", client.private_ip, client.public_dns);
