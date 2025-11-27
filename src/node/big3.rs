@@ -73,6 +73,7 @@ impl BigReplicaNodeTask {
             network_interconnect_big.handle(),
             (&schema.config).into(),
             schema.node_index,
+            &schema.app,
         )
         .await?;
 

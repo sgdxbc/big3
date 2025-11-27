@@ -148,12 +148,19 @@ async fn run_prefill_storage(
             };
             run_prefill(db.clone(), num_keys, wrapped_key_value).await?;
             let cf = db.cf_handle("merkle").unwrap();
+            let mut roots = Vec::new();
             for (shard, hashes) in shard_hashes.into_iter().enumerate() {
                 let tree = MerkleTree::new(hashes);
                 info!("shard {} merkle tree root: {:02x?}", shard, tree.root());
+                roots.push(tree.root());
                 let tree_bytes = bincode::encode_to_vec(&tree, bincode::config::standard())?;
                 db.put_cf(cf, (shard as u32).to_be_bytes(), &tree_bytes[..])?;
             }
+            db.put_cf(
+                cf,
+                b"roots",
+                bincode::encode_to_vec(&roots, bincode::config::standard())?,
+            )?;
             Ok(())
         }
     }

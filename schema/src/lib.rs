@@ -68,6 +68,8 @@ pub type NodeIndex = u16;
 pub struct ReplicaConfig {
     pub num_nodes: NodeIndex,
     pub num_faulty_nodes: NodeIndex,
+
+    pub cache_size: usize,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -105,6 +107,7 @@ pub enum WorkloadConfig {
 pub struct YcsbWorkloadConfig {
     pub num_keys: u64,
     pub read_ratio: f64,
+    pub theta: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

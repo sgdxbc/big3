@@ -7,6 +7,9 @@ pub const READ_RATIO: f64 = 0.5;
 pub const NUM_FAULTY_NODES: u16 = 1;
 pub const NUM_CONCURRENT: u32 = 1;
 
+pub const THETA: f64 = 0.99;
+pub const CACHE_SIZE: usize = 8_000_000;
+
 pub enum Sharding {
     Single,
     Multi(u8, u16), // (num_shards, num_shard_faulty_nodes)

@@ -23,6 +23,7 @@ impl App {
             App::Ycsb => big_schema::WorkloadConfig::Ycsb(big_schema::YcsbWorkloadConfig {
                 num_keys: NUM_KEYS,
                 read_ratio: READ_RATIO,
+                theta: THETA,
             }),
             App::Utxo => big_schema::WorkloadConfig::Utxo(big_schema::UtxoWorkloadConfig {
                 num_outputs: NUM_KEYS,

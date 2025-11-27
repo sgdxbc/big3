@@ -3,8 +3,8 @@ use std::time::Duration;
 use big_control::{
     Cluster, Instance,
     configs::{
-        APP, LIVE_DURATION, NETWORK, NUM_CONCURRENT, NUM_FAULTY_NODES, SHARDING, STORAGE,
-        STRIPE_INTERVAL, num_nodes,
+        APP, CACHE_SIZE, LIVE_DURATION, NETWORK, NUM_CONCURRENT, NUM_FAULTY_NODES, SHARDING,
+        STORAGE, STRIPE_INTERVAL, num_nodes,
     },
     load_all, run_endpoints, scrape_all, start_all, stop_all,
 };
@@ -77,6 +77,7 @@ async fn run_workload(
             config: big_schema::ReplicaConfig {
                 num_nodes: num_nodes(),
                 num_faulty_nodes: NUM_FAULTY_NODES,
+                cache_size: CACHE_SIZE,
             },
             storage: STORAGE,
             app: APP.to_schema_app(),

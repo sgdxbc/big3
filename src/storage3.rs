@@ -18,7 +18,7 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     common::{NodeIndex, PREFILL_PATH},
     execute2::{FetchHandle, PostHandle},
-    merkle::{MerkleProof, MerkleTree},
+    merkle::{MerkleHash, MerkleProof, MerkleTree},
     network::interconnect::{NetworkInterconnectHandle, ReceiveHandle},
     schema,
     storage2::{FetchedHandle, PostDoneHandle},
@@ -74,6 +74,8 @@ pub struct BigStorageConfig {
     pub num_nodes: NodeIndex,
     pub num_faulty_nodes: NodeIndex,
     num_secondary_nodes: NodeIndex,
+
+    cache_size: usize,
 }
 
 impl From<&schema::ReplicaConfig> for BigStorageConfig {
@@ -82,6 +84,7 @@ impl From<&schema::ReplicaConfig> for BigStorageConfig {
             num_nodes: value.num_nodes,
             num_faulty_nodes: value.num_faulty_nodes,
             num_secondary_nodes: 6,
+            cache_size: value.cache_size,
         };
         let num_faulty_nodes = value.num_faulty_nodes;
         assert!((0..config.num_shards()).all(|shard| {
@@ -146,6 +149,7 @@ pub struct StorageTask {
     temp_dir: tempfile::TempDir,
     db: Arc<DB>,
     merkle_trees: HashMap<u32, MerkleTree>,
+    merkle_roots: Vec<MerkleHash>,
     cache: LruCache<Vec<u8>, Option<Vec<u8>>>,
 
     tx_fetch_dispatch: flume::Sender<(Vec<u8>, flume::Sender<(Vec<u8>, Option<(Vec<u8>, u32)>)>)>,
@@ -162,6 +166,7 @@ impl StorageTask {
         network_interconnect: NetworkInterconnectHandle,
         config: BigStorageConfig,
         node_index: NodeIndex,
+        app: &schema::App,
     ) -> anyhow::Result<Self> {
         let temp_dir = tempdir()?;
         let status = Command::new("cp")
@@ -190,14 +195,18 @@ impl StorageTask {
             let tree = bincode::decode_from_slice(&tree_bytes, bincode::config::standard())?.0;
             merkle_trees.insert(shard, tree);
         }
+        let roots_bytes = db.get_cf(cf, b"roots")?.expect("Merkle roots not found");
+        let merkle_roots = bincode::decode_from_slice(&roots_bytes, bincode::config::standard())?.0;
 
-        let mut cache = LruCache::new(8_000_000.try_into().unwrap());
-        let zipfian = crate::workload::zipfian::ScrambledZipfian::new_range(0, 100_000_000 - 1);
-        for i in (0..cache.cap().get()).rev() {
-            let key = crate::execute::ycsb::key(zipfian.scramble(i as _));
-            cache.put(key.into_bytes(), Some(vec![0u8; 1000]));
+        let mut cache = LruCache::new(config.cache_size.try_into().unwrap());
+        if let schema::App::Ycsb(num_keys) = app {
+            let zipfian = crate::workload::zipfian::ScrambledZipfian::new_range(0, *num_keys - 1);
+            for i in (0..cache.cap().get()).rev() {
+                let key = crate::execute::ycsb::key(zipfian.scramble(i as _));
+                cache.put(key.into_bytes(), Some(vec![0u8; 1000]));
+            }
+            info!("storage cache preloaded size {}", cache.len());
         }
-        info!("storage cache preloaded size {}", cache.len());
 
         Ok(Self {
             channels,
@@ -209,6 +218,7 @@ impl StorageTask {
             storing_shards,
             pushing_shards,
             merkle_trees,
+            merkle_roots,
             temp_dir,
             db: Arc::new(db),
             tx_fetch_dispatch,
@@ -264,6 +274,7 @@ impl StorageTask {
             reorder_push_values: HashMap::default(),
             update_table: HashMap::default(),
             merkle_trees: self.merkle_trees,
+            merkle_roots: self.merkle_roots,
             cache: self.cache,
             metrics: RetrieveWorkerMetrics {
                 num_keys: 0,
@@ -305,6 +316,7 @@ struct RetrieveWorker {
 
     update_table: HashMap<Vec<u8>, Option<Vec<u8>>>,
     merkle_trees: HashMap<u32, MerkleTree>,
+    merkle_roots: Vec<MerkleHash>,
     cache: LruCache<Vec<u8>, Option<Vec<u8>>>,
 
     metrics: RetrieveWorkerMetrics,
@@ -450,7 +462,7 @@ impl RetrieveWorker {
             if !pending_shards.remove(&shard) {
                 continue;
             }
-            // let root = self.merkle_trees[&shard].root();
+            let root = self.merkle_roots[shard as usize];
             for (key, value_proof) in entries {
                 let value = if let Some((value, proof)) = value_proof {
                     let mut hasher = digest::Context::new(&digest::SHA256);
@@ -459,10 +471,10 @@ impl RetrieveWorker {
                     hasher.update(&0u32.to_le_bytes());
                     let leaf = hasher.finish();
                     let leaf = leaf.as_ref().try_into().unwrap();
-                    // proof
-                    //     .verify(leaf, &root)
-                    //     .expect("Merkle proof verification failed");
-                    let _ = proof.verify(leaf, &Default::default());
+                    proof
+                        .verify(leaf, &root)
+                        .expect("Merkle proof verification failed");
+                    // let _ = proof.verify(leaf, &Default::default());
                     Some(value)
                 } else {
                     None

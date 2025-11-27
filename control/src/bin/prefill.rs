@@ -35,6 +35,7 @@ async fn run_workload(server_instances: Vec<Instance>) -> anyhow::Result<()> {
             config: ReplicaConfig {
                 num_nodes: num_nodes(),
                 num_faulty_nodes: NUM_FAULTY_NODES,
+                cache_size: 0, // unused
             },
             storage: STORAGE,
             app: APP.to_schema_app(),

@@ -2,6 +2,7 @@ use std::ops::Range;
 
 use bincode::{Decode, Encode};
 use hashbrown::HashMap;
+use ring::digest;
 
 use super::{AbstractExecute, AbstractOp};
 
@@ -16,7 +17,7 @@ pub enum YcsbOp {
 #[derive(Encode, Decode)]
 pub enum YcsbRes {
     Put,
-    Get(Vec<Vec<u8>>),
+    Get([u8; 32]),
 }
 
 pub fn key(index: u64) -> String {
@@ -94,11 +95,19 @@ impl AbstractExecute for YcsbExecute {
             YcsbOp::Get(key) => {
                 let value_bytes = state[key.as_bytes()].clone().expect("key not found");
                 // let value = vec![0; 100 - 16];
-                let values = value_bytes
-                    .chunks_exact(VALUE_SIZE)
-                    .map(|chunk| chunk.to_vec())
-                    .collect();
-                (YcsbRes::Get(values), None)
+                // let values = value_bytes
+                //     .chunks_exact(VALUE_SIZE)
+                //     .map(|chunk| chunk.to_vec())
+                //     .collect();
+                (
+                    YcsbRes::Get(
+                        digest::digest(&digest::SHA256, &value_bytes)
+                            .as_ref()
+                            .try_into()
+                            .unwrap(),
+                    ),
+                    None,
+                )
             }
         }
     }

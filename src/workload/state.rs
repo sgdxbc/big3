@@ -123,7 +123,7 @@ impl<C> YcsbWorkload<C> {
         scrape_state: Arc<Mutex<ClientScrapeState>>,
     ) -> Self {
         // let zipfian = ScrambledZipfian::new_range(0, config.num_keys - 1);
-        let zipfian = ScrambledZipfian::new_range_exact(0, config.num_keys - 1, 1.2);
+        let zipfian = ScrambledZipfian::new_range_exact(0, config.num_keys - 1, config.theta);
         Self {
             context,
             config,
