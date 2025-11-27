@@ -55,6 +55,7 @@ fn hash_pair(left: &MerkleHash, right: &MerkleHash) -> MerkleHash {
         .unwrap()
 }
 
+#[derive(Encode, Decode)]
 pub struct MerkleProof {
     // store each sibling and whether the sibling is on the left side of the node
     siblings: Vec<(MerkleHash, bool)>,

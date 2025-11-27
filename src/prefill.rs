@@ -1,5 +1,6 @@
 use std::thread::available_parallelism;
 
+use log::info;
 use rand::{Rng as _, SeedableRng, rngs::StdRng};
 use ring::digest;
 use rocksdb::{DB, Options, WriteBatch, WriteOptions};
@@ -10,7 +11,7 @@ use crate::{
     execute::{utxo, ycsb},
     merkle::{MerkleHash, MerkleTree},
     schema,
-    storage::BigStorageConfig,
+    storage3::BigStorageConfig,
 };
 
 pub struct PrefillTask;
@@ -94,27 +95,31 @@ fn run_prefill_storage(
             let mut shard_hashes =
                 vec![Vec::<MerkleHash>::new(); storage_config.num_shards() as usize];
             let wrapped_key_value = |k: u64| {
-                let mut key = key(k);
+                let key = key(k);
                 let shard = storage_config.shard_of_key(&key);
-                key = [&shard.to_be_bytes()[..], &key[..]].concat();
 
-                let i = shard_hashes[shard as usize].len() as u32;
-                let mut value = vec![0u8; value_size + 4];
-                rng.fill(&mut value[..value_size]);
-                value[value_size..].copy_from_slice(&i.to_le_bytes());
+                let mut value = vec![0u8; value_size];
+                rng.fill(&mut value[..]);
 
                 let mut hasher = digest::Context::new(&digest::SHA256);
                 hasher.update(&key);
-                hasher.update(&value[..value_size]);
+                hasher.update(&value[..]);
                 hasher.update(&0u32.to_le_bytes());
-                shard_hashes[shard as usize].push(hasher.finish().as_ref().try_into().unwrap());
+                let leaf = hasher.finish();
 
+                let i = shard_hashes[shard as usize].len() as u32;
+                value.extend_from_slice(&i.to_le_bytes());
+
+                shard_hashes[shard as usize].push(leaf.as_ref().try_into().unwrap());
+
+                let key = [&shard.to_be_bytes()[..], &key[..]].concat();
                 (key, value)
             };
             run_prefill(db, num_keys, wrapped_key_value)?;
             let cf = db.cf_handle("merkle").unwrap();
             for (shard, hashes) in shard_hashes.into_iter().enumerate() {
                 let tree = MerkleTree::new(hashes);
+                info!("shard {} merkle tree root: {:02x?}", shard, tree.root());
                 let tree_bytes = bincode::encode_to_vec(&tree, bincode::config::standard())?;
                 db.put_cf(cf, (shard as u32).to_be_bytes(), &tree_bytes[..])?;
             }

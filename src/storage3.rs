@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use hashbrown::{HashMap, HashSet};
 use log::{debug, info};
+use ring::digest;
 use rocksdb::DB;
 use rustc_hash::FxBuildHasher;
 use tempfile::tempdir;
@@ -16,6 +17,7 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     common::{NodeIndex, PREFILL_PATH},
     execute2::{FetchHandle, PostHandle},
+    merkle::{MerkleProof, MerkleTree},
     network::interconnect::{NetworkInterconnectHandle, ReceiveHandle},
     schema,
     storage2::{FetchedHandle, PostDoneHandle},
@@ -142,6 +144,7 @@ pub struct StorageTask {
 
     temp_dir: tempfile::TempDir,
     db: Arc<DB>,
+    merkle_trees: HashMap<u32, MerkleTree>,
 
     tx_fetch_dispatch: flume::Sender<(Vec<u8>, flume::Sender<(Vec<u8>, Option<(Vec<u8>, u32)>)>)>,
     rx_fetch_dispatch: flume::Receiver<(Vec<u8>, flume::Sender<(Vec<u8>, Option<(Vec<u8>, u32)>)>)>,
@@ -166,13 +169,22 @@ impl StorageTask {
             .status()
             .await?;
         anyhow::ensure!(status.success(), "failed to copy prefill data");
-        let mut db = DB::open_default(temp_dir.path())?;
-        db.create_cf("archive", &Default::default())?;
+        let db = DB::open_cf(&Default::default(), temp_dir.path(), ["merkle"])?;
 
         let (tx_fetch_dispatch, rx_fetch_dispatch) = flume::unbounded();
 
         let storing_shards = config.storing_shards(node_index);
         let pushing_shards = config.pushing_shards(node_index);
+
+        let mut merkle_trees = HashMap::new();
+        let cf = db.cf_handle("merkle").unwrap();
+        for shard in 0..config.num_shards() {
+            let tree_bytes = db
+                .get_cf(cf, shard.to_be_bytes())?
+                .expect("Merkle tree not found for shard");
+            let tree = bincode::decode_from_slice(&tree_bytes, bincode::config::standard())?.0;
+            merkle_trees.insert(shard, tree);
+        }
         Ok(Self {
             channels,
             fetched_handle,
@@ -182,6 +194,7 @@ impl StorageTask {
             node_index,
             storing_shards,
             pushing_shards,
+            merkle_trees,
             temp_dir,
             db: Arc::new(db),
             tx_fetch_dispatch,
@@ -234,6 +247,7 @@ impl StorageTask {
             version: 0,
             reorder_push_values: HashMap::default(),
             update_table: HashMap::default(),
+            merkle_trees: self.merkle_trees,
         };
         workers.spawn(async move {
             cancel.run_until_cancelled(retrieve.run_inner()).await;
@@ -267,6 +281,7 @@ struct RetrieveWorker {
     reorder_push_values: HashMap<u64, Vec<message::PushValue>>,
 
     update_table: HashMap<Vec<u8>, Option<Vec<u8>>>,
+    merkle_trees: HashMap<u32, MerkleTree>,
 }
 
 impl RetrieveWorker {
@@ -302,12 +317,14 @@ impl RetrieveWorker {
             .collect::<HashMap<_, _>>();
         while let Ok((key, value)) = rx.recv() {
             let shard = self.config.shard_of_key(&key);
-            if self.pushing_shards.contains(&shard) {
-                pushing_shard_states
-                    .get_mut(&shard)
-                    .unwrap()
-                    // TODO prove
-                    .push((key.clone(), value.as_ref().map(|(v, _)| v.clone())));
+            if let Some(shard_state) = pushing_shard_states.get_mut(&shard) {
+                shard_state.push((
+                    key.clone(),
+                    value.as_ref().map(|(v, index)| {
+                        let proof = self.merkle_trees[&shard].prove(*index as usize);
+                        (v.clone(), proof)
+                    }),
+                ));
             }
             shard_states
                 .get_mut(&shard)
@@ -329,7 +346,7 @@ impl RetrieveWorker {
 
         if let Some(push_values) = self.reorder_push_values.remove(&self.version) {
             for push_value in push_values {
-                shard_states.extend(push_value.state);
+                self.insert_shards(&mut shard_states, push_value.state);
                 debug!(
                     "version {} reordered push value applied; {} shards",
                     self.version,
@@ -355,7 +372,7 @@ impl RetrieveWorker {
                         continue;
                     }
                     if push_value.version == self.version {
-                        shard_states.extend(push_value.state);
+                        self.insert_shards(&mut shard_states, push_value.state);
                         debug!(
                             "version {} push value applied; {} shards",
                             self.version,
@@ -369,6 +386,38 @@ impl RetrieveWorker {
         state.extend(shard_states.into_values().flatten());
         let _ = self.fetched_handle.tx_fetched.send(state);
         Ok(())
+    }
+
+    fn insert_shards(
+        &self,
+        shard_states: &mut HashMap<u32, Vec<(Vec<u8>, Option<Vec<u8>>)>>,
+        state: Vec<(u32, Vec<(Vec<u8>, Option<(Vec<u8>, MerkleProof)>)>)>,
+    ) {
+        for (shard, entries) in state {
+            if shard_states.contains_key(&shard) {
+                continue;
+            }
+            let root = self.merkle_trees[&shard].root();
+            let mut shard_state = Vec::new();
+            for (key, value_proof) in entries {
+                let value = if let Some((value, proof)) = value_proof {
+                    let mut hasher = digest::Context::new(&digest::SHA256);
+                    hasher.update(&key);
+                    hasher.update(&value);
+                    hasher.update(&0u32.to_le_bytes());
+                    let leaf = hasher.finish();
+                    let leaf = leaf.as_ref().try_into().unwrap();
+                    proof
+                        .verify(leaf, &root)
+                        .expect("Merkle proof verification failed");
+                    Some(value)
+                } else {
+                    None
+                };
+                shard_state.push((key, value));
+            }
+            shard_states.insert(shard, shard_state);
+        }
     }
 
     fn handle_post(&mut self, posts: Vec<(Vec<u8>, Option<Vec<u8>>)>) -> anyhow::Result<()> {
@@ -396,6 +445,8 @@ impl RetrieveWorker {
 mod message {
     use bincode::{Decode, Encode};
 
+    use crate::merkle::MerkleProof;
+
     #[derive(Decode, Encode)]
     pub enum Message {
         PushValue(PushValue),
@@ -404,6 +455,6 @@ mod message {
     #[derive(Decode, Encode)]
     pub struct PushValue {
         pub version: u64,
-        pub state: Vec<(u32, Vec<(Vec<u8>, Option<Vec<u8>>)>)>,
+        pub state: Vec<(u32, Vec<(Vec<u8>, Option<(Vec<u8>, MerkleProof)>)>)>,
     }
 }
