@@ -93,6 +93,10 @@ impl ScrambledZipfian {
     /// Draw using any external RNG; scrambling uses 64-bit FNV-1a on the raw Zipfian output.
     pub fn next_u64<R: Rng + ?Sized>(&self, rng: &mut R) -> u64 {
         let v = self.inner.next_u64(rng);
+        self.scramble(v)
+    }
+
+    pub fn scramble(&self, v: u64) -> u64 {
         self.base + (fnv1a64(v) % self.items)
     }
 }

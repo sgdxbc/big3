@@ -122,8 +122,8 @@ impl<C> YcsbWorkload<C> {
         num_concurrent: u32,
         scrape_state: Arc<Mutex<ClientScrapeState>>,
     ) -> Self {
-        let zipfian = ScrambledZipfian::new_range(0, config.num_keys - 1);
-        // let zipfian = ScrambledZipfian::new_range_exact(0, config.num_keys - 1, 1.2);
+        // let zipfian = ScrambledZipfian::new_range(0, config.num_keys - 1);
+        let zipfian = ScrambledZipfian::new_range_exact(0, config.num_keys - 1, 1.2);
         Self {
             context,
             config,
@@ -171,8 +171,8 @@ impl<C: WorkloadContext> YcsbWorkload<C> {
         let op = if rng().random_bool(self.config.read_ratio) {
             YcsbOp::Get(key)
         } else {
-            // let field = random_range(0..10);
-            let field = 0;
+            let field = random_range(0..10);
+            // let field = 0;
             let mut value = vec![0; VALUE_SIZE];
             rng().fill_bytes(&mut value);
             YcsbOp::Put(key, field, value)

@@ -85,3 +85,11 @@ Well, when there are many nodes, network time is much larger than local storage 
 ----
 
 It is really weird that per-block execution is genuinely bad. Let's say the first block is sized B. The N nodes execute it, reply to the clients, and the close loop clients send B new requests, distributed evenly to the N nodes and results in N new blocks sized B/N. The block size goes smaller, resulting in smaller storage read batches and lower read throughput, and the block size goes even smaller.
+
+----
+
+It turns out that 100KB key value pairs was a critical choice for my previous, acceptable performance (~300K/s). With larger values (either because of larger actual values or proofs attached), performance drops a lot. I will need to tweak the skewness to reduce the number of keys to send, so the total amount of data transferred should be the same.
+
+Previously, each key value pair is 100 bytes. Now the key is still 16 bytes, while the value is 1000 bytes. At the same time, there is a Merkle proof which contains log2(100_000) - 1 = 16 SHA256 digests = 512 bytes. In total that is 1528 bytes, >15x than before.
+
+On the other hand, previously every key value pair is transferred from one of the nodes to every node. So the performance will recover if at most 1/15 keys are cache missed and need to be transferred.

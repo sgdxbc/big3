@@ -171,7 +171,7 @@ where
     }
 
     fn handle_fetched(&mut self, mut state: HashMap<Vec<u8>, Option<Vec<u8>>>) {
-        info!("fetched state with {} entries", state.len());
+        // info!("fetched state with {} entries", state.len());
 
         let fetching_requests = take(&mut self.fetching_requests);
 

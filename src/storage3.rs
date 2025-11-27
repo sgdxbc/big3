@@ -146,6 +146,7 @@ pub struct StorageTask {
     temp_dir: tempfile::TempDir,
     db: Arc<DB>,
     merkle_trees: HashMap<u32, MerkleTree>,
+    cache: LruCache<Vec<u8>, Option<Vec<u8>>>,
 
     tx_fetch_dispatch: flume::Sender<(Vec<u8>, flume::Sender<(Vec<u8>, Option<(Vec<u8>, u32)>)>)>,
     rx_fetch_dispatch: flume::Receiver<(Vec<u8>, flume::Sender<(Vec<u8>, Option<(Vec<u8>, u32)>)>)>,
@@ -189,6 +190,15 @@ impl StorageTask {
             let tree = bincode::decode_from_slice(&tree_bytes, bincode::config::standard())?.0;
             merkle_trees.insert(shard, tree);
         }
+
+        let mut cache = LruCache::new(8_000_000.try_into().unwrap());
+        let zipfian = crate::workload::zipfian::ScrambledZipfian::new_range(0, 100_000_000 - 1);
+        for i in (0..cache.cap().get()).rev() {
+            let key = crate::execute::ycsb::key(zipfian.scramble(i as _));
+            cache.put(key.into_bytes(), Some(vec![0u8; 1000]));
+        }
+        info!("storage cache preloaded size {}", cache.len());
+
         Ok(Self {
             channels,
             fetched_handle,
@@ -203,6 +213,7 @@ impl StorageTask {
             db: Arc::new(db),
             tx_fetch_dispatch,
             rx_fetch_dispatch,
+            cache,
         })
     }
 
@@ -219,7 +230,7 @@ impl StorageTask {
                 .map(|mut v| {
                     let i = v.split_off(v.len() - 4);
                     let index = u32::from_le_bytes(i.try_into().unwrap());
-                    v.truncate(100);
+                    // v.truncate(100);
                     (v, index)
                 });
             let _ = tx.send((key, value));
@@ -253,10 +264,16 @@ impl StorageTask {
             reorder_push_values: HashMap::default(),
             update_table: HashMap::default(),
             merkle_trees: self.merkle_trees,
-            cache: LruCache::new((4 << 20).try_into().unwrap()),
+            cache: self.cache,
+            metrics: RetrieveWorkerMetrics {
+                num_keys: 0,
+                num_update_hits: 0,
+                num_cache_hits: 0,
+            },
         };
         workers.spawn(async move {
             cancel.run_until_cancelled(retrieve.run_inner()).await;
+            retrieve.log_metrics();
         });
         drop(self.channels.tx_post);
         while let Some(res) = workers.join_next().await {
@@ -289,23 +306,47 @@ struct RetrieveWorker {
     update_table: HashMap<Vec<u8>, Option<Vec<u8>>>,
     merkle_trees: HashMap<u32, MerkleTree>,
     cache: LruCache<Vec<u8>, Option<Vec<u8>>>,
+
+    metrics: RetrieveWorkerMetrics,
+}
+
+struct RetrieveWorkerMetrics {
+    num_keys: u64,
+    num_update_hits: u64,
+    num_cache_hits: u64,
 }
 
 impl RetrieveWorker {
+    fn log_metrics(&self) {
+        info!(
+            "storage retrieve metrics: total keys {}, update hits {}, cache hits {}, cache miss {}%",
+            self.metrics.num_keys,
+            self.metrics.num_update_hits,
+            self.metrics.num_cache_hits,
+            (self.metrics.num_keys - self.metrics.num_cache_hits - self.metrics.num_update_hits)
+                as f64
+                / self.metrics.num_keys as f64
+                * 100.0
+        );
+    }
+
     async fn handle_fetch(&mut self, keys: HashSet<Vec<u8>>) -> anyhow::Result<()> {
         self.version += 1;
-        info!("version {} start", self.version);
+        debug!("version {} start", self.version);
 
         let mut state = HashMap::new();
         let mut pending_shards = HashSet::new();
         let (tx, rx) = flume::unbounded();
         for key in keys {
+            self.metrics.num_keys += 1;
             if let Some(value) = self.update_table.get(&key) {
+                self.metrics.num_update_hits += 1;
                 state.insert(key, value.clone());
                 continue;
             }
 
             if let Some(value) = self.cache.get(&key) {
+                self.metrics.num_cache_hits += 1;
                 state.insert(key.clone(), value.clone());
                 continue;
             }
@@ -330,15 +371,17 @@ impl RetrieveWorker {
                 shard_state.push((
                     key.clone(),
                     value.as_ref().map(|(v, index)| {
-                        // let proof = self.merkle_trees[&shard].prove(*index as usize);
-                        let proof = MerkleProof { siblings: vec![] };
+                        let proof = self.merkle_trees[&shard].prove(*index as usize);
+                        // let proof = MerkleProof { siblings: vec![] };
                         (v.clone(), proof)
                     }),
                 ));
             }
-            state.insert(key, value.map(|(v, _)| v));
+            let value = value.map(|(v, _)| v);
+            state.insert(key.clone(), value.clone());
+            self.cache.put(key, value);
         }
-        info!("version {} storage done", self.version);
+        debug!("version {} storage done", self.version);
         let push_value = message::PushValue {
             version: self.version,
             state: pushing_shard_states
@@ -392,7 +435,7 @@ impl RetrieveWorker {
                 }
             }
         }
-        info!("version {} network done", self.version);
+        debug!("version {} network done", self.version);
         let _ = self.fetched_handle.tx_fetched.send(state);
         Ok(())
     }

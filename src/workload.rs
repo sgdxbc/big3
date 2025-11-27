@@ -21,7 +21,7 @@ use crate::{
 use self::state::{InvokeId, Workload, WorkloadContext};
 
 mod state;
-mod zipfian;
+pub mod zipfian;
 
 pub use state::ClientScrapeState;
 
