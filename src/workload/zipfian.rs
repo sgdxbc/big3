@@ -24,7 +24,11 @@ impl Zipfian {
 
     /// Exact mode (recomputes ζ(items, θ)); slower but precise.
     pub fn new_range_exact(min: u64, max: u64, theta: f64) -> Self {
-        let zetan = zeta(max - min + 1, theta);
+        let zetan = if theta == ZIPFIAN_CONSTANT {
+            ZETAN
+        } else {
+            zeta(max - min + 1, theta)
+        };
         Self::new(min, max, theta, zetan)
     }
 

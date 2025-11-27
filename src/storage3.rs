@@ -18,7 +18,7 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     common::{NodeIndex, PREFILL_PATH},
     execute2::{FetchHandle, PostHandle},
-    merkle::{MerkleHash, MerkleProof, MerkleTree},
+    merkle::{MerkleHash, MerkleProof, MerkleProofs, MerkleTree},
     network::interconnect::{NetworkInterconnectHandle, ReceiveHandle},
     schema,
     storage2::{FetchedHandle, PostDoneHandle},
@@ -375,19 +375,19 @@ impl RetrieveWorker {
         let mut pushing_shard_states = self
             .pushing_shards
             .iter()
-            .map(|&shard| (shard, Vec::new()))
+            .map(|&shard| (shard, (Vec::new(), Vec::new())))
             .collect::<HashMap<_, _>>();
         while let Ok((key, value)) = rx.recv() {
             let shard = self.config.shard_of_key(&key);
             if let Some(shard_state) = pushing_shard_states.get_mut(&shard) {
-                shard_state.push((
-                    key.clone(),
-                    value.as_ref().map(|(v, index)| {
-                        let proof = self.merkle_trees[&shard].prove(*index as usize);
-                        // let proof = MerkleProof { siblings: vec![] };
-                        (v.clone(), proof)
-                    }),
-                ));
+                let value = value.as_ref().map(|(v, index)| {
+                    // let proof = self.merkle_trees[&shard].prove(*index as usize);
+                    // // let proof = MerkleProof { siblings: vec![] };
+                    // (v.clone(), proof)
+                    shard_state.1.push(*index as usize);
+                    v.clone()
+                });
+                shard_state.0.push((key.clone(), value));
             }
             let value = value.map(|(v, _)| v);
             state.insert(key.clone(), value.clone());
@@ -398,7 +398,11 @@ impl RetrieveWorker {
             version: self.version,
             state: pushing_shard_states
                 .into_iter()
-                .filter(|(_, state)| !state.is_empty())
+                .filter(|(_, state)| !state.0.is_empty())
+                .map(|(shard, (entries, indices))| {
+                    let proofs = self.merkle_trees[&shard].prove_multiple(&indices);
+                    (shard, entries, proofs)
+                })
                 .collect(),
         };
         debug!(
@@ -456,24 +460,27 @@ impl RetrieveWorker {
         &mut self,
         state: &mut HashMap<Vec<u8>, Option<Vec<u8>>>,
         pending_shards: &mut HashSet<u32>,
-        shard_states: Vec<(u32, Vec<(Vec<u8>, Option<(Vec<u8>, MerkleProof)>)>)>,
+        // shard_states: Vec<(u32, Vec<(Vec<u8>, Option<(Vec<u8>, MerkleProof)>)>)>,
+        shard_states: Vec<(u32, Vec<(Vec<u8>, Option<Vec<u8>>)>, MerkleProofs)>,
     ) {
-        for (shard, entries) in shard_states {
+        for (shard, entries, proofs) in shard_states {
             if !pending_shards.remove(&shard) {
                 continue;
             }
             let root = self.merkle_roots[shard as usize];
+            let mut leaves = Vec::new();
             for (key, value_proof) in entries {
-                let value = if let Some((value, proof)) = value_proof {
+                let value = if let Some(value) = value_proof {
                     let mut hasher = digest::Context::new(&digest::SHA256);
                     hasher.update(&key);
                     hasher.update(&value);
                     hasher.update(&0u32.to_le_bytes());
                     let leaf = hasher.finish();
                     let leaf = leaf.as_ref().try_into().unwrap();
-                    proof
-                        .verify(leaf, &root)
-                        .expect("Merkle proof verification failed");
+                    leaves.push(leaf);
+                    // proof
+                    //     .verify(leaf, &root)
+                    //     .expect("Merkle proof verification failed");
                     // let _ = proof.verify(leaf, &Default::default());
                     Some(value)
                 } else {
@@ -482,6 +489,9 @@ impl RetrieveWorker {
                 state.insert(key.clone(), value.clone());
                 self.cache.put(key, value);
             }
+            proofs
+                .verify_multiple(&leaves, &root)
+                .expect("Merkle proofs verification failed");
         }
     }
 
@@ -510,7 +520,7 @@ impl RetrieveWorker {
 mod message {
     use bincode::{Decode, Encode};
 
-    use crate::merkle::MerkleProof;
+    use crate::merkle::MerkleProofs;
 
     #[derive(Decode, Encode)]
     pub enum Message {
@@ -520,6 +530,7 @@ mod message {
     #[derive(Decode, Encode)]
     pub struct PushValue {
         pub version: u64,
-        pub state: Vec<(u32, Vec<(Vec<u8>, Option<(Vec<u8>, MerkleProof)>)>)>,
+        // pub state: Vec<(u32, Vec<(Vec<u8>, Option<(Vec<u8>, MerkleProof)>)>)>,
+        pub state: Vec<(u32, Vec<(Vec<u8>, Option<Vec<u8>>)>, MerkleProofs)>,
     }
 }
