@@ -10,7 +10,7 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    common::{ClientId, ClientSeq, NodeIndex, Reply},
+    common::{ClientId, ClientSeq, NodeIndex, Reply, ResponseContext},
     consensus::{Block, DeliverHandle},
     execute::{AbstractExecute, AbstractOp},
     metrics::Latency,
@@ -19,8 +19,8 @@ use crate::{
 };
 
 pub struct ExecuteChannels {
-    pub tx_blocks: UnboundedSender<Vec<Block>>,
-    rx_blocks: UnboundedReceiver<Vec<Block>>,
+    pub tx_blocks: UnboundedSender<(Vec<Block>, ResponseContext<()>)>,
+    rx_blocks: UnboundedReceiver<(Vec<Block>, ResponseContext<()>)>,
 
     rx_fetched: UnboundedReceiver<HashMap<Vec<u8>, Option<Vec<u8>>>>,
     tx_fetched: UnboundedSender<HashMap<Vec<u8>, Option<Vec<u8>>>>,
@@ -210,10 +210,11 @@ where
     }
 
     async fn run_inner(&mut self) {
-        while let Some(blocks) = self.channels.rx_blocks.recv().await {
+        while let Some((blocks, context)) = self.channels.rx_blocks.recv().await {
             let start = Instant::now();
             self.parse_blocks(blocks);
             if self.fetching_requests.is_empty() {
+                context.respond(());
                 continue;
             }
             let Some(state) = self.channels.rx_fetched.recv().await else {
@@ -230,6 +231,7 @@ where
                 return;
             };
             self.metrics.post += start.elapsed();
+            context.respond(());
         }
     }
 }

@@ -1,4 +1,5 @@
 use bincode::{Decode, Encode};
+use hashbrown::HashMap;
 use ring::digest;
 
 pub type MerkleHash = [u8; 32];
@@ -103,6 +104,62 @@ impl MerkleProof {
             }
         }
         anyhow::ensure!(computed_hash == *root, "Merkle proof verification failed");
+        Ok(())
+    }
+}
+
+#[derive(Encode, Decode)]
+pub struct MerkleProofs {
+    hashes: Vec<MerkleHash>,
+    proofs: Vec<Vec<(usize, bool)>>,
+}
+
+impl MerkleTree {
+    pub fn prove_multiple(&self, indices: &[usize]) -> MerkleProofs {
+        let mut hashes = Vec::new();
+        let mut proofs = Vec::new();
+        let mut hash_indices = HashMap::new();
+        for &index in indices {
+            let proof = self.prove(index);
+            let mut proof_indices = Vec::new();
+            for (sibling, sibling_is_left) in proof.siblings {
+                let hash_index = if let Some(&idx) = hash_indices.get(&sibling) {
+                    idx
+                } else {
+                    let idx = hashes.len();
+                    hashes.push(sibling);
+                    hash_indices.insert(sibling, idx);
+                    idx
+                };
+                proof_indices.push((hash_index, sibling_is_left));
+            }
+            proofs.push(proof_indices);
+        }
+        MerkleProofs { hashes, proofs }
+    }
+}
+
+impl MerkleProofs {
+    pub fn verify_multiple(&self, leaves: &[MerkleHash], root: &MerkleHash) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            leaves.len() == self.proofs.len(),
+            "Number of leaves and proofs do not match"
+        );
+        for (leaf, proof_indices) in leaves.iter().zip(&self.proofs) {
+            let mut computed_hash = *leaf;
+            for (hash_index, sibling_is_left) in proof_indices {
+                let sibling = self.hashes[*hash_index];
+                if *sibling_is_left {
+                    computed_hash = hash_pair(&sibling, &computed_hash);
+                } else {
+                    computed_hash = hash_pair(&computed_hash, &sibling);
+                }
+            }
+            anyhow::ensure!(
+                computed_hash == *root,
+                "Merkle proof verification failed for a leaf"
+            );
+        }
         Ok(())
     }
 }

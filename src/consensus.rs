@@ -7,7 +7,7 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    common::{NodeIndex, Request},
+    common::{NodeIndex, Request, RequestContext, ResponseContext},
     network::{
         interconnect::{NetworkInterconnectHandle, ReceiveHandle},
         server::SubmitHandle,
@@ -74,7 +74,7 @@ pub struct ConsensusTask {
 }
 
 pub struct DeliverHandle {
-    pub tx_blocks: UnboundedSender<Vec<Block>>,
+    pub tx_blocks: UnboundedSender<(Vec<Block>, ResponseContext<()>)>,
 }
 
 impl ConsensusTask {
@@ -88,7 +88,10 @@ impl ConsensusTask {
         network_connect: NetworkInterconnectHandle,
         schema: &schema::ReplicaTask,
     ) -> anyhow::Result<Self> {
-        let context = ConsensusTaskContext::new(execute, network_connect);
+        let context = ConsensusTaskContext::new(
+            RequestContext::new(execute.tx_blocks, channels.tx_output_response.clone()),
+            network_connect,
+        );
         let state = Bullshark::new(context, (&schema.config).into(), schema.node_index);
         Ok(Self::new(channels, state))
     }
@@ -121,12 +124,15 @@ impl ConsensusTask {
 }
 
 struct ConsensusTaskContext {
-    execute: DeliverHandle,
+    execute: RequestContext<Vec<Block>, ()>,
     network_connect: NetworkInterconnectHandle,
 }
 
 impl ConsensusTaskContext {
-    fn new(execute: DeliverHandle, network_connect: NetworkInterconnectHandle) -> Self {
+    fn new(
+        execute: RequestContext<Vec<Block>, ()>,
+        network_connect: NetworkInterconnectHandle,
+    ) -> Self {
         Self {
             execute,
             network_connect,
@@ -136,8 +142,7 @@ impl ConsensusTaskContext {
 
 impl BullsharkContext for ConsensusTaskContext {
     fn output(&mut self, blocks: Vec<Block>) -> OutputId {
-        let _ = self.execute.tx_blocks.send(blocks);
-        0
+        self.execute.request(blocks)
     }
 
     fn send(&mut self, node_index: NodeIndex, message: Message) {
