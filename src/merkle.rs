@@ -58,7 +58,7 @@ fn hash_pair(left: &MerkleHash, right: &MerkleHash) -> MerkleHash {
 #[derive(Encode, Decode)]
 pub struct MerkleProof {
     // store each sibling and whether the sibling is on the left side of the node
-    siblings: Vec<(MerkleHash, bool)>,
+    pub siblings: Vec<(MerkleHash, bool)>,
 }
 
 pub fn sibling_indices(
