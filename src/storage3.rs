@@ -7,7 +7,6 @@ use rocksdb::DB;
 use rustc_hash::FxBuildHasher;
 use tempfile::tempdir;
 use tokio::{
-    io::AsyncWriteExt,
     process::Command,
     select,
     sync::mpsc::{UnboundedReceiver, UnboundedSender},
@@ -163,34 +162,13 @@ impl StorageTask {
         node_index: NodeIndex,
     ) -> anyhow::Result<Self> {
         let temp_dir = tempdir()?;
-
-        let output = Command::new("find")
+        let status = Command::new("cp")
+            .arg("-rT")
             .arg(PREFILL_PATH)
-            .args(["-type", "f", "-print0"])
-            .output()
-            .await?;
-        anyhow::ensure!(output.status.success(), "failed to find prefill files");
-        let mut child = Command::new("xargs")
-            .args(["-0", "-P12", "-I{}", "cp", "{}"])
             .arg(temp_dir.path())
-            .stdin(std::process::Stdio::piped())
-            .spawn()?;
-        child
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(&output.stdout)
+            .status()
             .await?;
-        let status = child.wait().await?;
-        anyhow::ensure!(status.success(), "failed to copy prefill files");
-
-        // let status = Command::new("cp")
-        //     .arg("-rT")
-        //     .arg(PREFILL_PATH)
-        //     .arg(temp_dir.path())
-        //     .status()
-        //     .await?;
-        // anyhow::ensure!(status.success(), "failed to copy prefill data");
+        anyhow::ensure!(status.success(), "failed to copy prefill data");
         let db = DB::open_cf(&Default::default(), temp_dir.path(), ["merkle"])?;
 
         let (tx_fetch_dispatch, rx_fetch_dispatch) = flume::unbounded();

@@ -17,12 +17,6 @@ variable "stop" {
   default     = false
 }
 
-variable "prefill" {
-  description = "Create prefill server"
-  type        = bool
-  default     = false
-}
-
 variable "server_count" {
   description = "Number of server instances"
   type        = number
@@ -119,28 +113,11 @@ resource "aws_instance" "build" {
 resource "aws_instance" "servers" {
   count = var.server_count
 
-  ami                    = resource.aws_ami_from_instance.server_prefill_big.id
+  ami                    = data.aws_ami.ubuntu.id
   instance_type          = "m5ad.2xlarge"
   subnet_id              = resource.aws_subnet.main.id
   vpc_security_group_ids = [resource.aws_security_group.main.id]
   key_name               = aws_key_pair.main.key_name
-}
-
-resource "aws_instance" "server_prefill_big" {
-  ami                    = data.aws_ami.ubuntu.id
-  instance_type          = "c6a.large"
-  subnet_id              = resource.aws_subnet.main.id
-  vpc_security_group_ids = [resource.aws_security_group.main.id]
-  key_name               = aws_key_pair.main.key_name
-
-  root_block_device {
-    volume_size = 500
-  }
-}
-
-resource "aws_ami_from_instance" "server_prefill_big" {
-  name               = "server-prefill-big"
-  source_instance_id = aws_instance.server_prefill_big.id
 }
 
 resource "aws_instance" "clients" {
@@ -161,18 +138,13 @@ resource "aws_ec2_instance_state" "build" {
 resource "aws_ec2_instance_state" "servers" {
   count       = var.server_count
   instance_id = aws_instance.servers[count.index].id
-  state       = (var.stop || var.prefill) ? "stopped" : "running"
-}
-
-resource "aws_ec2_instance_state" "server_prefill_big" {
-  instance_id = aws_instance.server_prefill_big.id
-  state       = (var.stop || !var.prefill) ? "stopped" : "running"
+  state       = var.stop ? "stopped" : "running"
 }
 
 resource "aws_ec2_instance_state" "clients" {
   count       = var.client_count
   instance_id = aws_instance.clients[count.index].id
-  state       = (var.stop || var.prefill) ? "stopped" : "running"
+  state       = var.stop ? "stopped" : "running"
 }
 
 output "build" {
@@ -181,10 +153,6 @@ output "build" {
 
 output "servers" {
   value = aws_instance.servers.*
-}
-
-output "server_prefill_big" {
-  value = aws_instance.server_prefill_big
 }
 
 output "clients" {

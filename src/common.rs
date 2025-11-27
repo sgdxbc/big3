@@ -71,4 +71,4 @@ impl<T> ResponseContext<T> {
     }
 }
 
-pub const PREFILL_PATH: &str = "/home/ubuntu/big-prefill";
+pub const PREFILL_PATH: &str = "/tmp/big-prefill";
