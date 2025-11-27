@@ -85,6 +85,9 @@ async fn run_prefill(
         let mut batch = WriteBatch::new();
         for j in i..(i + batch_size).min(num_keys) {
             let (key, value) = key_value(j);
+            if key.is_empty() {
+                continue;
+            }
             batch.put(key, &value[..]);
         }
         if tx.send(batch).is_err() {
@@ -116,7 +119,7 @@ async fn run_prefill_storage(
         }
         schema::Storage::Big => {
             let storage_config = BigStorageConfig::from(&schema.config);
-            // let storing_shards = storage_config.storing_shards(schema.node_index);
+            let storing_shards = storage_config.storing_shards(schema.node_index);
             let mut shard_hashes =
                 vec![Vec::<MerkleHash>::new(); storage_config.num_shards() as usize];
             let wrapped_key_value = |k: u64| {
@@ -133,12 +136,15 @@ async fn run_prefill_storage(
                 let leaf = hasher.finish();
 
                 let i = shard_hashes[shard as usize].len() as u32;
-                value.extend_from_slice(&i.to_le_bytes());
-
                 shard_hashes[shard as usize].push(leaf.as_ref().try_into().unwrap());
 
-                let key = [&shard.to_be_bytes()[..], &key[..]].concat();
-                (key, value)
+                if storing_shards.contains(&shard) {
+                    value.extend_from_slice(&i.to_le_bytes());
+                    let key = [&shard.to_be_bytes()[..], &key[..]].concat();
+                    (key, value)
+                } else {
+                    Default::default()
+                }
             };
             run_prefill(db.clone(), num_keys, wrapped_key_value).await?;
             let cf = db.cf_handle("merkle").unwrap();

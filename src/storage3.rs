@@ -219,7 +219,8 @@ impl StorageTask {
                 .map(|mut v| {
                     let i = v.split_off(v.len() - 4);
                     let index = u32::from_le_bytes(i.try_into().unwrap());
-                    (v.split_off(100), index)
+                    v.truncate(100);
+                    (v, index)
                 });
             let _ = tx.send((key, value));
         }
@@ -252,7 +253,7 @@ impl StorageTask {
             reorder_push_values: HashMap::default(),
             update_table: HashMap::default(),
             merkle_trees: self.merkle_trees,
-            cache: LruCache::new((1 << 20).try_into().unwrap()),
+            cache: LruCache::new((4 << 20).try_into().unwrap()),
         };
         workers.spawn(async move {
             cancel.run_until_cancelled(retrieve.run_inner()).await;
@@ -299,15 +300,15 @@ impl RetrieveWorker {
         let mut pending_shards = HashSet::new();
         let (tx, rx) = flume::unbounded();
         for key in keys {
-            // if let Some(value) = self.update_table.get(&key) {
-            //     state.insert(key, value.clone());
-            //     continue;
-            // }
+            if let Some(value) = self.update_table.get(&key) {
+                state.insert(key, value.clone());
+                continue;
+            }
 
-            // if let Some(value) = self.cache.get(&key) {
-            //     state.insert(key.clone(), value.clone());
-            //     continue;
-            // }
+            if let Some(value) = self.cache.get(&key) {
+                state.insert(key.clone(), value.clone());
+                continue;
+            }
 
             let shard = self.config.shard_of_key(&key);
             if !self.storing_shards.contains(&shard) {
@@ -318,11 +319,6 @@ impl RetrieveWorker {
             let _ = self.tx_fetch_dispatch.send((key, tx.clone()));
         }
         drop(tx);
-        let mut shard_states = self
-            .storing_shards
-            .iter()
-            .map(|&shard| (shard, Vec::new()))
-            .collect::<HashMap<_, _>>();
         let mut pushing_shard_states = self
             .pushing_shards
             .iter()
@@ -335,16 +331,12 @@ impl RetrieveWorker {
                     key.clone(),
                     value.as_ref().map(|(v, index)| {
                         // let proof = self.merkle_trees[&shard].prove(*index as usize);
-                        // let proof = MerkleProof { siblings: vec![] };
-                        // (v.clone(), proof)
-                        v.clone()
+                        let proof = MerkleProof { siblings: vec![] };
+                        (v.clone(), proof)
                     }),
                 ));
             }
-            shard_states
-                .get_mut(&shard)
-                .unwrap()
-                .push((key, value.map(|(v, _)| v)));
+            state.insert(key, value.map(|(v, _)| v));
         }
         info!("version {} storage done", self.version);
         let push_value = message::PushValue {
@@ -364,11 +356,11 @@ impl RetrieveWorker {
 
         if let Some(push_values) = self.reorder_push_values.remove(&self.version) {
             for push_value in push_values {
-                self.insert_shards(&mut shard_states, &mut pending_shards, push_value.state);
+                self.insert_shards(&mut state, &mut pending_shards, push_value.state);
                 debug!(
-                    "version {} reordered push value applied; {} shards",
+                    "version {} reordered push value applied; {} shards left",
                     self.version,
-                    shard_states.len()
+                    pending_shards.len()
                 );
             }
         }
@@ -390,60 +382,51 @@ impl RetrieveWorker {
                         continue;
                     }
                     if push_value.version == self.version {
-                        self.insert_shards(
-                            &mut shard_states,
-                            &mut pending_shards,
-                            push_value.state,
-                        );
+                        self.insert_shards(&mut state, &mut pending_shards, push_value.state);
                         debug!(
-                            "version {} push value applied; {} shards",
+                            "version {} push value applied; {} shards left",
                             self.version,
-                            shard_states.len()
+                            pending_shards.len()
                         );
                     }
                 }
             }
         }
         info!("version {} network done", self.version);
-        state.extend(shard_states.into_values().flatten());
         let _ = self.fetched_handle.tx_fetched.send(state);
         Ok(())
     }
 
     fn insert_shards(
         &mut self,
-        shard_states: &mut HashMap<u32, Vec<(Vec<u8>, Option<Vec<u8>>)>>,
+        state: &mut HashMap<Vec<u8>, Option<Vec<u8>>>,
         pending_shards: &mut HashSet<u32>,
-        // state: Vec<(u32, Vec<(Vec<u8>, Option<(Vec<u8>, MerkleProof)>)>)>,
-        state: Vec<(u32, Vec<(Vec<u8>, Option<Vec<u8>>)>)>,
+        shard_states: Vec<(u32, Vec<(Vec<u8>, Option<(Vec<u8>, MerkleProof)>)>)>,
     ) {
-        for (shard, entries) in state {
+        for (shard, entries) in shard_states {
             if !pending_shards.remove(&shard) {
                 continue;
             }
             // let root = self.merkle_trees[&shard].root();
-            // let mut shard_state = Vec::new();
-            // for (key, value_proof) in entries {
-            //     let value = if let Some((value, proof)) = value_proof {
-            //         let mut hasher = digest::Context::new(&digest::SHA256);
-            //         hasher.update(&key);
-            //         hasher.update(&value);
-            //         hasher.update(&0u32.to_le_bytes());
-            //         let leaf = hasher.finish();
-            //         let leaf = leaf.as_ref().try_into().unwrap();
-            //         // proof
-            //         //     .verify(leaf, &root)
-            //         //     .expect("Merkle proof verification failed");
-            //         let _ = proof.verify(leaf, &Default::default());
-            //         Some(value)
-            //     } else {
-            //         None
-            //     };
-            //     shard_state.push((key.clone(), value.clone()));
-            //     self.cache.put(key, value);
-            // }
-            // shard_states.insert(shard, shard_state);
-            shard_states.insert(shard, entries);
+            for (key, value_proof) in entries {
+                let value = if let Some((value, proof)) = value_proof {
+                    let mut hasher = digest::Context::new(&digest::SHA256);
+                    hasher.update(&key);
+                    hasher.update(&value);
+                    hasher.update(&0u32.to_le_bytes());
+                    let leaf = hasher.finish();
+                    let leaf = leaf.as_ref().try_into().unwrap();
+                    // proof
+                    //     .verify(leaf, &root)
+                    //     .expect("Merkle proof verification failed");
+                    let _ = proof.verify(leaf, &Default::default());
+                    Some(value)
+                } else {
+                    None
+                };
+                state.insert(key.clone(), value.clone());
+                self.cache.put(key, value);
+            }
         }
     }
 
@@ -482,7 +465,6 @@ mod message {
     #[derive(Decode, Encode)]
     pub struct PushValue {
         pub version: u64,
-        // pub state: Vec<(u32, Vec<(Vec<u8>, Option<(Vec<u8>, MerkleProof)>)>)>,
-        pub state: Vec<(u32, Vec<(Vec<u8>, Option<Vec<u8>>)>)>,
+        pub state: Vec<(u32, Vec<(Vec<u8>, Option<(Vec<u8>, MerkleProof)>)>)>,
     }
 }

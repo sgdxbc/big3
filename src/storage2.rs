@@ -140,8 +140,11 @@ impl StorageTask {
         while let Ok((key, tx)) = rx_key.recv() {
             // assert!(pushing_shards.contains(&config.shard_of_key(&key)));
             let shard = config.shard_of_key(&key);
-            let value = db.get([&shard.to_be_bytes()[..], &key].concat())?;
-            let _ = tx.send((key, value.clone()));
+            let mut value = db.get([&shard.to_be_bytes()[..], &key].concat())?;
+            if let Some(value) = &mut value {
+                value.truncate(100);
+            }
+            let _ = tx.send((key, value));
         }
         Ok(())
     }
