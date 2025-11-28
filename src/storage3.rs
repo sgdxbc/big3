@@ -276,7 +276,6 @@ impl StorageTask {
             merkle_trees: self.merkle_trees,
             merkle_roots: self.merkle_roots,
             cache: self.cache,
-            pushing: None,
             metrics: RetrieveWorkerMetrics {
                 num_keys: 0,
                 num_update_hits: 0,
@@ -319,7 +318,6 @@ struct RetrieveWorker {
     merkle_trees: HashMap<u32, MerkleTree>,
     merkle_roots: Vec<MerkleHash>,
     cache: LruCache<Vec<u8>, Option<Vec<u8>>>,
-    pushing: Option<(HashMap<Vec<u8>, Option<Vec<u8>>>, HashSet<u32>)>,
 
     metrics: RetrieveWorkerMetrics,
 }
@@ -393,7 +391,7 @@ impl RetrieveWorker {
             }
             let value = value.map(|(v, _)| v);
             state.insert(key.clone(), value.clone());
-            // self.cache.put(key, value);
+            self.cache.put(key, value);
         }
         debug!("version {} storage done", self.version);
         let push_value = message::PushValue {
@@ -408,59 +406,49 @@ impl RetrieveWorker {
             self.version,
             push_value.state.len()
         );
-        if !push_value.state.is_empty() {
-            let message = Message::PushValue(push_value);
-            self.network_interconnect.send_to_all(message);
-        }
+        let message = Message::PushValue(push_value);
+        self.network_interconnect.send_to_all(message);
 
-        let previous_pushing = self.pushing.replace((state, pending_shards));
-        if let Some((mut state, mut pending_shards)) = previous_pushing {
-            let version = self.version - 1;
-            for (key, value) in &state {
-                self.cache.put(key.clone(), value.clone());
+        if let Some(push_values) = self.reorder_push_values.remove(&self.version) {
+            for push_value in push_values {
+                self.insert_shards(&mut state, &mut pending_shards, push_value.state);
+                debug!(
+                    "version {} reordered push value applied; {} shards left",
+                    self.version,
+                    pending_shards.len()
+                );
             }
-            if let Some(push_values) = self.reorder_push_values.remove(&version) {
-                for push_value in push_values {
-                    self.insert_shards(&mut state, &mut pending_shards, push_value.state);
-                    debug!(
-                        "version {} reordered push value applied; {} shards left",
-                        version,
-                        pending_shards.len()
-                    );
-                }
-            }
-            while !pending_shards.is_empty() {
-                let Some(message) = self.rx_message.recv().await else {
-                    anyhow::bail!("storage channel closed");
-                };
-                match message {
-                    Message::PushValue(push_value) => {
-                        if push_value.version > version {
-                            debug!(
-                                "version {} push value reordered; waiting for version {}",
-                                version, push_value.version
-                            );
-                            self.reorder_push_values
-                                .entry(push_value.version)
-                                .or_default()
-                                .push(push_value);
-                            continue;
-                        }
-                        if push_value.version == version {
-                            self.insert_shards(&mut state, &mut pending_shards, push_value.state);
-                            debug!(
-                                "version {} push value applied; {} shards left",
-                                version,
-                                pending_shards.len()
-                            );
-                        }
+        }
+        while !pending_shards.is_empty() {
+            let Some(message) = self.rx_message.recv().await else {
+                anyhow::bail!("storage channel closed");
+            };
+            match message {
+                Message::PushValue(push_value) => {
+                    if push_value.version > self.version {
+                        debug!(
+                            "version {} push value reordered; waiting for version {}",
+                            self.version, push_value.version
+                        );
+                        self.reorder_push_values
+                            .entry(push_value.version)
+                            .or_default()
+                            .push(push_value);
+                        continue;
+                    }
+                    if push_value.version == self.version {
+                        self.insert_shards(&mut state, &mut pending_shards, push_value.state);
+                        debug!(
+                            "version {} push value applied; {} shards left",
+                            self.version,
+                            pending_shards.len()
+                        );
                     }
                 }
             }
-            debug!("version {} network done", version);
-            let _ = self.fetched_handle.tx_fetched.send(state);
         }
-
+        debug!("version {} network done", self.version);
+        let _ = self.fetched_handle.tx_fetched.send(state);
         Ok(())
     }
 
@@ -499,7 +487,7 @@ impl RetrieveWorker {
 
     fn handle_post(&mut self, posts: Vec<(Vec<u8>, Option<Vec<u8>>)>) -> anyhow::Result<()> {
         for (key, value) in posts {
-            // self.cache.demote(&key);
+            self.cache.demote(&key);
             self.update_table.insert(key, value);
         }
         let _ = self.post_done_handle.tx_post_done.send(());

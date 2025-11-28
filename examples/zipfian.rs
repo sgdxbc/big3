@@ -4,7 +4,7 @@ use rand::rng;
 
 fn main() {
     let num_keys = 100_000_000;
-    let zipf_s = 1.17;
+    let zipf_s = 1.24;
     let zipfian = ScrambledZipfian::new_range_exact(0, num_keys - 1, zipf_s);
 
     let num_samples = 100_000_000;
