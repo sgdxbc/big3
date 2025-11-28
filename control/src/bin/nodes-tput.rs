@@ -54,7 +54,18 @@ async fn main() -> anyhow::Result<()> {
                 .await?;
             }
         }
-        (App::Ycsb, Storage::Big) => {}
+        (App::Ycsb, Storage::Big) => {
+            for f in [1, 3, 8, 13, 18, 23, 28, 33] {
+                run.perform(
+                    Sharding {
+                        num_shards: 1,
+                        num_shard_faulty_nodes: f,
+                    },
+                    20_000,
+                )
+                .await?;
+            }
+        }
 
         (App::Utxo, Storage::Full) => {}
         (App::Utxo, Storage::Big) => {}
