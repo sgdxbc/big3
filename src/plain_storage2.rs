@@ -45,6 +45,7 @@ impl PlainStorageTask {
         fetched_handle: FetchedHandle,
         post_done_handle: PostDoneHandle,
         cache_size: usize,
+        app: &crate::schema::App,
     ) -> anyhow::Result<Self> {
         let temp_dir = tempdir()?;
         let status = Command::new("cp")
@@ -58,6 +59,29 @@ impl PlainStorageTask {
         let mut opts = Options::default();
         opts.set_blob_cache(&Cache::new_lru_cache(cache_size * 1000));
         let db = DB::open(&opts, temp_dir.path())?;
+
+        let db = Arc::new(db);
+        if let crate::schema::App::Ycsb(num_keys) = app {
+            let (tx_get, rx_get) = flume::unbounded();
+            let mut join_set = JoinSet::new();
+            for _ in 0..Self::NUM_GET_WORKER_THREADS {
+                let db = db.clone();
+                let rx_get = rx_get.clone();
+                join_set.spawn_blocking(move || Self::prefetch_worker(db, rx_get));
+            }
+
+            let zipfian = crate::workload::zipfian::ScrambledZipfian::new_range(0, *num_keys - 1);
+            for i in 0..cache_size.min(1_000_000) {
+                let key = crate::execute::ycsb::key(zipfian.scramble(i as _));
+                let _ = tx_get.send(key.into_bytes());
+            }
+            drop(tx_get);
+            while let Some(res) = join_set.join_next().await {
+                res??;
+            }
+        }
+        let db = Arc::into_inner(db).unwrap();
+
         Ok(Self::new(
             channels,
             fetched_handle,
@@ -68,6 +92,13 @@ impl PlainStorageTask {
     }
 
     const NUM_GET_WORKER_THREADS: usize = 20;
+
+    fn prefetch_worker(db: Arc<DB>, rx_key: flume::Receiver<Vec<u8>>) -> anyhow::Result<()> {
+        while let Ok(key) = rx_key.recv() {
+            db.get(&key)?;
+        }
+        Ok(())
+    }
 
     pub async fn run(mut self) -> anyhow::Result<()> {
         drop(self.channels.tx_fetch);

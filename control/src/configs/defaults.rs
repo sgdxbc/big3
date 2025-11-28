@@ -4,18 +4,20 @@ use big_schema::Storage;
 
 pub const NUM_KEYS: u64 = 10_000_000;
 pub const READ_RATIO: f64 = 0.5;
-pub const NUM_FAULTY_NODES: u16 = 1;
 pub const NUM_CONCURRENT: u32 = 1;
 
 pub const THETA: f64 = 0.99;
 pub const CACHE_SIZE: usize = 8_000_000;
 
-pub enum Sharding {
-    Single,
-    Multi(u8, u16), // (num_shards, num_shard_faulty_nodes)
+pub struct Sharding {
+    pub num_shards: u8,
+    pub num_shard_faulty_nodes: u16,
 }
 
-pub const SHARDING: Sharding = Sharding::Single;
+pub const SHARDING: Sharding = Sharding {
+    num_shards: 1,
+    num_shard_faulty_nodes: 1,
+};
 
 pub const STORAGE: Storage = Storage::Full;
 

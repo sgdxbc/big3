@@ -6,10 +6,6 @@ pub use defaults::*;
 
 include!("configs/overrides.rs");
 
-pub const fn num_nodes() -> u16 {
-    NUM_FAULTY_NODES * 3 + 1
-}
-
 impl App {
     pub fn to_schema_app(&self) -> big_schema::App {
         match self {
@@ -33,17 +29,15 @@ impl App {
 }
 
 impl Sharding {
-    pub fn num_shards(&self) -> u8 {
-        match self {
-            Sharding::Single => 1,
-            Sharding::Multi(num_shards, _) => *num_shards,
-        }
+    pub fn num_running_nodes(&self) -> u16 {
+        self.num_shards as u16 * (self.num_shard_faulty_nodes * 2 + 1)
     }
 
-    pub fn num_shard_faulty_nodes(&self) -> u16 {
-        match self {
-            Sharding::Single => NUM_FAULTY_NODES,
-            Sharding::Multi(_, num_shard_faulty_nodes) => *num_shard_faulty_nodes,
-        }
+    pub fn num_nodes(&self) -> u16 {
+        self.num_shards as u16 * (self.num_shard_faulty_nodes * 3 + 1)
+    }
+
+    pub fn num_faulty_nodes(&self) -> u16 {
+        self.num_shards as u16 * self.num_shard_faulty_nodes
     }
 }

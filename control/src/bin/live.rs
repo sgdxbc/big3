@@ -3,8 +3,8 @@ use std::time::Duration;
 use big_control::{
     Cluster, Instance,
     configs::{
-        APP, CACHE_SIZE, LIVE_DURATION, NETWORK, NUM_CONCURRENT, NUM_FAULTY_NODES, Network,
-        SHARDING, STORAGE, STRIPE_INTERVAL, num_nodes,
+        APP, CACHE_SIZE, LIVE_DURATION, NETWORK, NUM_CONCURRENT, Network, SHARDING, STORAGE,
+        STRIPE_INTERVAL,
     },
     load_all, run_endpoints, scrape_all, start_all, stop_all,
 };
@@ -22,7 +22,7 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn run(cluster: &Cluster) -> anyhow::Result<()> {
-    let num_running_nodes = (2 * NUM_FAULTY_NODES + 1) as u16;
+    let num_running_nodes = SHARDING.num_running_nodes();
 
     let endpoints = run_endpoints(
         [
@@ -54,29 +54,28 @@ async fn run_workload(
     println!("wait for servers to boot");
     sleep(Duration::from_millis(2000)).await;
 
-    let shard_size = 2 * SHARDING.num_shard_faulty_nodes() + 1;
-    assert!(server_instances.len() >= shard_size as usize * SHARDING.num_shards() as usize);
-    let num_shards = (server_instances.len() / shard_size as usize) as _;
-
     let ips = server_instances
         .iter()
         .map(|instance| instance.private_ip)
         .collect::<Vec<_>>();
 
+    let num_shard_running_nodes = 2 * SHARDING.num_shard_faulty_nodes + 1;
+    let num_shards = SHARDING.num_shards as _;
+
     println!("load servers");
     let replica_items = server_instances.iter().enumerate().map(|(i, instance)| {
-        let shard_index = (i / shard_size as usize) as _;
+        let shard_index = (i / num_shard_running_nodes as usize) as _;
         let schema = big_schema::ReplicaTask {
             node_index: i as _,
             num_shards,
             shard_index,
-            shard_node_index: (i % shard_size as usize) as _,
-            num_shard_faulty_nodes: SHARDING.num_shard_faulty_nodes(),
+            shard_node_index: (i % num_shard_running_nodes as usize) as _,
+            num_shard_faulty_nodes: SHARDING.num_shard_faulty_nodes,
             ips: ips.clone(),
             latencies: NETWORK.to_latencies(),
             config: big_schema::ReplicaConfig {
-                num_nodes: num_nodes(),
-                num_faulty_nodes: NUM_FAULTY_NODES,
+                num_nodes: SHARDING.num_nodes(),
+                num_faulty_nodes: SHARDING.num_faulty_nodes(),
                 cache_size: CACHE_SIZE,
                 max_concurrent_executing: match NETWORK {
                     Network::Lan => 1,
@@ -100,11 +99,11 @@ async fn run_workload(
             ips: vec![ips.clone()],
             config: big_schema::ClientConfig {
                 // num_nodes: num_nodes(),
-                num_faulty_nodes: SHARDING.num_shard_faulty_nodes(),
+                num_faulty_nodes: SHARDING.num_shard_faulty_nodes,
             },
             workload_config: big_schema::ClientWorkloadConfig {
                 num_concurrent: NUM_CONCURRENT,
-                num_shards: SHARDING.num_shards(),
+                num_shards: SHARDING.num_shards,
                 app: APP.to_schema_workload(),
             },
             node_index: i as _,

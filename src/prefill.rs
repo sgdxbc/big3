@@ -122,6 +122,10 @@ async fn run_prefill_storage(
         schema::Storage::Big => {
             let storage_config = BigStorageConfig::from(&schema.config);
             let storing_shards = storage_config.storing_shards(schema.node_index);
+            info!(
+                "node {} storing shards: {:?}",
+                schema.node_index, storing_shards
+            );
             let mut shard_hashes =
                 vec![Vec::<MerkleHash>::new(); storage_config.num_shards() as usize];
             let wrapped_key_value = |k: u64| {
