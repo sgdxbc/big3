@@ -84,11 +84,14 @@ pub struct ExecuteTask<E: AbstractExecute> {
     state: E,
     fetching_requests: Vec<(E::Op, ClientId, ClientSeq)>,
     reply_flag: NodeIndex,
+    last_updates: Vec<(Vec<u8>, Option<Vec<u8>>)>,
 
     metrics: ExecuteMetrics,
 }
 
 struct ExecuteMetrics {
+    parse: Latency,
+    real_fetch: Latency,
     fetch: Latency,
     execute: Latency,
     post: Latency,
@@ -116,7 +119,10 @@ impl<E: AbstractExecute> ExecuteTask<E> {
             state,
             fetching_requests: Default::default(),
             reply_flag: shard_node_index,
+            last_updates: Default::default(),
             metrics: ExecuteMetrics {
+                parse: Latency::new(),
+                real_fetch: Latency::new(),
                 fetch: Latency::new(),
                 execute: Latency::new(),
                 post: Latency::new(),
@@ -126,8 +132,12 @@ impl<E: AbstractExecute> ExecuteTask<E> {
 
     fn log_metrics(&self) {
         info!(
-            "execute\nfetch: {}\nexecute: {}\npost: {}",
-            self.metrics.fetch, self.metrics.execute, self.metrics.post
+            "execute\nparse: {}\nfetch: {} (real {})\nexecute: {}\npost: {}",
+            self.metrics.parse,
+            self.metrics.fetch,
+            self.metrics.real_fetch,
+            self.metrics.execute,
+            self.metrics.post
         );
     }
 }
@@ -159,9 +169,9 @@ where
                     .push((op, request.client_id, request.client_seq));
             }
         }
-        if self.fetching_requests.is_empty() {
-            return;
-        }
+        // if self.fetching_requests.is_empty() {
+        //     return;
+        // }
         info!(
             "request number {} fetching {} keys",
             self.fetching_requests.len(),
@@ -170,12 +180,15 @@ where
         let _ = self.fetch_handle.tx_keys.send(keys);
     }
 
-    fn handle_fetched(&mut self, mut state: HashMap<Vec<u8>, Option<Vec<u8>>>) {
+    fn handle_fetched(
+        &mut self,
+        mut state: HashMap<Vec<u8>, Option<Vec<u8>>>,
+        fetching_requests: Vec<(E::Op, ClientId, ClientSeq)>,
+    ) {
         // info!("fetched state with {} entries", state.len());
 
-        let fetching_requests = take(&mut self.fetching_requests);
-
-        // update_intersection_move(&mut state, take(&mut self.last_state));
+        // update_intersection_move(&mut state, take(&mut self.last_updates));
+        state.extend(self.last_updates.drain(..));
         let mut updates = Vec::new();
         for (op, client_id, client_seq) in fetching_requests {
             let (res, op_updates) = self.state.execute(op, &state);
@@ -193,7 +206,8 @@ where
             }
             self.reply_flag = (self.reply_flag + 1) % (2 * self.num_shard_faulty_nodes + 1);
         }
-        let _ = self.post_handle.tx_post.send(updates);
+        let _ = self.post_handle.tx_post.send(updates.clone());
+        self.last_updates = updates;
     }
 
     pub async fn run(mut self, cancel: CancellationToken) -> anyhow::Result<()>
@@ -210,28 +224,33 @@ where
     }
 
     async fn run_inner(&mut self) {
+        let mut fetching = None;
         while let Some((blocks, context)) = self.channels.rx_blocks.recv().await {
             let start = Instant::now();
             self.parse_blocks(blocks);
-            if self.fetching_requests.is_empty() {
+            let fetching_requests = take(&mut self.fetching_requests);
+            self.metrics.parse += start.elapsed();
+
+            let previous_fetching = fetching.replace((fetching_requests, context, start));
+            if let Some((fetching_requests, context, real_start)) = previous_fetching {
+                let start = Instant::now();
+                let Some(state) = self.channels.rx_fetched.recv().await else {
+                    return;
+                };
+                self.metrics.fetch += start.elapsed();
+                self.metrics.real_fetch += real_start.elapsed();
+
+                let start = Instant::now();
+                self.handle_fetched(state, fetching_requests);
+                self.metrics.execute += start.elapsed();
+
+                let start = Instant::now();
+                let Some(()) = self.channels.rx_post_done.recv().await else {
+                    return;
+                };
+                self.metrics.post += start.elapsed();
                 context.respond(());
-                continue;
             }
-            let Some(state) = self.channels.rx_fetched.recv().await else {
-                return;
-            };
-            self.metrics.fetch += start.elapsed();
-
-            let start = Instant::now();
-            self.handle_fetched(state);
-            self.metrics.execute += start.elapsed();
-
-            let start = Instant::now();
-            let Some(()) = self.channels.rx_post_done.recv().await else {
-                return;
-            };
-            self.metrics.post += start.elapsed();
-            context.respond(());
         }
     }
 }

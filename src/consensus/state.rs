@@ -187,6 +187,7 @@ impl<C> Bullshark<C> {
     }
 
     const MAX_BLOCK_TXNS: usize = 10_000;
+    const MAX_EXECUTING: usize = 100;
 }
 
 impl<C: BullsharkContext> Bullshark<C> {
@@ -247,7 +248,7 @@ impl<C: BullsharkContext> Bullshark<C> {
         self.metrics.round += self.metrics.round_start.elapsed();
         self.metrics.round_start = Instant::now();
 
-        if self.executing.len() <= 1 {
+        if self.executing.len() <= Self::MAX_EXECUTING {
             self.propose();
         } else {
             self.execute_backpressured = true;
@@ -427,7 +428,7 @@ impl<C: BullsharkContext> Bullshark<C> {
             self.executing.len()
         );
 
-        if self.executing.len() <= 1 && take(&mut self.execute_backpressured) {
+        if self.executing.len() <= Self::MAX_EXECUTING && take(&mut self.execute_backpressured) {
             if let Some(start) = self.metrics.back_pressure_start.take() {
                 self.metrics.back_pressure += start.elapsed();
             }
