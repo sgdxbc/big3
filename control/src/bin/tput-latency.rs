@@ -57,11 +57,9 @@ async fn main() -> anyhow::Result<()> {
             &[0, 100, 300, 600, 1000, 3000, 6000, 10_000, 20_000, 30_000][..]
         }
 
-        (Network::Lan, App::Utxo, Setting::Full) => {
-            &[0, 10, 50, 100, 200, 300, 500, 1000, 2000, 4000][..]
-        }
+        (Network::Lan, App::Utxo, Setting::Full) => &[0, 100, 300, 600, 1000, 2000, 4000, 6000][..],
         (Network::Lan, App::Utxo, Setting::Sharded) => {
-            &[0, 1000, 2000, 4000, 6000, 8000, 10_000, 15_000][..]
+            &[0, 100, 300, 600, 1000, 3000, 6000, 10_000, 12_000][..]
         }
         (Network::Lan, App::Utxo, Setting::Big) => {
             &[0, 100, 300, 600, 1000, 2000, 3000, 4000, 5000][..]
@@ -75,15 +73,11 @@ async fn main() -> anyhow::Result<()> {
             &[0, 1_000, 5_000, 10_000, 30_000, 60_000, 100_000, 130_000]
         }
 
-        (Network::Wan, App::Utxo, Setting::Full) => &[
-            0, 4000, 6000, 8000, 10_000, 13_000, 16_000, 20_000, 30_000, 40_000,
+        (Network::Wan, App::Utxo, Setting::Full) => &[0, 5_000, 10_000, 20_000, 40_000, 60_000],
+        (Network::Wan, App::Utxo, Setting::Sharded) => &[
+            0, 5_000, 10_000, 20_000, 40_000, 60_000, 80_000, 100_000, 150_000,
         ],
-        (Network::Wan, App::Utxo, Setting::Sharded) => {
-            &[0, 30_000, 60_000, 100_000, 200_000, 300_000]
-        }
-        (Network::Wan, App::Utxo, Setting::Big) => {
-            &[0, 1_000, 5_000, 10_000, 30_000, 60_000, 100_000, 130_000]
-        }
+        (Network::Wan, App::Utxo, Setting::Big) => &[0, 5_000, 10_000, 20_000, 40_000, 60_000],
     };
 
     for &num_concurrent in num_concurrent {
@@ -203,7 +197,11 @@ async fn run_workload(
     println!("start clients");
     start_all(client_instances, control_client.clone()).await?;
 
-    sleep(Duration::from_secs(10)).await;
+    sleep(Duration::from_secs(match NETWORK {
+        Network::Lan => 10,
+        Network::Wan => 20,
+    }))
+    .await;
     println!("scrape and discard warmup data");
     scrape_all(client_instances, control_client.clone()).await?;
     sleep(Duration::from_secs(30)).await;

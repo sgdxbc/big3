@@ -1,11 +1,5 @@
-network,app,setting,num_nodes,tput,p50,p99,_notes,_ignore
-,,,,,,,"num of keys = 1000000000, read ratio = 0.95",true
-Wan,Ycsb,Full,100,0.1662721119348242,5.444206591,5.448400895,"concurrent = 0"
-Wan,Ycsb,Full,100,11969.624693869962,5.423235071,5.523898367,"concurrent = 3000"
-Wan,Ycsb,Full,100,23858.289699860976,5.402263551,5.565841407,"concurrent = 6000"
-Wan,Ycsb,Full,100,33764.88222110783,5.473566719,8.078229503,"concurrent = 10000"
-Wan,Ycsb,Full,100,34965.00060128291,8.027897855,8.321499135,"concurrent = 13000"
-Wan,Ycsb,Full,100,42983.378353005995,7.998537727,8.350859263,"concurrent = 16000"
-Wan,Ycsb,Full,100,40616.48080969174,7.927234559,8.396996607,"concurrent = 20000"
-Wan,Ycsb,Full,100,60362.18656163894,10.435428351,11.047796735,"concurrent = 30000"
-Wan,Ycsb,Full,100,81552.10745869309,12.012486655,13.061062655,"concurrent = 40000"
+network,app,setting,tput,p50,p99,_notes,_ignore
+,,,,,,"APP: Utxo, STORAGE: Full, SHARDING: Sharding { num_shards: 10, num_shard_faulty_nodes: 3 }, NETWORK: Wan, NUM_CONCURRENT: 40000, CACHE_SIZE: 4000000, THETA: 1.24, READ_RATIO: 0.95, NUM_KEYS: 100000000 ",true
+Wan,Utxo,Sharded,156932.3034397636,11.031019519,13.933477887,"concurrent = 80000"
+Wan,Utxo,Sharded,181261.89182776527,11.492392959,16.542334975,"concurrent = 100000"
+Wan,Utxo,Sharded,198891.850437394,14.503903231,17.699962879,"concurrent = 150000"
