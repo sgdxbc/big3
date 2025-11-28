@@ -4,7 +4,7 @@ use rand::rng;
 
 fn main() {
     let num_keys = 100_000_000;
-    let zipf_s = 1.05;
+    let zipf_s = 1.1;
     let zipfian = ScrambledZipfian::new_range_exact(0, num_keys - 1, zipf_s);
 
     let num_samples = 100_000_000;
@@ -17,7 +17,7 @@ fn main() {
     for i in 0..10_000_000 {
         let v = counts.get(&(zipfian.scramble(i))).unwrap_or(&0);
         acc += *v;
-        if (i + 1) % 100_000 == 0 {
+        if (i + 1) % 1_000_000 == 0 {
             println!(
                 "key {:>8} ({:.4}%): cumulative {:>8} ({:.4}%)",
                 i + 1,

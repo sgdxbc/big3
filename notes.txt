@@ -93,3 +93,18 @@ It turns out that 100KB key value pairs was a critical choice for my previous, a
 Previously, each key value pair is 100 bytes. Now the key is still 16 bytes, while the value is 1000 bytes. At the same time, there is a Merkle proof which contains log2(100_000) - 1 = 16 SHA256 digests = 512 bytes. In total that is 1528 bytes, >15x than before.
 
 On the other hand, previously every key value pair is transferred from one of the nodes to every node. So the performance will recover if at most 1/15 keys are cache missed and need to be transferred.
+
+----
+
+0.99        8M          163K        22%
+0.99        12M         180K        17%
+0.99        16M         190K        14%
+1.05        8M          208K        17%
+1.05        12M         217K        13%
+1.05        16M         230K        10%
+1.1         8M          230K        13%
+1.1         12M         250K        10%
+
+----
+
+Zipfian access top 1% keys for 99% when theta = 1.3.
