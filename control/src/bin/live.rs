@@ -3,8 +3,7 @@ use std::time::Duration;
 use big_control::{
     Cluster, Instance,
     configs::{
-        APP, CACHE_SIZE, LIVE_DURATION, NETWORK, NUM_CONCURRENT, Network, SHARDING, STORAGE,
-        STRIPE_INTERVAL,
+        APP, CACHE_SIZE, LIVE_DURATION, NETWORK, NUM_CONCURRENT, SHARDING, STORAGE, STRIPE_INTERVAL,
     },
     load_all, run_endpoints, scrape_all, start_all, stop_all,
 };
@@ -77,10 +76,7 @@ async fn run_workload(
                 num_nodes: SHARDING.num_nodes(),
                 num_faulty_nodes: SHARDING.num_faulty_nodes(),
                 cache_size: CACHE_SIZE,
-                max_concurrent_executing: match NETWORK {
-                    Network::Lan => 1,
-                    Network::Wan => 1000,
-                },
+                max_concurrent_executing: NETWORK.max_concurrent_executing(),
             },
             storage: STORAGE,
             app: APP.to_schema_app(),

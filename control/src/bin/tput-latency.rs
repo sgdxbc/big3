@@ -50,9 +50,11 @@ async fn main() -> anyhow::Result<()> {
 
     let num_concurrent = match (NETWORK, APP, setting) {
         (Network::Lan, App::Ycsb, Setting::Full) => {
-            &[0, 10, 50, 100, 300, 600, 1000, 2000, 4000][..]
+            &[0, 50, 100, 500, 1000, 3000, 6000, 10_000, 15_000][..]
         }
-        (Network::Lan, App::Ycsb, Setting::Sharded) => &[0, 1000, 2000, 4000][..],
+        (Network::Lan, App::Ycsb, Setting::Sharded) => &[
+            0, 50, 100, 500, 1000, 5000, 10_000, 15_000, 20_000, 25_000, 30_000,
+        ][..],
         (Network::Lan, App::Ycsb, Setting::Big) => {
             &[0, 100, 300, 600, 1000, 3000, 6000, 10_000, 20_000, 30_000][..]
         }
@@ -160,10 +162,7 @@ async fn run_workload(
                 num_nodes: SHARDING.num_nodes(),
                 num_faulty_nodes: SHARDING.num_faulty_nodes(),
                 cache_size: CACHE_SIZE,
-                max_concurrent_executing: match NETWORK {
-                    Network::Lan => 1,
-                    Network::Wan => 1000,
-                },
+                max_concurrent_executing: NETWORK.max_concurrent_executing(),
             },
             storage: STORAGE,
             app: APP.to_schema_app(),

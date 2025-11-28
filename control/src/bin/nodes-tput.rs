@@ -2,10 +2,7 @@ use std::{fmt::Write as _, time::Duration};
 
 use big_control::{
     Cluster, Instance, PerformanceMetrics,
-    configs::{
-        APP, App, NETWORK, NUM_CONCURRENT, NUM_FAULTY_NODES, NUM_KEYS, NUM_SHARDS, READ_RATIO,
-        STORAGE, STRIPE_INTERVAL, num_nodes,
-    },
+    configs::{APP, App, CACHE_SIZE, NETWORK, STORAGE, STRIPE_INTERVAL, Sharding, dump_all},
     load_all, run_endpoints, scrape_all, start_all, stop_all,
 };
 use big_schema::{Storage, Task};
@@ -27,50 +24,89 @@ enum Setting {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cluster = Cluster::from_terraform().await?;
-
-    let mut data = String::from("network,app,setting,num_nodes,tput,p50,p99,_notes\n");
-    writeln!(
-        &mut data,
-        ",,,,,,,\"num of keys = {}, read ratio = {}\"",
-        NUM_KEYS,
-        if matches!(APP, App::Ycsb) {
-            READ_RATIO.to_string()
-        } else {
-            "n/a".to_string()
-        }
-    )?;
-
-    let setting = match STORAGE {
-        Storage::Full if NUM_SHARDS == 1 => Setting::Full,
-        Storage::Full => Setting::Sharded,
-        Storage::Big => Setting::Big,
+    let mut run = Run {
+        cluster,
+        data: String::new(),
     };
+    run.init();
 
-    let metrics = run(&cluster, NUM_FAULTY_NODES, NUM_SHARDS).await?;
-    writeln!(
-        &mut data,
-        "{:?},{:?},{:?},{},{},{},{}",
-        NETWORK,
-        APP,
-        setting,
-        num_nodes() * NUM_SHARDS as u16,
-        metrics.tput,
-        metrics.p50.as_secs_f64(),
-        metrics.p99.as_secs_f64(),
-    )?;
+    match (APP, STORAGE) {
+        (App::Ycsb, Storage::Full) => {
+            for f in [1, 3, 8, 13, 18, 23, 28, 33] {
+                run.perform(
+                    Sharding {
+                        num_shards: 1,
+                        num_shard_faulty_nodes: f,
+                    },
+                    15_000,
+                )
+                .await?;
+            }
+
+            for s in [2, 4, 6, 8, 10] {
+                run.perform(
+                    Sharding {
+                        num_shards: s,
+                        num_shard_faulty_nodes: 3,
+                    },
+                    30_000,
+                )
+                .await?;
+            }
+        }
+        (App::Ycsb, Storage::Big) => {}
+
+        (App::Utxo, Storage::Full) => {}
+        (App::Utxo, Storage::Big) => {}
+    }
 
     create_dir_all("data").await?;
     let mut data_file = File::create("data/nodes-tput-scratch.csv").await?;
-    data_file.write_all(data.as_bytes()).await?;
+    data_file.write_all(run.data.as_bytes()).await?;
     Ok(())
+}
+
+struct Run {
+    cluster: Cluster,
+    data: String,
+}
+
+impl Run {
+    fn init(&mut self) {
+        self.data = String::from("network,app,setting,num_nodes,tput,p50,p99,_notes,_ignore\n");
+        writeln!(&mut self.data, ",,,,,,,\"{}\",true", dump_all()).unwrap();
+    }
+
+    async fn perform(&mut self, sharding: Sharding, num_concurrent: u32) -> anyhow::Result<()> {
+        let setting = match STORAGE {
+            Storage::Full if sharding.num_shards == 1 => Setting::Full,
+            Storage::Full if sharding.num_shards > 1 => Setting::Sharded,
+            Storage::Big if sharding.num_shards == 1 => Setting::Big,
+            _ => panic!("invalid setting"),
+        };
+        let run = run(&self.cluster, sharding, num_concurrent).await?;
+        writeln!(
+            &mut self.data,
+            "{:?},{:?},{:?},{},{},{},{},\"num_concurrent = {}\"",
+            NETWORK,
+            APP,
+            setting,
+            sharding.num_nodes(),
+            run.tput,
+            run.p50.as_secs_f64(),
+            run.p99.as_secs_f64(),
+            num_concurrent,
+        )?;
+        Ok(())
+    }
 }
 
 async fn run(
     cluster: &Cluster,
-    num_faulty_nodes: u16,
-    num_shards: u8,
+    sharding: Sharding,
+    num_concurrent: u32,
 ) -> anyhow::Result<PerformanceMetrics> {
-    let num_running_nodes = (2 * num_faulty_nodes + 1) * num_shards as u16;
+    let num_running_nodes = sharding.num_running_nodes();
     let endpoints = run_endpoints(
         [
             &cluster.servers[..num_running_nodes as usize],
@@ -81,6 +117,8 @@ async fn run(
     let workload = run_workload(
         &cluster.servers[..num_running_nodes as usize],
         &cluster.clients,
+        sharding,
+        num_concurrent,
     );
     let workload = async {
         let result = workload.await;
@@ -94,43 +132,39 @@ async fn run(
 async fn run_workload(
     server_instances: &[Instance],
     client_instances: &[Instance],
+    sharding: Sharding,
+    num_concurrent: u32,
 ) -> anyhow::Result<PerformanceMetrics> {
-    if NUM_SHARDS > 1 {
-        assert!(matches!(STORAGE, Storage::Full));
-    }
     assert!(STRIPE_INTERVAL >= Duration::from_hours(1));
 
     let control_client = Client::new();
     println!("wait for servers to boot");
     sleep(Duration::from_millis(2000)).await;
 
-    let shard_size = 2 * NUM_FAULTY_NODES + 1;
-    assert!(server_instances.len().is_multiple_of(shard_size as usize));
-    assert_eq!(
-        server_instances.len(),
-        shard_size as usize * NUM_SHARDS as usize
-    );
-
     let ips = server_instances
         .iter()
         .map(|instance| instance.private_ip)
-        .collect::<Vec<_>>()
-        .chunks_exact(shard_size as _)
-        .map(|chunk| chunk.to_vec())
         .collect::<Vec<_>>();
+
+    let num_shard_running_nodes = 2 * sharding.num_shard_faulty_nodes + 1;
+    let num_shards = sharding.num_shards as _;
 
     println!("load servers");
     let replica_items = server_instances.iter().enumerate().map(|(i, instance)| {
-        let shard_index = (i / shard_size as usize) as _;
+        let shard_index = (i / num_shard_running_nodes as usize) as _;
         let schema = big_schema::ReplicaTask {
-            node_index: (i % shard_size as usize) as _,
-            num_shards: NUM_SHARDS,
+            node_index: i as _,
+            num_shards,
             shard_index,
-            ips: ips[shard_index as usize].clone(),
+            shard_node_index: (i % num_shard_running_nodes as usize) as _,
+            num_shard_faulty_nodes: sharding.num_shard_faulty_nodes,
+            ips: ips.clone(),
             latencies: NETWORK.to_latencies(),
             config: big_schema::ReplicaConfig {
-                num_nodes: num_nodes(),
-                num_faulty_nodes: NUM_FAULTY_NODES,
+                num_nodes: sharding.num_nodes(),
+                num_faulty_nodes: sharding.num_faulty_nodes(),
+                cache_size: CACHE_SIZE,
+                max_concurrent_executing: NETWORK.max_concurrent_executing(),
             },
             storage: STORAGE,
             app: APP.to_schema_app(),
@@ -146,14 +180,14 @@ async fn run_workload(
     println!("load clients");
     let client_items = client_instances.iter().enumerate().map(|(i, instance)| {
         let client_task = big_schema::ClientTask {
-            ips: ips.clone(),
+            ips: vec![ips.clone()],
             config: big_schema::ClientConfig {
                 // num_nodes: num_nodes(),
-                num_faulty_nodes: NUM_FAULTY_NODES,
+                num_faulty_nodes: sharding.num_shard_faulty_nodes,
             },
             workload_config: big_schema::ClientWorkloadConfig {
-                num_concurrent: NUM_CONCURRENT,
-                num_shards: NUM_SHARDS,
+                num_concurrent,
+                num_shards: sharding.num_shards,
                 app: APP.to_schema_workload(),
             },
             node_index: i as _,

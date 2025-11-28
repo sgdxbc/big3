@@ -9,7 +9,7 @@ pub const NUM_CONCURRENT: u32 = 1;
 pub const THETA: f64 = 0.99;
 pub const CACHE_SIZE: usize = 8_000_000;
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub struct Sharding {
     pub num_shards: u8,
     pub num_shard_faulty_nodes: u16,
@@ -47,6 +47,13 @@ impl Network {
         match self {
             Network::Lan => None,
             Network::Wan => Some(LATENCY_MATRIX.iter().map(|row| row.to_vec()).collect()),
+        }
+    }
+
+    pub fn max_concurrent_executing(self) -> usize {
+        match self {
+            Network::Lan => 1,
+            Network::Wan => 1_000,
         }
     }
 }
