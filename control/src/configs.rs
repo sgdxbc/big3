@@ -1,6 +1,8 @@
 #[allow(unused)]
 mod defaults;
 
+use std::fmt::Write as _;
+
 #[allow(unused)]
 pub use defaults::*;
 
@@ -40,4 +42,20 @@ impl Sharding {
     pub fn num_faulty_nodes(&self) -> u16 {
         self.num_shards as u16 * self.num_shard_faulty_nodes
     }
+}
+
+pub fn dump_all() -> String {
+    let mut s = String::new();
+    write!(&mut s, "APP: {:?}, ", APP).unwrap();
+    write!(&mut s, "STORAGE: {:?}, ", STORAGE).unwrap();
+    write!(&mut s, "SHARDING: {:?}, ", SHARDING).unwrap();
+    write!(&mut s, "NETWORK: {:?}, ", NETWORK).unwrap();
+    write!(&mut s, "NUM_CONCURRENT: {:?}, ", NUM_CONCURRENT).unwrap();
+    // write!(&mut s, "LIVE_DURATION: {:?}, ", LIVE_DURATION).unwrap();
+    // write!(&mut s, "STRIPE_INTERVAL: {:?}, ", STRIPE_INTERVAL).unwrap();
+    write!(&mut s, "CACHE_SIZE: {:?}, ", CACHE_SIZE).unwrap();
+    write!(&mut s, "THETA: {:?}, ", THETA).unwrap();
+    write!(&mut s, "READ_RATIO: {:?}, ", READ_RATIO).unwrap();
+    write!(&mut s, "NUM_KEYS: {:?} ", NUM_KEYS).unwrap();
+    s
 }

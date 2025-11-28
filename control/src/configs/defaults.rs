@@ -9,6 +9,7 @@ pub const NUM_CONCURRENT: u32 = 1;
 pub const THETA: f64 = 0.99;
 pub const CACHE_SIZE: usize = 8_000_000;
 
+#[derive(Debug)]
 pub struct Sharding {
     pub num_shards: u8,
     pub num_shard_faulty_nodes: u16,
