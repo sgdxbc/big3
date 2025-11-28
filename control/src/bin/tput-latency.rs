@@ -67,10 +67,10 @@ async fn main() -> anyhow::Result<()> {
             &[0, 100, 300, 600, 1000, 2000, 3000, 4000, 5000][..]
         }
 
-        (Network::Wan, App::Ycsb, Setting::Full) => &[
-            0, 3000, 6000, 10_000, 13_000, 16_000, 20_000, 30_000, 40_000,
-        ],
-        (Network::Wan, App::Ycsb, Setting::Sharded) => &[0, 10_000, 20_000, 30_000, 40_000],
+        (Network::Wan, App::Ycsb, Setting::Full) => &[0, 10_000, 30_000, 60_000, 100_000, 150_000],
+        (Network::Wan, App::Ycsb, Setting::Sharded) => {
+            &[0, 10_000, 30_000, 60_000, 100_000, 200_000, 300_000, 400_000]
+        }
         (Network::Wan, App::Ycsb, Setting::Big) => {
             &[0, 1_000, 5_000, 10_000, 30_000, 60_000, 100_000, 130_000]
         }
