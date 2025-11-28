@@ -30,7 +30,9 @@ impl PrefillTask {
 
         // let mut join_set = JoinSet::new();
         let mut db = db;
-        db.create_cf("merkle", &Default::default())?;
+        if matches!(schema.storage, schema::Storage::Big) {
+            db.create_cf("merkle", &Default::default())?;
+        }
         let db = Arc::new(db);
         match schema.app {
             schema::App::Ycsb(num_keys) => {

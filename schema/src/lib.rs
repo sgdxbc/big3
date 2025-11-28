@@ -70,6 +70,7 @@ pub struct ReplicaConfig {
     pub num_faulty_nodes: NodeIndex,
 
     pub cache_size: usize,
+    pub max_concurrent_executing: usize,
 }
 
 #[derive(Clone, Serialize, Deserialize)]

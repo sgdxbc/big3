@@ -201,7 +201,7 @@ impl StorageTask {
         let mut cache = LruCache::new(config.cache_size.try_into().unwrap());
         if let schema::App::Ycsb(num_keys) = app {
             let zipfian = crate::workload::zipfian::ScrambledZipfian::new_range(0, *num_keys - 1);
-            for i in (0..cache.cap().get()).rev() {
+            for i in (0..config.cache_size).rev() {
                 let key = crate::execute::ycsb::key(zipfian.scramble(i as _));
                 cache.put(key.into_bytes(), Some(vec![0u8; 1000]));
             }

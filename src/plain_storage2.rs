@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use hashbrown::HashMap;
-use rocksdb::{DB, WriteBatch};
+use rocksdb::{Cache, DB, Options, WriteBatch};
 use tempfile::{TempDir, tempdir};
 use tokio::{
     process::Command,
@@ -44,6 +44,7 @@ impl PlainStorageTask {
         channels: StorageChannels,
         fetched_handle: FetchedHandle,
         post_done_handle: PostDoneHandle,
+        cache_size: usize,
     ) -> anyhow::Result<Self> {
         let temp_dir = tempdir()?;
         let status = Command::new("cp")
@@ -53,7 +54,10 @@ impl PlainStorageTask {
             .status()
             .await?;
         anyhow::ensure!(status.success(), "failed to copy prefill data");
-        let db = DB::open_default(temp_dir.path())?;
+        // let db = DB::open_default(temp_dir.path())?;
+        let mut opts = Options::default();
+        opts.set_blob_cache(&Cache::new_lru_cache(cache_size * 1000));
+        let db = DB::open(&opts, temp_dir.path())?;
         Ok(Self::new(
             channels,
             fetched_handle,
