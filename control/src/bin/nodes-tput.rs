@@ -67,8 +67,40 @@ async fn main() -> anyhow::Result<()> {
             }
         }
 
-        (App::Utxo, Storage::Full) => {}
-        (App::Utxo, Storage::Big) => {}
+        (App::Utxo, Storage::Full) => {
+            for f in [1, 3, 8, 13, 18, 23, 28, 33] {
+                run.perform(
+                    Sharding {
+                        num_shards: 1,
+                        num_shard_faulty_nodes: f,
+                    },
+                    6_000,
+                )
+                .await?;
+            }
+
+            let s = |i| Sharding {
+                num_shards: i,
+                num_shard_faulty_nodes: 3,
+            };
+            run.perform(s(2), 6000).await?;
+            run.perform(s(4), 8000).await?;
+            run.perform(s(6), 10000).await?;
+            run.perform(s(8), 12000).await?;
+            run.perform(s(10), 12000).await?;
+        }
+        (App::Utxo, Storage::Big) => {
+            for f in [1, 3, 8, 13, 18, 23, 28, 33] {
+                run.perform(
+                    Sharding {
+                        num_shards: 1,
+                        num_shard_faulty_nodes: f,
+                    },
+                    8_000,
+                )
+                .await?;
+            }
+        }
     }
 
     create_dir_all("data").await?;
