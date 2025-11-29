@@ -5,19 +5,20 @@ use std::{
 
 use big_schema::NodeIndex;
 use hashbrown::{HashMap, HashSet};
-use log::{debug, info};
-use rocksdb::{DB, WriteOptions};
+use log::info;
+use ring::digest;
+use rocksdb::{DB, WriteBatch};
 use tokio::{
     sync::mpsc::{Sender, UnboundedReceiver, UnboundedSender, channel},
-    task::{spawn_blocking, yield_now},
-    time::sleep,
+    task::spawn_blocking,
 };
 use tokio_util::sync::CancellationToken;
 
 use crate::{
+    merkle::{MerkleHash, MerkleTree},
     metrics::Latency,
     network::interconnect::{NetworkInterconnectHandle, ReceiveHandle},
-    storage::BigStorageConfig,
+    storage3::BigStorageConfig,
 };
 
 pub use message::Message;
@@ -25,6 +26,9 @@ pub use message::Message;
 pub struct ArchiveChannels {
     tx_message: UnboundedSender<Message>,
     rx_message: UnboundedReceiver<Message>,
+
+    pub tx_checkpoint: UnboundedSender<(u64, HashMap<Vec<u8>, Option<Vec<u8>>>)>,
+    rx_checkpoint: UnboundedReceiver<(u64, HashMap<Vec<u8>, Option<Vec<u8>>>)>,
 }
 
 impl Default for ArchiveChannels {
@@ -36,9 +40,12 @@ impl Default for ArchiveChannels {
 impl ArchiveChannels {
     pub fn new() -> Self {
         let (tx_message, rx_message) = tokio::sync::mpsc::unbounded_channel();
+        let (tx_checkpoint, rx_checkpoint) = tokio::sync::mpsc::unbounded_channel();
         Self {
             tx_message,
             rx_message,
+            tx_checkpoint,
+            rx_checkpoint,
         }
     }
 
@@ -48,6 +55,7 @@ impl ArchiveChannels {
 }
 
 pub struct ArchiveConfig {
+    #[allow(dead_code)]
     stripe_interval: Duration,
 }
 
@@ -63,6 +71,7 @@ pub struct ArchiveTask {
     channels: ArchiveChannels,
     network_interconnect: NetworkInterconnectHandle,
 
+    #[allow(dead_code)]
     config: ArchiveConfig,
     storage_config: BigStorageConfig,
     storing_shards: HashSet<u32>,
@@ -71,9 +80,9 @@ pub struct ArchiveTask {
     node_index: NodeIndex,
 
     current_round: u64,
-    node_rounds: HashMap<NodeIndex, u64>,
-    // round -> stripe -> shard -> data
-    reorder_push_shards: HashMap<u64, HashMap<u32, HashMap<u32, Vec<(Vec<u8>, Vec<u8>)>>>>,
+    merkle_roots: Vec<MerkleHash>,
+    // shard -> data
+    reorder_push_shards: HashMap<u32, Vec<(Vec<u8>, Vec<u8>)>>,
 
     metrics: ArchiveMetrics,
 }
@@ -91,6 +100,7 @@ impl ArchiveTask {
         storage_config: BigStorageConfig,
         db: Arc<DB>,
         node_index: NodeIndex,
+        merkle_roots: Vec<MerkleHash>,
     ) -> Self {
         let storing_shards = storage_config.storing_shards(node_index);
         let pushing_shards = storage_config.pushing_shards(node_index);
@@ -103,8 +113,8 @@ impl ArchiveTask {
             pushing_shards,
             db,
             node_index,
+            merkle_roots,
             current_round: 0,
-            node_rounds: Default::default(),
             reorder_push_shards: Default::default(),
             metrics: ArchiveMetrics {
                 round_start: Instant::now(),
@@ -124,56 +134,24 @@ impl ArchiveTask {
     }
 
     async fn run_inner(&mut self, tx_stopped: Sender<()>) -> anyhow::Result<()> {
+        let merkle_cf = self.db.cf_handle("merkle").unwrap();
         loop {
-            info!("Voting to start archive for round {}", self.current_round);
-            let vote = message::Vote {
-                round: self.current_round,
-                node_index: self.node_index,
+            let Some((round, update_table)) = self.channels.rx_checkpoint.recv().await else {
+                return Ok(());
             };
-            // TODO send vote through consensus
-            self.network_interconnect.send_to_all(Message::Vote(vote));
-            self.node_rounds.insert(self.node_index, self.current_round);
-            let mut round = self.current_round;
-            while self.node_rounds.values().filter(|&&r| r == round).count()
-                < (self.storage_config.num_nodes - self.storage_config.num_faulty_nodes) as usize
-            {
-                let Some(message) = self.channels.rx_message.recv().await else {
-                    return Ok(());
-                };
-                match message {
-                    Message::Vote(vote) => {
-                        round = vote.round;
-                        let node_round = self.node_rounds.entry(vote.node_index).or_insert(round);
-                        if *node_round < round {
-                            *node_round = round;
-                        }
-                    }
-                    Message::PushShard(push_shard) => {
-                        if push_shard.round >= self.current_round {
-                            self.reorder_push_shards
-                                .entry(push_shard.round)
-                                .or_default()
-                                .entry(self.storage_config.stripe_of_shard(push_shard.shard))
-                                .or_default()
-                                .insert(push_shard.shard, push_shard.data);
-                        }
-                    }
-                }
-            }
-            assert_eq!(round, self.current_round); // otherwise unimplemented yet
             self.current_round = round;
             info!("Starting archive for round {}", self.current_round);
             self.metrics.round_start = Instant::now();
-
             let mut iter = self.db.raw_iterator();
-            for stripe in 0..self.storage_config.num_stripes {
-                sleep(self.config.stripe_interval).await;
-                let mut stripe_shards = HashMap::new();
-                for &shard in &self.storing_shards {
-                    if self.storage_config.stripe_of_shard(shard) != stripe {
-                        continue;
-                    }
 
+            let mut shard_updates = vec![HashMap::new(); self.storage_config.num_shards() as usize];
+            for (key, value) in update_table {
+                let shard = self.storage_config.shard_of_key(&key);
+                shard_updates[shard as usize].insert(key, value);
+            }
+
+            for shard in 0..self.storage_config.num_shards() {
+                let data = if self.storing_shards.contains(&shard) {
                     let prefix = shard.to_be_bytes();
                     iter.seek(prefix);
                     iter.status()?;
@@ -182,177 +160,97 @@ impl ArchiveTask {
                         let Some(key) = key.strip_prefix(&prefix[..]) else {
                             break;
                         };
-                        data.push((key.to_vec(), value.to_vec()));
+                        let mut value = value.to_vec();
+                        let index = u32::from_le_bytes(
+                            value.split_off(value.len() - 4).try_into().unwrap(),
+                        );
+                        data.push((key.to_vec(), (value, index)));
                         iter.next();
                         iter.status()?;
                     }
+                    data.sort_unstable_by_key(|(_, (_, index))| *index);
+                    let data = data
+                        .into_iter()
+                        .map(|(k, (v, _))| (k, v))
+                        .collect::<Vec<_>>();
 
-                    stripe_shards.insert(shard, data.clone());
-                    debug!(
-                        "Archiver round {}, stripe {} collected {:?}",
-                        self.current_round,
-                        stripe,
-                        stripe_shards.keys().collect::<Vec<_>>()
-                    );
                     if self.pushing_shards.contains(&shard) {
                         let push_shard = message::PushShard {
                             round: self.current_round,
                             shard,
-                            data,
+                            data: data.clone(),
                         };
                         self.network_interconnect
                             .send_to_all(Message::PushShard(push_shard));
                     }
-                    yield_now().await;
-                }
-                info!(
-                    "Archiver round {}, stripe {} collected {} shards",
-                    self.current_round,
-                    stripe,
-                    stripe_shards.len()
-                );
 
-                if let Some(reorder_stripe) = self
-                    .reorder_push_shards
-                    .get_mut(&self.current_round)
-                    .and_then(|stripes| stripes.remove(&stripe))
-                {
-                    stripe_shards.extend(reorder_stripe);
-                    debug!(
-                        "Archiver round {}, stripe {} reordered shards {:?}",
-                        self.current_round,
-                        stripe,
-                        stripe_shards.keys().collect::<Vec<_>>()
-                    );
-                }
-
-                assert!(
-                    stripe_shards.len() <= self.storage_config.num_shards_per_stripe() as usize
-                );
-                while stripe_shards.len() < self.storage_config.num_shards_per_stripe() as usize {
-                    let Some(message) = self.channels.rx_message.recv().await else {
-                        return Ok(());
-                    };
-                    match message {
-                        Message::PushShard(push_shard) => {
-                            assert!(push_shard.round >= self.current_round);
-                            let stripe_of_shard =
-                                self.storage_config.stripe_of_shard(push_shard.shard);
-                            if push_shard.round > self.current_round || stripe_of_shard > stripe {
-                                self.reorder_push_shards
-                                    .entry(push_shard.round)
-                                    .or_default()
-                                    .entry(stripe_of_shard)
-                                    .or_default()
-                                    .insert(push_shard.shard, push_shard.data);
-                                continue;
-                            }
-                            if stripe_of_shard == stripe {
-                                stripe_shards.insert(push_shard.shard, push_shard.data);
-                                debug!(
-                                    "Archiver round {}, stripe {} late reordered shard {:?}",
-                                    self.current_round,
-                                    stripe,
-                                    stripe_shards.keys().collect::<Vec<_>>()
-                                );
-                            }
-                        }
-                        Message::Vote(vote) => {
-                            let round = vote.round;
-                            let node_round =
-                                self.node_rounds.entry(vote.node_index).or_insert(round);
-                            if *node_round < round {
-                                *node_round = round;
+                    data
+                } else if let Some(reorder_shard) = self.reorder_push_shards.remove(&shard) {
+                    reorder_shard
+                } else {
+                    loop {
+                        let Some(message) = self.channels.rx_message.recv().await else {
+                            return Ok(());
+                        };
+                        match message {
+                            Message::PushShard(push_shard) => {
+                                if push_shard.round != self.current_round
+                                    || push_shard.shard < shard
+                                {
+                                    continue;
+                                }
+                                let mut leaves = Vec::new();
+                                for (key, value) in &push_shard.data {
+                                    let mut context = digest::Context::new(&digest::SHA256);
+                                    context.update(&key);
+                                    context.update(&value);
+                                    context.update(&(self.current_round - 1).to_le_bytes());
+                                    let hash = context.finish();
+                                    leaves.push(hash.as_ref().try_into().unwrap());
+                                }
+                                if MerkleTree::new(leaves).root()
+                                    != self.merkle_roots[shard as usize]
+                                {
+                                    anyhow::bail!(
+                                        "Received shard {} with invalid merkle root",
+                                        shard
+                                    );
+                                }
+                                if push_shard.shard > shard {
+                                    self.reorder_push_shards
+                                        .insert(push_shard.shard, push_shard.data);
+                                    continue;
+                                }
+                                break push_shard.data;
                             }
                         }
                     }
+                };
+
+                let mut data = HashMap::<_, _>::from_iter(data);
+                for (key, value) in shard_updates[shard as usize].drain() {
+                    if let Some(value) = value {
+                        data.insert(key, value);
+                    } else {
+                        data.remove(&key);
+                    }
                 }
-                info!(
-                    "Archiver round {}, stripe {} finalized {} shards",
-                    self.current_round,
-                    stripe,
-                    stripe_shards.len()
-                );
+                let mut data = Vec::from_iter(data);
+                data.sort_unstable_by(|(k1, _), (k2, _)| k1.cmp(k2));
 
-                // let mut shard = 0;
-                // for stripe in 0..self.storage_config.num_stripes {
-                //     sleep(self.config.stripe_interval).await;
-                //     let mut stripe_shards = HashMap::default();
-                //     for _ in 0..self.storage_config.num_shards_per_stripe() {
-                //         if self.storing_shards.contains(&shard) {
-                //             let prefix = shard.to_be_bytes();
-                //             iter.seek(prefix);
-                //             iter.status()?;
-                //             let mut data = Vec::new();
-                //             while let Some((key, value)) = iter.item() {
-                //                 let Some(key) = key.strip_prefix(&prefix[..]) else {
-                //                     break;
-                //                 };
-                //                 data.push((key.to_vec(), value.to_vec()));
-                //                 iter.next();
-                //                 iter.status()?;
-                //             }
+                let mut leaves = Vec::new();
+                for (key, value) in &data {
+                    let mut context = digest::Context::new(&digest::SHA256);
+                    context.update(&key);
+                    context.update(&value);
+                    context.update(&self.current_round.to_le_bytes());
+                    let hash = context.finish();
+                    leaves.push(hash.as_ref().try_into().unwrap());
+                }
+                let tree = MerkleTree::new(leaves);
+                self.merkle_roots[shard as usize] = tree.root();
 
-                //             stripe_shards.insert(shard, data.clone());
-                //             if self.pushing_shards.contains(&shard) {
-                //                 let push_shard = message::PushShard {
-                //                     round: self.current_round,
-                //                     shard,
-                //                     data,
-                //                 };
-                //                 self.network_interconnect
-                //                     .send_to_all(Message::PushShard(push_shard));
-                //             }
-                //             yield_now().await;
-                //         } else if let Some(reorder_shard) = self
-                //             .reorder_push_shards
-                //             .get_mut(&self.current_round)
-                //             .and_then(|shards| shards.remove(&shard))
-                //         {
-                //             stripe_shards.insert(shard, reorder_shard);
-                //         } else {
-                //             loop {
-                //                 let Some(message) = self.channels.rx_message.recv().await else {
-                //                     return Ok(());
-                //                 };
-                //                 match message {
-                //                     Message::PushShard(push_shard) => {
-                //                         assert!(push_shard.round >= self.current_round);
-                //                         if push_shard.round > self.current_round
-                //                             || push_shard.shard > shard
-                //                         {
-                //                             self.reorder_push_shards
-                //                                 .entry(push_shard.round)
-                //                                 .or_default()
-                //                                 .insert(push_shard.shard, push_shard.data);
-                //                             continue;
-                //                         }
-                //                         if push_shard.shard == shard {
-                //                             stripe_shards.insert(push_shard.shard, push_shard.data);
-                //                             break;
-                //                         }
-                //                     }
-                //                     Message::Vote(vote) => {
-                //                         let round = vote.round;
-                //                         let node_round = self
-                //                             .node_rounds
-                //                             .entry(vote.node_index)
-                //                             .or_insert(round);
-                //                         if *node_round < round {
-                //                             *node_round = round;
-                //                         }
-                //                     }
-                //                 }
-                //             }
-                //         }
-                //         info!(
-                //             "Archive round {}, stripe {} shard {}",
-                //             self.current_round, stripe, shard
-                //         );
-
-                //         shard += 1;
-                //     }
-                // }
+                let mut stripe_data = bincode::encode_to_vec(&data, bincode::config::standard())?;
 
                 let current_round = self.current_round;
                 let k = (self.storage_config.num_faulty_nodes + 1) as usize;
@@ -362,18 +260,11 @@ impl ArchiveTask {
                 let tx_stopped = tx_stopped.clone();
                 spawn_blocking(move || {
                     let _tx_stopped = tx_stopped;
-                    let mut stripe_data = stripe_shards
-                        .into_iter()
-                        .flat_map(|(_, data)| data)
-                        .collect::<Vec<_>>();
-                    stripe_data.sort_unstable_by(|(k1, _), (k2, _)| k1.cmp(k2));
-                    let mut stripe_data =
-                        bincode::encode_to_vec(stripe_data, bincode::config::standard())?;
                     let stripe_data_len = stripe_data.len().next_multiple_of(k * 2);
                     info!(
-                        "Archiving round {}, stripe {}, data length {} -> {}",
+                        "Archiving round {}, shard {}, data length {} -> {}",
                         current_round,
-                        stripe,
+                        shard,
                         stripe_data.len(),
                         stripe_data_len
                     );
@@ -385,9 +276,9 @@ impl ArchiveTask {
                         stripe_data.chunks_exact(stripe_data_len / k),
                     )?;
                     info!(
-                        "Archived round {}, stripe {}, encoded to {} chunks",
+                        "Archived round {}, shard {}, encoded to {} chunks",
                         current_round,
-                        stripe,
+                        shard,
                         encoded_chunks.len()
                     );
 
@@ -400,38 +291,45 @@ impl ArchiveTask {
                     } else {
                         &encoded_chunks[node_index as usize - k]
                     };
-                    let mut write_opts = WriteOptions::default();
-                    write_opts.set_low_pri(true);
                     let Some(cf) = db.cf_handle("archive") else {
                         anyhow::bail!("archive column family not found");
                     };
-
-                    db.put_cf_opt(cf, format!("{stripe}.{}", node_index), value, &write_opts)?;
+                    db.put_cf(cf, format!("{shard}.{}", node_index), value)?;
                     info!(
-                        "Archived round {}, stripe {}, data size {}",
+                        "Archived round {}, shard {}, data size {}",
                         current_round,
-                        stripe,
+                        shard,
                         value.len()
                     );
                     anyhow::Ok(())
                 })
                 .await??;
+
+                if self.storing_shards.contains(&shard) {
+                    let mut write_batch = WriteBatch::new();
+                    for (i, (key, mut value)) in data.into_iter().enumerate() {
+                        value.extend_from_slice(&(i as u32).to_le_bytes());
+                        write_batch.put(&key, &value);
+                    }
+                    self.db.write(write_batch)?;
+                    let tree_bytes = bincode::encode_to_vec(&tree, bincode::config::standard())?;
+                    self.db
+                        .put_cf(merkle_cf, shard.to_be_bytes(), &tree_bytes[..])?;
+                }
             }
 
             self.metrics.round += self.metrics.round_start.elapsed();
-            self.current_round += 1;
         }
     }
 }
 
 mod message {
-    use big_schema::NodeIndex;
     use bincode::{Decode, Encode};
 
     #[derive(Decode, Encode)]
     pub enum Message {
         PushShard(PushShard),
-        Vote(Vote),
+        // Vote(Vote),
     }
 
     #[derive(Decode, Encode)]
@@ -441,9 +339,9 @@ mod message {
         pub data: Vec<(Vec<u8>, Vec<u8>)>,
     }
 
-    #[derive(Decode, Encode)]
-    pub struct Vote {
-        pub round: u64,
-        pub node_index: NodeIndex,
-    }
+    // #[derive(Decode, Encode)]
+    // pub struct Vote {
+    //     pub round: u64,
+    //     pub node_index: NodeIndex,
+    // }
 }
