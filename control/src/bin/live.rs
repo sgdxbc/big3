@@ -81,6 +81,7 @@ async fn run_workload(
             storage: STORAGE,
             app: APP.to_schema_app(),
             stripe_interval: STRIPE_INTERVAL,
+            checkpoint: false,
         };
         (instance, Task::Replica(schema))
     });

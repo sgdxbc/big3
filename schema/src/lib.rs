@@ -30,6 +30,7 @@ pub struct ReplicaTask {
     pub storage: Storage,
     pub cache_size: usize,
     pub stripe_interval: Duration,
+    pub checkpoint: bool,
 
     pub app: App,
 }

@@ -16,6 +16,7 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 use crate::{
+    archive::{ArchiveChannels, ArchiveTask},
     common::{NodeIndex, PREFILL_PATH},
     execute2::{FetchHandle, PostHandle},
     merkle::{MerkleHash, MerkleProof, MerkleTree},
@@ -136,12 +137,14 @@ pub struct StorageTask {
     fetched_handle: FetchedHandle,
     post_done_handle: PostDoneHandle,
     network_interconnect: NetworkInterconnectHandle,
+    tx_checkpoint: UnboundedSender<(u64, HashMap<Vec<u8>, Option<Vec<u8>>>)>,
 
     config: BigStorageConfig,
     #[allow(dead_code)]
     node_index: NodeIndex,
     storing_shards: HashSet<u32>,
     pushing_shards: HashSet<u32>,
+    checkpoint: bool,
 
     temp_dir: tempfile::TempDir,
     db: Arc<DB>,
@@ -151,6 +154,8 @@ pub struct StorageTask {
 
     tx_fetch_dispatch: flume::Sender<(Vec<u8>, flume::Sender<(Vec<u8>, Option<(Vec<u8>, u32)>)>)>,
     rx_fetch_dispatch: flume::Receiver<(Vec<u8>, flume::Sender<(Vec<u8>, Option<(Vec<u8>, u32)>)>)>,
+
+    archive: ArchiveTask,
 }
 
 impl StorageTask {
@@ -158,13 +163,12 @@ impl StorageTask {
 
     pub async fn load(
         channels: StorageChannels,
+        archive_channels: ArchiveChannels,
         fetched_handle: FetchedHandle,
         post_done_handle: PostDoneHandle,
         network_interconnect: NetworkInterconnectHandle,
-        config: BigStorageConfig,
-        node_index: NodeIndex,
-        cache_size: usize,
-        app: &schema::App,
+        network_interconnect_archive: NetworkInterconnectHandle,
+        schema: &schema::ReplicaTask,
     ) -> anyhow::Result<Self> {
         let temp_dir = tempdir()?;
         let status = Command::new("cp")
@@ -178,6 +182,11 @@ impl StorageTask {
 
         let (tx_fetch_dispatch, rx_fetch_dispatch) = flume::unbounded();
 
+        let config = BigStorageConfig::from(&schema.config);
+        let node_index = schema.config.node_index;
+        let cache_size = schema.cache_size;
+        let app = &schema.app;
+        let checkpoint = schema.checkpoint;
         let storing_shards = config.storing_shards(node_index);
         let pushing_shards = config.pushing_shards(node_index);
 
@@ -194,7 +203,11 @@ impl StorageTask {
             merkle_trees.insert(shard, tree);
         }
         let roots_bytes = db.get_cf(cf, b"roots")?.expect("Merkle roots not found");
-        let merkle_roots = bincode::decode_from_slice(&roots_bytes, bincode::config::standard())?.0;
+        let merkle_roots = bincode::decode_from_slice::<Vec<MerkleHash>, _>(
+            &roots_bytes,
+            bincode::config::standard(),
+        )?
+        .0;
 
         let mut cache = LruCache::new(cache_size.try_into().unwrap());
         if let schema::App::Ycsb(num_keys) = app {
@@ -206,22 +219,36 @@ impl StorageTask {
             info!("storage cache preloaded size {}", cache.len());
         }
 
+        let db = Arc::new(db);
+        let archive = ArchiveTask::new(
+            archive_channels,
+            network_interconnect_archive,
+            schema.into(),
+            config.clone(),
+            db.clone(),
+            schema.config.node_index,
+            merkle_roots.clone(),
+        );
+
         Ok(Self {
             channels,
             fetched_handle,
             post_done_handle,
             network_interconnect,
+            tx_checkpoint: archive.channels.tx_checkpoint.clone(),
             config,
+            checkpoint,
             node_index,
             storing_shards,
             pushing_shards,
             merkle_trees,
             merkle_roots,
             temp_dir,
-            db: Arc::new(db),
+            db,
             tx_fetch_dispatch,
             rx_fetch_dispatch,
             cache,
+            archive,
         })
     }
 
@@ -248,13 +275,20 @@ impl StorageTask {
 
     pub async fn run(self, cancel: CancellationToken) -> anyhow::Result<()> {
         let mut workers = JoinSet::new();
+
+        {
+            let cancel = cancel.clone();
+            workers.spawn(async move { self.archive.run(cancel).await });
+        }
+        if self.checkpoint {
+            let _ = self.tx_checkpoint.send((0, HashMap::new()));
+        }
+
         for _ in 0..Self::NUM_GET_WORKER_THREADS {
             let db = self.db.clone();
             let config = self.config.clone();
             let rx_fetch_dispatch = self.rx_fetch_dispatch.clone();
-            workers.spawn_blocking(move || {
-                Self::get_worker(db, config, rx_fetch_dispatch).unwrap();
-            });
+            workers.spawn_blocking(move || Self::get_worker(db, config, rx_fetch_dispatch));
         }
 
         let mut retrieve = RetrieveWorker {
@@ -283,10 +317,12 @@ impl StorageTask {
         workers.spawn(async move {
             cancel.run_until_cancelled(retrieve.run_inner()).await;
             retrieve.log_metrics();
+            Ok(())
         });
         drop(self.channels.tx_post);
+
         while let Some(res) = workers.join_next().await {
-            res?;
+            res??;
         }
         let db = Arc::into_inner(self.db);
         assert!(db.is_some());

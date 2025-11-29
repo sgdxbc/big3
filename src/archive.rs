@@ -68,7 +68,7 @@ impl From<&crate::schema::ReplicaTask> for ArchiveConfig {
 }
 
 pub struct ArchiveTask {
-    channels: ArchiveChannels,
+    pub channels: ArchiveChannels,
     network_interconnect: NetworkInterconnectHandle,
 
     #[allow(dead_code)]
@@ -126,19 +126,24 @@ impl ArchiveTask {
     pub async fn run(mut self, cancel: CancellationToken) -> anyhow::Result<()> {
         let (tx, mut rx) = channel(1);
         cancel
-            .run_until_cancelled(self.run_inner(tx))
+            .run_until_cancelled(self.run_inner(tx, cancel.clone()))
             .await
             .unwrap_or(Ok(()))?;
         let _ = rx.recv().await;
         Ok(())
     }
 
-    async fn run_inner(&mut self, tx_stopped: Sender<()>) -> anyhow::Result<()> {
+    async fn run_inner(
+        &mut self,
+        tx_stopped: Sender<()>,
+        cancel: CancellationToken,
+    ) -> anyhow::Result<()> {
         let merkle_cf = self.db.cf_handle("merkle").unwrap();
         loop {
             let Some((round, update_table)) = self.channels.rx_checkpoint.recv().await else {
                 return Ok(());
             };
+            assert!(round > self.current_round);
             self.current_round = round;
             info!("Starting archive for round {}", self.current_round);
             self.metrics.round_start = Instant::now();
@@ -316,6 +321,8 @@ impl ArchiveTask {
                     self.db
                         .put_cf(merkle_cf, shard.to_be_bytes(), &tree_bytes[..])?;
                 }
+
+                cancel.cancel();
             }
 
             self.metrics.round += self.metrics.round_start.elapsed();
