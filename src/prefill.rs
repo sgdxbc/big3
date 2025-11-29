@@ -144,13 +144,13 @@ async fn run_prefill_storage(
                 let i = shard_hashes[shard as usize].len() as u32;
                 shard_hashes[shard as usize].push(leaf.as_ref().try_into().unwrap());
 
-                // if storing_shards.contains(&shard) {
-                value.extend_from_slice(&i.to_le_bytes());
-                let key = [&shard.to_be_bytes()[..], &key[..]].concat();
-                (key, value)
-                // } else {
-                //     Default::default()
-                // }
+                if schema.full || storing_shards.contains(&shard) {
+                    value.extend_from_slice(&i.to_le_bytes());
+                    let key = [&shard.to_be_bytes()[..], &key[..]].concat();
+                    (key, value)
+                } else {
+                    Default::default()
+                }
             };
             run_prefill(db.clone(), num_keys, wrapped_key_value).await?;
             let cf = db.cf_handle("merkle").unwrap();

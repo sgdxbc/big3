@@ -48,6 +48,7 @@ pub struct PrefillTask {
     pub storage: Storage,
     pub app: App,
     pub config: ReplicaConfig,
+    pub full: bool,
 }
 
 // response of `/scrape`

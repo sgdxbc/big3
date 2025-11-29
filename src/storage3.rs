@@ -178,7 +178,8 @@ impl StorageTask {
             .status()
             .await?;
         anyhow::ensure!(status.success(), "failed to copy prefill data");
-        let db = DB::open_cf(&Default::default(), temp_dir.path(), ["merkle"])?;
+        let mut db = DB::open_cf(&Default::default(), temp_dir.path(), ["merkle"])?;
+        db.create_cf("archive", &Default::default())?;
 
         let (tx_fetch_dispatch, rx_fetch_dispatch) = flume::unbounded();
 
@@ -281,7 +282,7 @@ impl StorageTask {
             workers.spawn(async move { self.archive.run(cancel).await });
         }
         if self.checkpoint {
-            let _ = self.tx_checkpoint.send((0, HashMap::new()));
+            let _ = self.tx_checkpoint.send((1, HashMap::new()));
         }
 
         for _ in 0..Self::NUM_GET_WORKER_THREADS {
