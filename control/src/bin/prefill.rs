@@ -31,12 +31,10 @@ async fn run_workload(server_instances: Vec<Instance>) -> anyhow::Result<()> {
     println!("load servers");
     let replica_items = server_instances.iter().enumerate().map(|(i, instance)| {
         let schema = PrefillTask {
-            node_index: i as _,
             config: ReplicaConfig {
+                node_index: i as _,
                 num_nodes: SHARDING.num_nodes(),
                 num_faulty_nodes: SHARDING.num_faulty_nodes(),
-                cache_size: 0,               // unused
-                max_concurrent_executing: 0, // unused
             },
             storage: STORAGE,
             app: APP.to_schema_app(),

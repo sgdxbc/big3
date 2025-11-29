@@ -92,7 +92,7 @@ impl ConsensusTask {
             RequestContext::new(execute.tx_blocks, channels.tx_output_response.clone()),
             network_connect,
         );
-        let state = Bullshark::new(context, (&schema.config).into(), schema.node_index);
+        let state = Bullshark::new(context, schema.into(), schema.config.node_index);
         Ok(Self::new(channels, state))
     }
 

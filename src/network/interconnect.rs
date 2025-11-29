@@ -78,7 +78,7 @@ impl<const BATCH: bool, const THROTTLE: bool> NetworkInterconnectTask<BATCH, THR
     ) -> anyhow::Result<Self> {
         let mut endpoint = Endpoint::server(
             server_config(),
-            (schema.ips[schema.node_index as usize], port).into(),
+            (schema.ips[schema.config.node_index as usize], port).into(),
         )?;
         let mut transport_config = TransportConfig::default();
         transport_config.keep_alive_interval(Duration::from_secs(10).into());
@@ -88,13 +88,16 @@ impl<const BATCH: bool, const THROTTLE: bool> NetworkInterconnectTask<BATCH, THR
 
         let connect = async {
             let mut txs = HashMap::new();
-            for (i, &ip) in schema.ips[..schema.node_index as usize].iter().enumerate() {
+            for (i, &ip) in schema.ips[..schema.config.node_index as usize]
+                .iter()
+                .enumerate()
+            {
                 let conn = endpoint
                     .connect((ip, port).into(), "server.example")?
                     .await?;
                 conn.open_uni()
                     .await?
-                    .write_all(&schema.node_index.to_le_bytes())
+                    .write_all(&schema.config.node_index.to_le_bytes())
                     .await?;
                 txs.insert(i as NodeIndex, conn);
             }
@@ -102,7 +105,7 @@ impl<const BATCH: bool, const THROTTLE: bool> NetworkInterconnectTask<BATCH, THR
         };
         let accept = async {
             let mut txs = HashMap::new();
-            while txs.len() < (schema.ips.len() - schema.node_index as usize - 1) {
+            while txs.len() < (schema.ips.len() - schema.config.node_index as usize - 1) {
                 let conn = endpoint.accept().await.unwrap().await?;
                 let mut client_id = [0; size_of::<NodeIndex>()];
                 conn.accept_uni().await?.read_exact(&mut client_id).await?;
@@ -119,7 +122,8 @@ impl<const BATCH: bool, const THROTTLE: bool> NetworkInterconnectTask<BATCH, THR
             join_set.spawn(Self::run_connection_incoming(conn.clone(), receive.clone()));
             let (tx_outgoing, rx_outgoing) = unbounded_channel();
             if let Some(latencies) = &schema.latencies {
-                let latency = latencies[schema.node_index as usize][node_index as usize].max(1);
+                let latency =
+                    latencies[schema.config.node_index as usize][node_index as usize].max(1);
                 assert!(latency < 500);
                 join_set.spawn(Self::run_connection_outgoing_with_latency(
                     conn,

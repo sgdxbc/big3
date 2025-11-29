@@ -53,7 +53,7 @@ impl FullReplicaNodeTask {
             storage_channels,
             execute_channels.fetched_handle(),
             execute_channels.post_done_handle(),
-            schema.config.cache_size,
+            schema.cache_size,
             &schema.app,
         )
         .await?;

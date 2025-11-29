@@ -18,16 +18,20 @@ pub struct ReplicaTask {
     pub latencies: Option<Vec<Vec<u32>>>,
 
     pub config: ReplicaConfig,
-    pub node_index: NodeIndex,
 
     pub num_shards: ShardIndex,
-    pub shard_index: ShardIndex,
     pub num_shard_faulty_nodes: NodeIndex,
+
+    pub shard_index: ShardIndex,
     pub shard_node_index: NodeIndex,
 
+    pub max_concurrent_executing: usize,
+
     pub storage: Storage,
-    pub app: App,
+    pub cache_size: usize,
     pub stripe_interval: Duration,
+
+    pub app: App,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -43,7 +47,6 @@ pub struct PrefillTask {
     pub storage: Storage,
     pub app: App,
     pub config: ReplicaConfig,
-    pub node_index: NodeIndex,
 }
 
 // response of `/scrape`
@@ -68,9 +71,7 @@ pub type NodeIndex = u16;
 pub struct ReplicaConfig {
     pub num_nodes: NodeIndex,
     pub num_faulty_nodes: NodeIndex,
-
-    pub cache_size: usize,
-    pub max_concurrent_executing: usize,
+    pub node_index: NodeIndex,
 }
 
 #[derive(Clone, Serialize, Deserialize)]

@@ -62,7 +62,7 @@ impl BigReplicaNodeTask {
             storage_channels.post_handle(),
             network_outgoing.channels.handle(),
             schema.shard_index,
-            schema.node_index,
+            schema.config.node_index,
             schema.config.num_faulty_nodes,
             execute,
         );
@@ -72,7 +72,8 @@ impl BigReplicaNodeTask {
             execute.channels.post_done_handle(),
             network_interconnect_big.handle(),
             (&schema.config).into(),
-            schema.node_index,
+            schema.config.node_index,
+            schema.cache_size,
             &schema.app,
         )
         .await?;

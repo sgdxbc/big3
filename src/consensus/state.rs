@@ -54,12 +54,12 @@ pub struct BullsharkConfig {
     max_concurrent_executing: usize,
 }
 
-impl From<&crate::schema::ReplicaConfig> for BullsharkConfig {
-    fn from(config: &crate::schema::ReplicaConfig) -> Self {
+impl From<&crate::schema::ReplicaTask> for BullsharkConfig {
+    fn from(schema: &crate::schema::ReplicaTask) -> Self {
         Self {
-            num_node: config.num_nodes,
-            num_faulty_node: config.num_faulty_nodes,
-            max_concurrent_executing: config.max_concurrent_executing,
+            num_node: schema.config.num_nodes,
+            num_faulty_node: schema.config.num_faulty_nodes,
+            max_concurrent_executing: schema.max_concurrent_executing,
         }
     }
 }

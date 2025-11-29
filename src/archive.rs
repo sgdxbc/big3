@@ -202,8 +202,8 @@ impl ArchiveTask {
                                 let mut leaves = Vec::new();
                                 for (key, value) in &push_shard.data {
                                     let mut context = digest::Context::new(&digest::SHA256);
-                                    context.update(&key);
-                                    context.update(&value);
+                                    context.update(key);
+                                    context.update(value);
                                     context.update(&(self.current_round - 1).to_le_bytes());
                                     let hash = context.finish();
                                     leaves.push(hash.as_ref().try_into().unwrap());
@@ -241,8 +241,8 @@ impl ArchiveTask {
                 let mut leaves = Vec::new();
                 for (key, value) in &data {
                     let mut context = digest::Context::new(&digest::SHA256);
-                    context.update(&key);
-                    context.update(&value);
+                    context.update(key);
+                    context.update(value);
                     context.update(&self.current_round.to_le_bytes());
                     let hash = context.finish();
                     leaves.push(hash.as_ref().try_into().unwrap());

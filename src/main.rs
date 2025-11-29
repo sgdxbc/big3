@@ -36,6 +36,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/start", post(start))
         .route("/scrape", post(scrape))
         .route("/stop", post(stop))
+        .route("/wait", post(wait))
         .with_state(Arc::new(state));
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await?;
     let serve = async {
@@ -54,6 +55,7 @@ enum Command {
     Start,
     Scrape(oneshot::Sender<schema::Scrape>),
     Stop(oneshot::Sender<schema::Stopped>),
+    Wait(oneshot::Sender<schema::Stopped>),
 }
 
 async fn run(mut rx_command: Receiver<Command>, shutdown: CancellationToken) -> anyhow::Result<()> {
@@ -82,6 +84,9 @@ async fn run(mut rx_command: Receiver<Command>, shutdown: CancellationToken) -> 
                 }
                 Some(Command::Stop(tx_stopped)) => {
                     shutdown.cancel();
+                    break Ok(tx_stopped);
+                }
+                Some(Command::Wait(tx_stopped)) => {
                     break Ok(tx_stopped);
                 }
                 _ => anyhow::bail!("unexpected command"),
@@ -120,5 +125,11 @@ async fn scrape(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 async fn stop(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let (tx, rx) = oneshot::channel();
     state.tx_command.send(Command::Stop(tx)).await.unwrap();
+    Json(rx.await.unwrap())
+}
+
+async fn wait(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let (tx, rx) = oneshot::channel();
+    state.tx_command.send(Command::Wait(tx)).await.unwrap();
     Json(rx.await.unwrap())
 }

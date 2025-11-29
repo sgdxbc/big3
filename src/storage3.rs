@@ -74,8 +74,6 @@ pub struct BigStorageConfig {
     pub num_nodes: NodeIndex,
     pub num_faulty_nodes: NodeIndex,
     num_secondary_nodes: NodeIndex,
-
-    cache_size: usize,
 }
 
 impl From<&schema::ReplicaConfig> for BigStorageConfig {
@@ -84,7 +82,6 @@ impl From<&schema::ReplicaConfig> for BigStorageConfig {
             num_nodes: value.num_nodes,
             num_faulty_nodes: value.num_faulty_nodes,
             num_secondary_nodes: 6,
-            cache_size: value.cache_size,
         };
         let num_faulty_nodes = value.num_faulty_nodes;
         assert!((0..config.num_shards()).all(|shard| {
@@ -166,6 +163,7 @@ impl StorageTask {
         network_interconnect: NetworkInterconnectHandle,
         config: BigStorageConfig,
         node_index: NodeIndex,
+        cache_size: usize,
         app: &schema::App,
     ) -> anyhow::Result<Self> {
         let temp_dir = tempdir()?;
@@ -198,10 +196,10 @@ impl StorageTask {
         let roots_bytes = db.get_cf(cf, b"roots")?.expect("Merkle roots not found");
         let merkle_roots = bincode::decode_from_slice(&roots_bytes, bincode::config::standard())?.0;
 
-        let mut cache = LruCache::new(config.cache_size.try_into().unwrap());
+        let mut cache = LruCache::new(cache_size.try_into().unwrap());
         if let schema::App::Ycsb(num_keys) = app {
             let zipfian = crate::workload::zipfian::ScrambledZipfian::new_range(0, *num_keys - 1);
-            for i in 0..config.cache_size.min(1_000_000) {
+            for i in 0..cache_size.min(1_000_000) {
                 let key = crate::execute::ycsb::key(zipfian.scramble(i as _));
                 cache.put(key.into_bytes(), Some(vec![0u8; 1000]));
             }

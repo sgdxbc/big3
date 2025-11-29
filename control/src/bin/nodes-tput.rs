@@ -196,7 +196,6 @@ async fn run_workload(
     let replica_items = server_instances.iter().enumerate().map(|(i, instance)| {
         let shard_index = (i / num_shard_running_nodes as usize) as _;
         let schema = big_schema::ReplicaTask {
-            node_index: i as _,
             num_shards,
             shard_index,
             shard_node_index: (i % num_shard_running_nodes as usize) as _,
@@ -204,11 +203,12 @@ async fn run_workload(
             ips: ips.clone(),
             latencies: NETWORK.to_latencies(),
             config: big_schema::ReplicaConfig {
+                node_index: i as _,
                 num_nodes: sharding.num_nodes(),
                 num_faulty_nodes: sharding.num_faulty_nodes(),
-                cache_size: CACHE_SIZE,
-                max_concurrent_executing: NETWORK.max_concurrent_executing(),
             },
+            cache_size: CACHE_SIZE,
+            max_concurrent_executing: NETWORK.max_concurrent_executing(),
             storage: STORAGE,
             app: APP.to_schema_app(),
             stripe_interval: STRIPE_INTERVAL,
