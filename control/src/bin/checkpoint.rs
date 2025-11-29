@@ -12,7 +12,10 @@ use tokio::{time::sleep, try_join};
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     assert!(matches!(STORAGE, big_schema::Storage::Big));
-    assert!(SHARDING.num_shards == 1);
+    #[allow(clippy::assertions_on_constants)]
+    {
+        assert!(SHARDING.num_shards == 1);
+    }
 
     let cluster = Cluster::from_terraform().await?;
 

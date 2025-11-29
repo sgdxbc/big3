@@ -108,3 +108,14 @@ On the other hand, previously every key value pair is transferred from one of th
 ----
 
 Zipfian access top 1% keys for 99% when theta = 1.3.
+
+----
+
+    Round time: len: 1, mean: 334.604795904s, total: 334.669092623s, p50: 334.739013631s, p99: 334.739013631s, max: 334.739013631s
+    Scan time: len: 7, mean: 1.426288054s, total: 9.984819727s, p50: 1.400897535s, p99: 1.804599295s, max: 1.804599295s
+    Network time: len: 119, mean: 1.336556761s, total: 159.046891224s, p50: 427.556863ms, p99: 11.618222079s, max: 13.824425983s
+    Verify time: len: 119, mean: 138.221481ms, total: 16.447660677s, p50: 137.232383ms, p99: 151.519231ms, max: 152.043519ms
+    Update time: len: 120, mean: 39.105535ms, total: 4.692746329s, p50: 38.273023ms, p99: 53.805055ms, max: 53.903359ms
+    Merklize time: len: 120, mean: 132.294519ms, total: 15.875444013s, p50: 132.448255ms, p99: 141.950975ms, max: 145.227775ms
+    Encode time: len: 120, mean: 1.028591889s, total: 123.429161973s, p50: 1.032323071s, p99: 1.090519039s, max: 1.091567615s
+    Store time: len: 7, mean: 544.285842ms, total: 3.810079456s, p50: 543.686655ms, p99: 569.901055ms, max: 569.901055ms
