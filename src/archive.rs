@@ -89,6 +89,12 @@ pub struct ArchiveTask {
 
 struct ArchiveMetrics {
     round: Latency,
+
+    scan: Latency,
+    network: Latency,
+    verify: Latency,
+    encode: Latency,
+    store: Latency,
 }
 
 impl ArchiveTask {
@@ -117,6 +123,12 @@ impl ArchiveTask {
             reorder_push_shards: Default::default(),
             metrics: ArchiveMetrics {
                 round: Latency::new(),
+
+                scan: Latency::new(),
+                network: Latency::new(),
+                verify: Latency::new(),
+                encode: Latency::new(),
+                store: Latency::new(),
             },
         }
     }
@@ -175,15 +187,11 @@ impl ArchiveTask {
                         );
                         assert_eq!(index, expected_index);
                         expected_index += 1;
-                        data.push((key.to_vec(), (value, index)));
+                        data.push((key.to_vec(), value));
                         iter.next();
                         iter.status()?;
                     }
                     // data.sort_unstable_by_key(|(_, (_, index))| *index);
-                    let data = data
-                        .into_iter()
-                        .map(|(k, (v, _))| (k, v))
-                        .collect::<Vec<_>>();
 
                     if self.pushing_shards.contains(&shard) {
                         let push_shard = message::PushShard {
@@ -225,14 +233,14 @@ impl ArchiveTask {
                                     let hash = context.finish();
                                     leaves.push(hash.as_ref().try_into().unwrap());
                                 }
+
                                 if MerkleTree::new(leaves).root()
                                     != self.merkle_roots[shard as usize]
                                 {
-                                    // TODO figure out why roots do not match
-                                    // anyhow::bail!(
-                                    //     "Received shard {} with invalid merkle root",
-                                    //     shard
-                                    // );
+                                    anyhow::bail!(
+                                        "Received shard {} with invalid merkle root",
+                                        shard
+                                    );
                                 }
                                 if push_shard.shard > shard {
                                     self.reorder_push_shards

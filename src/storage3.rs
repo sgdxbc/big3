@@ -503,7 +503,7 @@ impl RetrieveWorker {
                     let mut hasher = digest::Context::new(&digest::SHA256);
                     hasher.update(&key);
                     hasher.update(&value);
-                    hasher.update(&0u32.to_le_bytes());
+                    hasher.update(&0u64.to_le_bytes());
                     let leaf = hasher.finish();
                     let leaf = leaf.as_ref().try_into().unwrap();
                     proof

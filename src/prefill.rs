@@ -138,7 +138,7 @@ async fn run_prefill_storage(
                 let mut hasher = digest::Context::new(&digest::SHA256);
                 hasher.update(&key);
                 hasher.update(&value[..]);
-                hasher.update(&0u32.to_le_bytes());
+                hasher.update(&0u64.to_le_bytes());
                 let leaf = hasher.finish();
 
                 let i = shard_hashes[shard as usize].len() as u32;
@@ -156,6 +156,13 @@ async fn run_prefill_storage(
             let cf = db.cf_handle("merkle").unwrap();
             let mut roots = Vec::new();
             for (shard, hashes) in shard_hashes.into_iter().enumerate() {
+                info!(
+                    "shard {} has {} leaves\nfirst leaf: {:02x?}\nlast leaf: {:02x?}",
+                    shard,
+                    hashes.len(),
+                    hashes.first(),
+                    hashes.last()
+                );
                 let tree = MerkleTree::new(hashes);
                 info!("shard {} merkle tree root: {:02x?}", shard, tree.root());
                 roots.push(tree.root());
