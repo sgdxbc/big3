@@ -1,0 +1,11 @@
+network,app,setting,skewness,tput,p50,p99,_notes,_ignore
+,,,,,,,"APP: Ycsb, STORAGE: Big, SHARDING: Sharding { num_shards: 1, num_shard_faulty_nodes: 33 }, NETWORK: Lan, NUM_CONCURRENT: 3000, CACHE_SIZE: 4000000, THETA: 0.0, READ_RATIO: 0.95, NUM_KEYS: 100000000 ",true
+Lan,Ycsb,Big,1.24,350365.2186278491,1.117782015,1.4449377270000001,"num_concurrent = 20000"
+Lan,Ycsb,Big,0.99,122460.47364317735,0.958922751,1.340080127,"num_concurrent = 6000"
+Lan,Ycsb,Big,0.5,52097.24714246379,1.147142143,1.342177279,"num_concurrent = 3000"
+Lan,Ycsb,Big,0,48057.01279213611,1.238368255,1.460666367,"num_concurrent = 3000"
+,,,,,,,"APP: Ycsb, STORAGE: Full, SHARDING: Sharding { num_shards: 1, num_shard_faulty_nodes: 33 }, NETWORK: Lan, NUM_CONCURRENT: 15000, CACHE_SIZE: 4000000, THETA: 1.24, READ_RATIO: 0.95, NUM_KEYS: 100000000 ",true
+Lan,Ycsb,Full,1.24,307060.2874000166,0.979894271,1.3327400950000001,"num_concurrent = 15000"
+Lan,Ycsb,Full,0.99,101114.9881582253,1.002438655,1.420820479,"num_concurrent = 5000"
+Lan,Ycsb,Full,0.5,41237.580289459875,0.999817215,1.4155775990000001,"num_concurrent = 2000"
+Lan,Ycsb,Full,0,37306.17276650216,0.824180735,1.185939455,"num_concurrent = 1500"
