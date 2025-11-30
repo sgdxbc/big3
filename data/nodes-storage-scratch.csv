@@ -1,0 +1,5 @@
+network,app,setting,num_nodes,storage,_notes,_ignore
+,,,,,"APP: Ycsb, STORAGE: Big, SHARDING: Sharding { num_shards: 1, num_shard_faulty_nodes: 1 }, NETWORK: Lan, NUM_CONCURRENT: 15000, CACHE_SIZE: 4000000, THETA: 1.24, READ_RATIO: 0.95, NUM_KEYS: 100000000 ",true
+Lan,Ycsb,Big,4,156711260,
+Lan,Ycsb,Big,4,156711240,
+Lan,Ycsb,Big,4,156711272,

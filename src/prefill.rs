@@ -32,11 +32,19 @@ impl PrefillTask {
         let mut db = db;
         if matches!(schema.storage, schema::Storage::Big) {
             db.create_cf("merkle", &Default::default())?;
+            db.create_cf("archive", &Default::default())?;
         }
         let db = Arc::new(db);
         match schema.app {
             schema::App::Ycsb(num_keys) => {
-                let key_fn = |index| ycsb::key(index).into_bytes();
+                let key_fn = |index| {
+                    let shard = ycsb::shard_of_key(index, schema.num_shards, num_keys);
+                    if schema.full || shard == schema.shard_index {
+                        ycsb::key(index).into_bytes()
+                    } else {
+                        Vec::new()
+                    }
+                };
                 run_prefill_storage(
                     db.clone(),
                     num_keys,
@@ -154,8 +162,31 @@ async fn run_prefill_storage(
             };
             run_prefill(db.clone(), num_keys, wrapped_key_value).await?;
             let cf = db.cf_handle("merkle").unwrap();
+            let archive_cf = db.cf_handle("archive").unwrap();
             let mut roots = Vec::new();
             for (shard, hashes) in shard_hashes.into_iter().enumerate() {
+                let mut mock_data = Vec::new();
+                for i in 0..hashes.len() {
+                    let key = key(i as _);
+                    let mut value = vec![0u8; value_size];
+                    rng.fill(&mut value[..]);
+                    mock_data.push((key, value));
+                }
+                let k = (schema.config.num_faulty_nodes + 1) as usize;
+                let mut mock_stripe_data =
+                    bincode::encode_to_vec(&mock_data, bincode::config::standard())?;
+                let stripe_data_len = mock_stripe_data.len().next_multiple_of(k * 2);
+                mock_stripe_data.resize(stripe_data_len, 0);
+                let mock_chunk = mock_stripe_data
+                    .chunks_exact(stripe_data_len / k)
+                    .next()
+                    .unwrap();
+                db.put_cf(
+                    archive_cf,
+                    format!("{shard}.{}", schema.config.node_index),
+                    mock_chunk,
+                )?;
+
                 info!(
                     "shard {} has {} leaves\nfirst leaf: {:02x?}\nlast leaf: {:02x?}",
                     shard,
@@ -166,8 +197,10 @@ async fn run_prefill_storage(
                 let tree = MerkleTree::new(hashes);
                 info!("shard {} merkle tree root: {:02x?}", shard, tree.root());
                 roots.push(tree.root());
-                let tree_bytes = bincode::encode_to_vec(&tree, bincode::config::standard())?;
-                db.put_cf(cf, (shard as u32).to_be_bytes(), &tree_bytes[..])?;
+                if storing_shards.contains(&(shard as u32)) {
+                    let tree_bytes = bincode::encode_to_vec(&tree, bincode::config::standard())?;
+                    db.put_cf(cf, (shard as u32).to_be_bytes(), &tree_bytes[..])?;
+                }
             }
             db.put_cf(
                 cf,

@@ -49,6 +49,9 @@ pub struct PrefillTask {
     pub app: App,
     pub config: ReplicaConfig,
     pub full: bool,
+
+    pub num_shards: ShardIndex,
+    pub shard_index: ShardIndex,
 }
 
 // response of `/scrape`

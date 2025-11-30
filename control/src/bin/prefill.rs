@@ -12,7 +12,8 @@ use tokio::{time::sleep, try_join};
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cluster = Cluster::from_terraform().await?;
-    let servers = &cluster.servers[..];
+    // let servers = &cluster.servers[..];
+    let servers = &cluster.servers[..SHARDING.num_running_nodes() as usize];
     let endpoints = run_endpoints(servers.to_vec());
     let workload = run_workload(servers.to_vec());
     let workload = async {
@@ -28,8 +29,12 @@ async fn run_workload(server_instances: Vec<Instance>) -> anyhow::Result<()> {
     let control_client = Client::new();
     sleep(Duration::from_millis(2000)).await;
 
+    let num_shard_running_nodes = 2 * SHARDING.num_shard_faulty_nodes + 1;
+    let num_shards = SHARDING.num_shards;
+
     println!("load servers");
     let replica_items = server_instances.iter().enumerate().map(|(i, instance)| {
+        let shard_index = (i / num_shard_running_nodes as usize) as _;
         let schema = PrefillTask {
             config: ReplicaConfig {
                 node_index: i as _,
@@ -39,6 +44,8 @@ async fn run_workload(server_instances: Vec<Instance>) -> anyhow::Result<()> {
             full: args().nth(1) == Some("full".to_string()),
             storage: STORAGE,
             app: APP.to_schema_app(),
+            num_shards,
+            shard_index,
         };
         (instance, Task::Prefill(schema))
     });

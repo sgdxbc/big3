@@ -119,3 +119,7 @@ Zipfian access top 1% keys for 99% when theta = 1.3.
     Merklize time: len: 120, mean: 132.294519ms, total: 15.875444013s, p50: 132.448255ms, p99: 141.950975ms, max: 145.227775ms
     Encode time: len: 120, mean: 1.028591889s, total: 123.429161973s, p50: 1.032323071s, p99: 1.090519039s, max: 1.091567615s
     Store time: len: 7, mean: 544.285842ms, total: 3.810079456s, p50: 543.686655ms, p99: 569.901055ms, max: 569.901055ms
+
+----
+
+99935896        /tmp/big-prefill/
