@@ -7,7 +7,7 @@ use tokio::task::JoinSet;
 
 #[tokio::main]
 async fn main() {
-    println!("num_nodes,consensus,fetch,checkpoint");
+    println!("skewness,num_nodes,consensus,fetch,checkpoint");
     let mut join_set = JoinSet::new();
     for f in [1, 3, 13, 23, 33] {
         join_set.spawn(async move { fun_name(f, 0.99) });
@@ -88,7 +88,7 @@ fn fun_name(num_faulty_nodes: usize, theta: f64) {
     for egress in nodes_egress {
         writeln!(
             &mut stdout,
-            "{num_nodes},{},{},{}",
+            "{theta},{num_nodes},{},{},{}",
             egress.consensus, egress.fetch, egress.checkpoint
         )
         .unwrap();
