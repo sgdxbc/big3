@@ -1,5 +1,7 @@
 use std::{
+    mem::take,
     sync::Arc,
+    thread::available_parallelism,
     time::{Duration, Instant},
 };
 
@@ -10,7 +12,7 @@ use ring::digest;
 use rocksdb::{DB, WriteBatch};
 use tokio::{
     sync::mpsc::{Sender, UnboundedReceiver, UnboundedSender, channel},
-    task::spawn_blocking,
+    task::JoinSet,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -166,7 +168,7 @@ impl ArchiveTask {
         tx_stopped: Sender<()>,
         cancel: CancellationToken,
     ) -> anyhow::Result<()> {
-        let merkle_cf = self.db.cf_handle("merkle").unwrap();
+        let mut join_set = JoinSet::new();
         loop {
             let Some((round, update_table)) = self.channels.rx_checkpoint.recv().await else {
                 return Ok(());
@@ -295,45 +297,57 @@ impl ArchiveTask {
                         }
                     };
 
-                    let start = Instant::now();
-                    let mut data = HashMap::<_, _>::from_iter(data);
-                    for (key, value) in shard_updates[shard as usize].drain() {
-                        if let Some(value) = value {
-                            data.insert(key, value);
-                        } else {
-                            data.remove(&key);
-                        }
+                    while join_set.len() >= available_parallelism()?.get() - 1 {
+                        let start = Instant::now();
+                        join_set.join_next().await.unwrap()??;
+                        self.metrics.update += start.elapsed();
                     }
-                    let mut data = Vec::from_iter(data);
-                    data.sort_unstable_by(|(k1, _), (k2, _)| k1.cmp(k2));
-                    self.metrics.update += start.elapsed();
-
-                    let start = Instant::now();
-                    let mut leaves = Vec::new();
-                    for (key, value) in &data {
-                        let mut context = digest::Context::new(&digest::SHA256);
-                        context.update(key);
-                        context.update(value);
-                        context.update(&self.current_round.to_le_bytes());
-                        let hash = context.finish();
-                        leaves.push(hash.as_ref().try_into().unwrap());
-                    }
-                    let tree = MerkleTree::new(leaves);
-                    self.merkle_roots[shard as usize] = tree.root();
-                    self.metrics.merklize += start.elapsed();
-
-                    let start = Instant::now();
-                    let mut stripe_data =
-                        bincode::encode_to_vec(&data, bincode::config::standard())?;
-
-                    let current_round = self.current_round;
-                    let k = (self.storage_config.num_faulty_nodes + 1) as usize;
                     let db = self.db.clone();
-                    let recovery_count = self.storage_config.num_faulty_nodes * 2;
+                    let updates = take(&mut shard_updates[shard as usize]);
+                    let current_round = self.current_round;
+                    let num_faulty_nodes = self.storage_config.num_faulty_nodes;
+                    let storing = self.storing_shards.contains(&shard);
                     let node_index = self.node_index;
                     let tx_stopped = tx_stopped.clone();
-                    spawn_blocking(move || {
+                    join_set.spawn_blocking(move || {
                         let _tx_stopped = tx_stopped;
+                        // let start = Instant::now();
+                        let mut data = HashMap::<_, _>::from_iter(data);
+                        for (key, value) in updates {
+                            if let Some(value) = value {
+                                data.insert(key, value);
+                            } else {
+                                data.remove(&key);
+                            }
+                        }
+                        let mut data = Vec::from_iter(data);
+                        data.sort_unstable_by(|(k1, _), (k2, _)| k1.cmp(k2));
+                        // self.metrics.update += start.elapsed();
+
+                        // let start = Instant::now();
+                        let mut leaves = Vec::new();
+                        for (key, value) in &data {
+                            let mut context = digest::Context::new(&digest::SHA256);
+                            context.update(key);
+                            context.update(value);
+                            context.update(&current_round.to_le_bytes());
+                            let hash = context.finish();
+                            leaves.push(hash.as_ref().try_into().unwrap());
+                        }
+                        let tree = MerkleTree::new(leaves);
+                        // self.merkle_roots[shard as usize] = tree.root();
+                        // self.metrics.merklize += start.elapsed();
+
+                        // let start = Instant::now();
+                        let mut stripe_data =
+                            bincode::encode_to_vec(&data, bincode::config::standard())?;
+
+                        // let current_round = self.current_round;
+                        let k = (num_faulty_nodes + 1) as usize;
+                        let recovery_count = num_faulty_nodes * 2;
+                        // let tx_stopped = tx_stopped.clone();
+                        // let chunks = spawn_blocking(move || {
+                        // let _tx_stopped = tx_stopped;
                         let stripe_data_len = stripe_data.len().next_multiple_of(k * 2);
                         info!(
                             "Archiving round {}, shard {}, data length {} -> {}",
@@ -344,58 +358,63 @@ impl ArchiveTask {
                         );
                         stripe_data.resize(stripe_data_len, 0);
 
-                        let encoded_chunks = reed_solomon_simd::encode(
-                            k,
-                            recovery_count as _,
-                            stripe_data.chunks_exact(stripe_data_len / k),
-                        )?;
+                        let mut chunks = stripe_data
+                            .chunks_exact(stripe_data_len / k)
+                            .map(|c| c.to_vec())
+                            .collect::<Vec<_>>();
+                        let encoded_chunks =
+                            reed_solomon_simd::encode(k, recovery_count as _, &chunks)?;
                         info!(
                             "Archived round {}, shard {}, encoded to {} chunks",
                             current_round,
                             shard,
                             encoded_chunks.len()
                         );
+                        chunks.extend(encoded_chunks);
+                        // anyhow::Ok(chunks)
+                        // })
+                        // .await??;
+                        // self.metrics.encode += start.elapsed();
 
+                        // let start = Instant::now();
                         // TODO do not directly overwrite last round
-                        let value = if node_index < k as NodeIndex {
-                            stripe_data
-                                .chunks_exact(stripe_data_len / k)
-                                .nth(node_index as _)
-                                .unwrap()
-                        } else {
-                            &encoded_chunks[node_index as usize - k]
-                        };
                         let Some(cf) = db.cf_handle("archive") else {
                             anyhow::bail!("archive column family not found");
                         };
-                        db.put_cf(cf, format!("{shard}.{}", node_index), value)?;
+                        db.put_cf(
+                            cf,
+                            format!("{shard}.{}", node_index),
+                            &chunks[node_index as usize],
+                        )?;
                         info!(
                             "Archived round {}, shard {}, data size {}",
                             current_round,
                             shard,
-                            value.len()
+                            chunks[node_index as usize].len()
                         );
-                        anyhow::Ok(())
-                    })
-                    .await??;
-                    self.metrics.encode += start.elapsed();
 
-                    if self.storing_shards.contains(&shard) {
-                        let start = Instant::now();
-                        let mut write_batch = WriteBatch::new();
-                        for (i, (key, mut value)) in data.into_iter().enumerate() {
-                            value.extend_from_slice(&(i as u32).to_le_bytes());
-                            write_batch.put(&key, &value);
+                        if storing {
+                            let mut write_batch = WriteBatch::new();
+                            for (i, (key, mut value)) in data.into_iter().enumerate() {
+                                value.extend_from_slice(&(i as u32).to_le_bytes());
+                                write_batch.put(&key, &value);
+                            }
+                            db.write(write_batch)?;
+                            let merkle_cf = db.cf_handle("merkle").unwrap();
+                            let tree_bytes =
+                                bincode::encode_to_vec(&tree, bincode::config::standard())?;
+                            db.put_cf(merkle_cf, shard.to_be_bytes(), &tree_bytes[..])?;
                         }
-                        self.db.write(write_batch)?;
-                        let tree_bytes =
-                            bincode::encode_to_vec(&tree, bincode::config::standard())?;
-                        self.db
-                            .put_cf(merkle_cf, shard.to_be_bytes(), &tree_bytes[..])?;
-                        self.metrics.store += start.elapsed();
-                    }
+                        // self.metrics.store += start.elapsed();
+                        anyhow::Ok(())
+                    });
                 }
             }
+            let start = Instant::now();
+            while let Some(res) = join_set.join_next().await {
+                res??
+            }
+            self.metrics.update += start.elapsed();
 
             self.metrics.round += round_start.elapsed();
             cancel.cancel();
