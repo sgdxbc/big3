@@ -16,7 +16,7 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    archive::{ArchiveChannels, ArchiveTask},
+    archive::{ArchiveChannels, ArchiveMetrics, ArchiveTask},
     common::{NodeIndex, PREFILL_PATH},
     execute2::{FetchHandle, PostHandle},
     merkle::{MerkleHash, MerkleProof, MerkleTree},
@@ -274,13 +274,15 @@ impl StorageTask {
         Ok(())
     }
 
-    pub async fn run(self, cancel: CancellationToken) -> anyhow::Result<()> {
+    pub async fn run(self, cancel: CancellationToken) -> anyhow::Result<ArchiveMetrics> {
         let mut workers = JoinSet::new();
 
-        {
+        let archive = {
             let cancel = cancel.clone();
-            workers.spawn(async move { self.archive.run(cancel).await });
-        }
+            async {
+                anyhow::Ok(tokio::spawn(async move { self.archive.run(cancel).await }).await??)
+            }
+        };
         if self.checkpoint {
             let _ = self.tx_checkpoint.send((1, HashMap::new()));
         }
@@ -322,14 +324,19 @@ impl StorageTask {
         });
         drop(self.channels.tx_post);
 
-        while let Some(res) = workers.join_next().await {
-            res??;
-        }
+        let workers = async {
+            while let Some(res) = workers.join_next().await {
+                res??;
+            }
+            anyhow::Ok(())
+        };
+        let ((), archive_metrics) = tokio::try_join!(workers, archive)?;
+
         let db = Arc::into_inner(self.db);
         assert!(db.is_some());
         drop(db);
         DB::destroy(&Default::default(), self.temp_dir.keep().as_path())?;
-        Ok(())
+        Ok(archive_metrics)
     }
 }
 

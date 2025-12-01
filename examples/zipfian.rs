@@ -17,7 +17,7 @@ fn main() {
     for i in 0..10_000_000 {
         let v = counts.get(&(zipfian.scramble(i))).unwrap_or(&0);
         acc += *v;
-        if (i + 1) % 1_000_000 == 0 {
+        if (i + 1) % 100_000 == 0 {
             println!(
                 "key {:>8} ({:.4}%): cumulative {:>8} ({:.4}%)",
                 i + 1,

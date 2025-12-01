@@ -18,7 +18,9 @@ async fn main() -> anyhow::Result<()> {
     let workload = run_workload(servers.to_vec());
     let workload = async {
         let result = workload.await;
-        sleep(Duration::from_millis(3000)).await;
+        if result.is_err() {
+            sleep(Duration::from_millis(3000)).await;
+        }
         result
     };
     try_join!(endpoints, workload)?;
@@ -26,6 +28,13 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn run_workload(server_instances: Vec<Instance>) -> anyhow::Result<()> {
+    let full = args().nth(1) == Some("full".to_string());
+    if full {
+        println!("Prefilling FULL storage");
+    } else {
+        println!("Prefilling LIGHT storage");
+    }
+
     let control_client = Client::new();
     sleep(Duration::from_millis(2000)).await;
 
@@ -41,7 +50,7 @@ async fn run_workload(server_instances: Vec<Instance>) -> anyhow::Result<()> {
                 num_nodes: SHARDING.num_nodes(),
                 num_faulty_nodes: SHARDING.num_faulty_nodes(),
             },
-            full: args().nth(1) == Some("full".to_string()),
+            full,
             storage: STORAGE,
             app: APP.to_schema_app(),
             num_shards,

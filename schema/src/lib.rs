@@ -65,8 +65,18 @@ pub struct Scrape {
 // response of `/stop`
 #[derive(Serialize, Deserialize)]
 pub enum Stopped {
-    Replica,
+    ReplicaBig(StoppedReplicaBig),
+    ReplicaFull,
     Client,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct StoppedReplicaBig {
+    pub checkpoint: f32,
+    pub checkpoint_scan: f32,
+    pub checkpoint_network: f32,
+    pub checkpoint_verify: f32,
+    pub checkpoint_update: f32,
 }
 
 // inner types

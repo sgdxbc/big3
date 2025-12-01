@@ -197,7 +197,7 @@ async fn run_prefill_storage(
                 let tree = MerkleTree::new(hashes);
                 info!("shard {} merkle tree root: {:02x?}", shard, tree.root());
                 roots.push(tree.root());
-                if storing_shards.contains(&(shard as u32)) {
+                if schema.full || storing_shards.contains(&(shard as u32)) {
                     let tree_bytes = bincode::encode_to_vec(&tree, bincode::config::standard())?;
                     db.put_cf(cf, (shard as u32).to_be_bytes(), &tree_bytes[..])?;
                 }

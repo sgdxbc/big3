@@ -2,7 +2,7 @@ use std::{fmt::Display, ops::AddAssign, time::Duration};
 
 use hdrhistogram::Histogram;
 
-pub struct Latency(Histogram<u64>, Duration);
+pub struct Latency(Histogram<u64>, pub Duration);
 
 impl Latency {
     pub fn new() -> Self {

@@ -2,10 +2,10 @@ use std::time::Duration;
 
 use big_control::{
     Cluster, Instance,
-    configs::{APP, CACHE_SIZE, NETWORK, SHARDING, STORAGE, STRIPE_INTERVAL},
+    configs::{APP, CACHE_SIZE, NETWORK, NUM_KEYS, SHARDING, STORAGE, STRIPE_INTERVAL},
     load_all, run_endpoints, start_all, wait_all,
 };
-use big_schema::Task;
+use big_schema::{Stopped, StoppedReplicaBig, Task};
 use reqwest::Client;
 use tokio::{time::sleep, try_join};
 
@@ -25,14 +25,32 @@ async fn main() -> anyhow::Result<()> {
     let workload = run_workload(servers.to_vec());
     let workload = async {
         let result = workload.await;
-        sleep(Duration::from_millis(3000)).await;
+        if result.is_err() {
+            sleep(Duration::from_millis(3000)).await;
+        }
         result
     };
-    try_join!(endpoints, workload)?;
+    let ((), stopped_big_list) = try_join!(endpoints, workload)?;
+
+    println!(
+        "num_nodes,num_keys,checkpoint,checkpoint_scan,checkpoint_network,checkpoint_verify,checkpoint_update"
+    );
+    for stopped in stopped_big_list {
+        println!(
+            "{},{},{},{},{},{},{}",
+            SHARDING.num_nodes(),
+            NUM_KEYS,
+            stopped.checkpoint,
+            stopped.checkpoint_scan,
+            stopped.checkpoint_network,
+            stopped.checkpoint_verify,
+            stopped.checkpoint_update,
+        );
+    }
     Ok(())
 }
 
-async fn run_workload(server_instances: Vec<Instance>) -> anyhow::Result<()> {
+async fn run_workload(server_instances: Vec<Instance>) -> anyhow::Result<Vec<StoppedReplicaBig>> {
     let control_client = Client::new();
     sleep(Duration::from_millis(2000)).await;
 
@@ -70,6 +88,13 @@ async fn run_workload(server_instances: Vec<Instance>) -> anyhow::Result<()> {
     start_all(&server_instances, control_client.clone()).await?;
 
     println!("wait servers");
-    wait_all(&server_instances, control_client.clone()).await?;
-    Ok(())
+    let stopped_list = wait_all(&server_instances, control_client.clone()).await?;
+    let mut stopped_big_list = Vec::new();
+    for stopped in stopped_list {
+        let Stopped::ReplicaBig(stopped) = stopped else {
+            anyhow::bail!("unexpected stopped variant");
+        };
+        stopped_big_list.push(stopped);
+    }
+    Ok(stopped_big_list)
 }

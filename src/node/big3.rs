@@ -112,8 +112,8 @@ impl BigReplicaNodeTask {
         }
     }
 
-    pub async fn run(self, stop: CancellationToken) -> anyhow::Result<()> {
-        tokio::try_join!(
+    pub async fn run(self, stop: CancellationToken) -> anyhow::Result<schema::StoppedReplicaBig> {
+        let ((), (), (), (), (), (), (), archive_metrics) = tokio::try_join!(
             self.network_outgoing.run(stop.clone()),
             self.network_accept.run(stop.clone()),
             self.network_interconnect_consensus.run(stop.clone()),
@@ -123,6 +123,13 @@ impl BigReplicaNodeTask {
             self.execute.run(stop.clone()),
             self.storage.run(stop.clone()),
         )?;
-        Ok(())
+        let stopped = schema::StoppedReplicaBig {
+            checkpoint: archive_metrics.round.1.as_secs_f32(),
+            checkpoint_scan: archive_metrics.scan.1.as_secs_f32(),
+            checkpoint_network: archive_metrics.network.1.as_secs_f32(),
+            checkpoint_verify: archive_metrics.verify.1.as_secs_f32(),
+            checkpoint_update: archive_metrics.update.1.as_secs_f32(),
+        };
+        Ok(stopped)
     }
 }

@@ -58,19 +58,16 @@ impl Task {
         let stopped = match self {
             Self::Full(task) => {
                 task.run(stop).await?;
-                Stopped::Replica
+                Stopped::ReplicaFull
             }
-            Self::Big(task) => {
-                task.run(stop).await?;
-                Stopped::Replica
-            }
+            Self::Big(task) => Stopped::ReplicaBig(task.run(stop).await?),
             Self::Client(task) => {
                 task.run(stop).await?;
                 Stopped::Client
             }
             Self::Prefill => {
                 stop.cancelled().await;
-                Stopped::Replica
+                Stopped::ReplicaFull
             }
         };
         Ok(stopped)

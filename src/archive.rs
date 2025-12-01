@@ -86,16 +86,17 @@ pub struct ArchiveTask {
     // shard -> data
     reorder_push_shards: HashMap<u32, Vec<(Vec<u8>, Vec<u8>)>>,
 
-    metrics: ArchiveMetrics,
+    pub metrics: ArchiveMetrics,
 }
 
-struct ArchiveMetrics {
-    round: Latency,
+pub struct ArchiveMetrics {
+    pub round: Latency,
 
-    scan: Latency,
-    network: Latency,
-    verify: Latency,
-    update: Latency,
+    pub scan: Latency,
+    pub network: Latency,
+    pub verify: Latency,
+    pub update: Latency,
+
     merklize: Latency,
     encode: Latency,
     store: Latency,
@@ -152,7 +153,7 @@ impl ArchiveTask {
         );
     }
 
-    pub async fn run(mut self, cancel: CancellationToken) -> anyhow::Result<()> {
+    pub async fn run(mut self, cancel: CancellationToken) -> anyhow::Result<ArchiveMetrics> {
         let (tx, mut rx) = channel(1);
         cancel
             .run_until_cancelled(self.run_inner(tx, cancel.clone()))
@@ -160,7 +161,7 @@ impl ArchiveTask {
             .unwrap_or(Ok(()))?;
         let _ = rx.recv().await;
         self.log_metrics();
-        Ok(())
+        Ok(self.metrics)
     }
 
     async fn run_inner(
@@ -188,9 +189,9 @@ impl ArchiveTask {
 
             let batch_size = 40;
             for start_shard in (0..self.storage_config.num_shards()).step_by(batch_size as _) {
-                if start_shard >= 50 {
-                    break;
-                }
+                // if start_shard >= 50 {
+                //     break;
+                // }
 
                 let mut shards = HashMap::new();
                 for shard in
