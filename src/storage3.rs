@@ -106,7 +106,7 @@ impl BigStorageConfig {
 
     pub fn nodes_of_shard(&self, shard: u32) -> impl Iterator<Item = NodeIndex> {
         (0..)
-            .map(move |i| ((shard + i * self.num_faulty_nodes as u32) % self.num_nodes as u32) as _)
+            .map(move |i| ((shard + i * (self.num_nodes / 3) as u32) % self.num_nodes as u32) as _)
             .take((1 + self.num_secondary_nodes) as _)
     }
 
