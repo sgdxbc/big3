@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use big_control::{
     Cluster, Instance,
-    configs::{APP, CACHE_SIZE, NETWORK, NUM_KEYS, SHARDING, STORAGE, STRIPE_INTERVAL},
+    configs::{APP, CACHE_SIZE, NETWORK, NUM_KEYS, SHARDING, STORAGE, STRIPE_INTERVAL, Sharding},
     load_all, run_endpoints, start_all, wait_all,
 };
 use big_schema::{Stopped, StoppedReplicaBig, Task};
@@ -19,10 +19,18 @@ async fn main() -> anyhow::Result<()> {
 
     let cluster = Cluster::from_terraform().await?;
 
-    let num_running_nodes = SHARDING.num_running_nodes();
+    // let sharding = SHARDING;
+    // for f in [23, 13, 3] {
+    let f = 3;
+    let sharding = Sharding {
+        num_shards: 1,
+        num_shard_faulty_nodes: f,
+    };
+
+    let num_running_nodes = sharding.num_running_nodes();
     let servers = &cluster.servers[..num_running_nodes as usize];
     let endpoints = run_endpoints(servers.to_vec());
-    let workload = run_workload(servers.to_vec());
+    let workload = run_workload(servers.to_vec(), sharding);
     let workload = async {
         let result = workload.await;
         if result.is_err() {
@@ -38,7 +46,7 @@ async fn main() -> anyhow::Result<()> {
     for stopped in stopped_big_list {
         println!(
             "{},{},{},{},{},{},{}",
-            SHARDING.num_nodes(),
+            sharding.num_nodes(),
             NUM_KEYS,
             stopped.checkpoint,
             stopped.checkpoint_scan,
@@ -47,10 +55,14 @@ async fn main() -> anyhow::Result<()> {
             stopped.checkpoint_update,
         );
     }
+    // }
     Ok(())
 }
 
-async fn run_workload(server_instances: Vec<Instance>) -> anyhow::Result<Vec<StoppedReplicaBig>> {
+async fn run_workload(
+    server_instances: Vec<Instance>,
+    sharding: Sharding,
+) -> anyhow::Result<Vec<StoppedReplicaBig>> {
     let control_client = Client::new();
     sleep(Duration::from_millis(2000)).await;
 
@@ -65,13 +77,13 @@ async fn run_workload(server_instances: Vec<Instance>) -> anyhow::Result<Vec<Sto
             num_shards: 1,
             shard_index: 0,
             shard_node_index: i as _,
-            num_shard_faulty_nodes: SHARDING.num_shard_faulty_nodes,
+            num_shard_faulty_nodes: sharding.num_shard_faulty_nodes,
             ips: ips.clone(),
             latencies: NETWORK.to_latencies(),
             config: big_schema::ReplicaConfig {
                 node_index: i as _,
-                num_nodes: SHARDING.num_nodes(),
-                num_faulty_nodes: SHARDING.num_faulty_nodes(),
+                num_nodes: sharding.num_nodes(),
+                num_faulty_nodes: sharding.num_faulty_nodes(),
             },
             cache_size: CACHE_SIZE,
             max_concurrent_executing: NETWORK.max_concurrent_executing(),

@@ -260,6 +260,7 @@ impl ArchiveTask {
                                     );
                                     if push_shard.round != self.current_round
                                         || push_shard.shard < shard
+                                        || shards.contains_key(&push_shard.shard)
                                     {
                                         continue;
                                     }
