@@ -77,6 +77,10 @@ pub struct StoppedReplicaBig {
     pub checkpoint_network: f32,
     pub checkpoint_verify: f32,
     pub checkpoint_update: f32,
+
+    pub replica_egress: u64,
+    pub retrieve_egress: u64,
+    pub checkpoint_egress: u64,
 }
 
 // inner types

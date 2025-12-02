@@ -179,7 +179,8 @@ impl ArchiveTask {
             info!("Starting archive for round {}", self.current_round);
             let round_start = Instant::now();
 
-            let mut iter = self.db.raw_iterator();
+            let db = self.db.clone();
+            let mut iter = db.raw_iterator();
 
             let mut shard_updates = vec![HashMap::new(); self.storage_config.num_shards() as usize];
             for (key, value) in update_table {
@@ -198,41 +199,7 @@ impl ArchiveTask {
                     start_shard..(start_shard + batch_size).min(self.storage_config.num_shards())
                 {
                     if self.storing_shards.contains(&shard) {
-                        let start = Instant::now();
-
-                        let prefix = shard.to_be_bytes();
-                        iter.seek(prefix);
-                        iter.status()?;
-                        let mut data = Vec::new();
-                        let mut expected_index = 0;
-                        while let Some((key, value)) = iter.item() {
-                            let Some(key) = key.strip_prefix(&prefix[..]) else {
-                                break;
-                            };
-                            let mut value = value.to_vec();
-                            let index = u32::from_le_bytes(
-                                value.split_off(value.len() - 4).try_into().unwrap(),
-                            );
-                            assert_eq!(index, expected_index);
-                            expected_index += 1;
-                            data.push((key.to_vec(), value));
-                            iter.next();
-                            iter.status()?;
-                        }
-                        // data.sort_unstable_by_key(|(_, (_, index))| *index);
-
-                        self.metrics.scan += start.elapsed();
-
-                        if self.pushing_shards.contains(&shard) {
-                            let push_shard = message::PushShard {
-                                round: self.current_round,
-                                shard,
-                                data: data.clone(),
-                            };
-                            self.network_interconnect
-                                .send_to_all(Message::PushShard(push_shard));
-                        }
-                        shards.insert(shard, data);
+                        self.scan(&mut iter, &mut shards, shard)?;
                     }
                 }
 
@@ -304,112 +271,7 @@ impl ArchiveTask {
                         join_set.join_next().await.unwrap()??;
                         self.metrics.update += start.elapsed();
                     }
-                    let db = self.db.clone();
-                    let updates = take(&mut shard_updates[shard as usize]);
-                    let current_round = self.current_round;
-                    let num_faulty_nodes = self.storage_config.num_faulty_nodes;
-                    let storing = self.storing_shards.contains(&shard);
-                    let node_index = self.node_index;
-                    let tx_stopped = tx_stopped.clone();
-                    join_set.spawn_blocking(move || {
-                        let _tx_stopped = tx_stopped;
-                        // let start = Instant::now();
-                        let mut data = HashMap::<_, _>::from_iter(data);
-                        for (key, value) in updates {
-                            if let Some(value) = value {
-                                data.insert(key, value);
-                            } else {
-                                data.remove(&key);
-                            }
-                        }
-                        let mut data = Vec::from_iter(data);
-                        data.sort_unstable_by(|(k1, _), (k2, _)| k1.cmp(k2));
-                        // self.metrics.update += start.elapsed();
-
-                        // let start = Instant::now();
-                        let mut leaves = Vec::new();
-                        for (key, value) in &data {
-                            let mut context = digest::Context::new(&digest::SHA256);
-                            context.update(key);
-                            context.update(value);
-                            context.update(&current_round.to_le_bytes());
-                            let hash = context.finish();
-                            leaves.push(hash.as_ref().try_into().unwrap());
-                        }
-                        let tree = MerkleTree::new(leaves);
-                        // self.merkle_roots[shard as usize] = tree.root();
-                        // self.metrics.merklize += start.elapsed();
-
-                        // let start = Instant::now();
-                        let mut stripe_data =
-                            bincode::encode_to_vec(&data, bincode::config::standard())?;
-
-                        // let current_round = self.current_round;
-                        let k = (num_faulty_nodes + 1) as usize;
-                        let recovery_count = num_faulty_nodes * 2;
-                        // let tx_stopped = tx_stopped.clone();
-                        // let chunks = spawn_blocking(move || {
-                        // let _tx_stopped = tx_stopped;
-                        let stripe_data_len = stripe_data.len().next_multiple_of(k * 2);
-                        info!(
-                            "Archiving round {}, shard {}, data length {} -> {}",
-                            current_round,
-                            shard,
-                            stripe_data.len(),
-                            stripe_data_len
-                        );
-                        stripe_data.resize(stripe_data_len, 0);
-
-                        let mut chunks = stripe_data
-                            .chunks_exact(stripe_data_len / k)
-                            .map(|c| c.to_vec())
-                            .collect::<Vec<_>>();
-                        let encoded_chunks =
-                            reed_solomon_simd::encode(k, recovery_count as _, &chunks)?;
-                        info!(
-                            "Archived round {}, shard {}, encoded to {} chunks",
-                            current_round,
-                            shard,
-                            encoded_chunks.len()
-                        );
-                        chunks.extend(encoded_chunks);
-                        // anyhow::Ok(chunks)
-                        // })
-                        // .await??;
-                        // self.metrics.encode += start.elapsed();
-
-                        // let start = Instant::now();
-                        // TODO do not directly overwrite last round
-                        let Some(cf) = db.cf_handle("archive") else {
-                            anyhow::bail!("archive column family not found");
-                        };
-                        db.put_cf(
-                            cf,
-                            format!("{shard}.{}", node_index),
-                            &chunks[node_index as usize],
-                        )?;
-                        info!(
-                            "Archived round {}, shard {}, data size {}",
-                            current_round,
-                            shard,
-                            chunks[node_index as usize].len()
-                        );
-
-                        if storing {
-                            let mut write_batch = WriteBatch::new();
-                            for (i, (key, mut value)) in data.into_iter().enumerate() {
-                                value.extend_from_slice(&(i as u32).to_le_bytes());
-                                write_batch.put(&key, &value);
-                            }
-                            db.write(write_batch)?;
-                            let merkle_cf = db.cf_handle("merkle").unwrap();
-                            let tree_bytes =
-                                bincode::encode_to_vec(&tree, bincode::config::standard())?;
-                            db.put_cf(merkle_cf, shard.to_be_bytes(), &tree_bytes[..])?;
-                        }
-                        // self.metrics.store += start.elapsed();
-                        anyhow::Ok(())
-                    });
+                    self.update(&tx_stopped, &mut join_set, &mut shard_updates, shard, data);
                 }
             }
             let start = Instant::now();
@@ -421,6 +283,157 @@ impl ArchiveTask {
             self.metrics.round += round_start.elapsed();
             cancel.cancel();
         }
+    }
+
+    fn update(
+        &mut self,
+        tx_stopped: &Sender<()>,
+        join_set: &mut JoinSet<Result<(), anyhow::Error>>,
+        shard_updates: &mut Vec<HashMap<Vec<u8>, Option<Vec<u8>>>>,
+        shard: u32,
+        data: Vec<(Vec<u8>, Vec<u8>)>,
+    ) {
+        let db = self.db.clone();
+        let updates = take(&mut shard_updates[shard as usize]);
+        let current_round = self.current_round;
+        let num_faulty_nodes = self.storage_config.num_faulty_nodes;
+        let storing = self.storing_shards.contains(&shard);
+        let node_index = self.node_index;
+        let tx_stopped = tx_stopped.clone();
+        join_set.spawn_blocking(move || {
+            let _tx_stopped = tx_stopped;
+            // let start = Instant::now();
+            let mut data = HashMap::<_, _>::from_iter(data);
+            for (key, value) in updates {
+                if let Some(value) = value {
+                    data.insert(key, value);
+                } else {
+                    data.remove(&key);
+                }
+            }
+            let mut data = Vec::from_iter(data);
+            data.sort_unstable_by(|(k1, _), (k2, _)| k1.cmp(k2));
+            // self.metrics.update += start.elapsed();
+
+            // let start = Instant::now();
+            let mut leaves = Vec::new();
+            for (key, value) in &data {
+                let mut context = digest::Context::new(&digest::SHA256);
+                context.update(key);
+                context.update(value);
+                context.update(&current_round.to_le_bytes());
+                let hash = context.finish();
+                leaves.push(hash.as_ref().try_into().unwrap());
+            }
+            let tree = MerkleTree::new(leaves);
+            // self.merkle_roots[shard as usize] = tree.root();
+            // self.metrics.merklize += start.elapsed();
+
+            // let start = Instant::now();
+            let mut stripe_data = bincode::encode_to_vec(&data, bincode::config::standard())?;
+
+            // let current_round = self.current_round;
+            let k = (num_faulty_nodes + 1) as usize;
+            let recovery_count = num_faulty_nodes * 2;
+            // let tx_stopped = tx_stopped.clone();
+            // let chunks = spawn_blocking(move || {
+            // let _tx_stopped = tx_stopped;
+            let stripe_data_len = stripe_data.len().next_multiple_of(k * 2);
+            info!(
+                "Archiving round {}, shard {}, data length {} -> {}",
+                current_round,
+                shard,
+                stripe_data.len(),
+                stripe_data_len
+            );
+            stripe_data.resize(stripe_data_len, 0);
+
+            let mut chunks = stripe_data
+                .chunks_exact(stripe_data_len / k)
+                .map(|c| c.to_vec())
+                .collect::<Vec<_>>();
+            let encoded_chunks = reed_solomon_simd::encode(k, recovery_count as _, &chunks)?;
+            info!(
+                "Archived round {}, shard {}, encoded to {} chunks",
+                current_round,
+                shard,
+                encoded_chunks.len()
+            );
+            chunks.extend(encoded_chunks);
+            // anyhow::Ok(chunks)
+            // })
+            // .await??;
+            // self.metrics.encode += start.elapsed();
+
+            // let start = Instant::now();
+            // TODO do not directly overwrite last round
+            let Some(cf) = db.cf_handle("archive") else {
+                anyhow::bail!("archive column family not found");
+            };
+            db.put_cf(
+                cf,
+                format!("{shard}.{}", node_index),
+                &chunks[node_index as usize],
+            )?;
+            info!(
+                "Archived round {}, shard {}, data size {}",
+                current_round,
+                shard,
+                chunks[node_index as usize].len()
+            );
+
+            if storing {
+                let mut write_batch = WriteBatch::new();
+                for (i, (key, mut value)) in data.into_iter().enumerate() {
+                    value.extend_from_slice(&(i as u32).to_le_bytes());
+                    write_batch.put(&key, &value);
+                }
+                db.write(write_batch)?;
+                let merkle_cf = db.cf_handle("merkle").unwrap();
+                let tree_bytes = bincode::encode_to_vec(&tree, bincode::config::standard())?;
+                db.put_cf(merkle_cf, shard.to_be_bytes(), &tree_bytes[..])?;
+            }
+            // self.metrics.store += start.elapsed();
+            anyhow::Ok(())
+        });
+    }
+
+    fn scan(
+        &mut self,
+        iter: &mut rocksdb::DBRawIterator<'_>,
+        shards: &mut HashMap<u32, Vec<(Vec<u8>, Vec<u8>)>>,
+        shard: u32,
+    ) -> Result<(), anyhow::Error> {
+        let start = Instant::now();
+        let prefix = shard.to_be_bytes();
+        iter.seek(prefix);
+        iter.status()?;
+        let mut data = Vec::new();
+        let mut expected_index = 0;
+        while let Some((key, value)) = iter.item() {
+            let Some(key) = key.strip_prefix(&prefix[..]) else {
+                break;
+            };
+            let mut value = value.to_vec();
+            let index = u32::from_le_bytes(value.split_off(value.len() - 4).try_into().unwrap());
+            assert_eq!(index, expected_index);
+            expected_index += 1;
+            data.push((key.to_vec(), value));
+            iter.next();
+            iter.status()?;
+        }
+        self.metrics.scan += start.elapsed();
+        if self.pushing_shards.contains(&shard) {
+            let push_shard = message::PushShard {
+                round: self.current_round,
+                shard,
+                data: data.clone(),
+            };
+            self.network_interconnect
+                .send_to_all(Message::PushShard(push_shard));
+        }
+        shards.insert(shard, data);
+        Ok(())
     }
 }
 

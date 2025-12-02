@@ -48,6 +48,7 @@ impl<M> ReceiveHandle<M> {
 pub struct NetworkInterconnectTask<const BATCH: bool = false, const THROTTLE: bool = false> {
     txs_outgoing_message: HashMap<NodeIndex, UnboundedSender<Bytes>>,
     join_set: JoinSet<anyhow::Result<()>>,
+    connections: Vec<Connection>,
 }
 
 #[derive(Clone)]
@@ -118,7 +119,10 @@ impl<const BATCH: bool, const THROTTLE: bool> NetworkInterconnectTask<BATCH, THR
 
         let mut txs_outgoing_message = HashMap::new();
         let mut join_set = JoinSet::new();
+        let mut connections = Vec::new();
         for (node_index, conn) in txs_lower.into_iter().chain(txs_higher) {
+            connections.push(conn.clone());
+
             join_set.spawn(Self::run_connection_incoming(conn.clone(), receive.clone()));
             let (tx_outgoing, rx_outgoing) = unbounded_channel();
             if let Some(latencies) = &schema.latencies {
@@ -140,7 +144,15 @@ impl<const BATCH: bool, const THROTTLE: bool> NetworkInterconnectTask<BATCH, THR
         Ok(Self {
             txs_outgoing_message,
             join_set,
+            connections,
         })
+    }
+
+    fn total_egress(&self) -> u64 {
+        self.connections
+            .iter()
+            .map(|conn| conn.stats().udp_tx.bytes)
+            .sum()
     }
 
     pub fn handle(&self) -> NetworkInterconnectHandle {
@@ -229,10 +241,12 @@ impl<const BATCH: bool, const THROTTLE: bool> NetworkInterconnectTask<BATCH, THR
         Ok(())
     }
 
-    pub async fn run(mut self, stop: CancellationToken) -> anyhow::Result<()> {
-        tokio::spawn(async move { stop.run_until_cancelled(self.run_inner()).await })
-            .await?
-            .unwrap_or(Ok(()))
+    pub async fn run(mut self, stop: CancellationToken) -> anyhow::Result<u64> {
+        tokio::spawn(async move {
+            stop.run_until_cancelled(self.run_inner()).await;
+            Ok(self.total_egress())
+        })
+        .await?
     }
 
     async fn run_inner(&mut self) -> anyhow::Result<()> {

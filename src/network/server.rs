@@ -36,6 +36,7 @@ pub struct NetworkAcceptTask<const BATCH: bool = false> {
     endpoint: Endpoint,
     submit: SubmitHandle,
     network_outgoing: NetworkOutgoingHandle,
+    connections: Vec<Connection>,
 }
 
 impl<const BATCH: bool> NetworkAcceptTask<BATCH> {
@@ -48,6 +49,7 @@ impl<const BATCH: bool> NetworkAcceptTask<BATCH> {
             endpoint,
             submit,
             network_outgoing,
+            connections: Vec::new(),
         }
     }
 
@@ -59,11 +61,12 @@ impl<const BATCH: bool> NetworkAcceptTask<BATCH> {
         Ok(Self::new(endpoint, submit, network_outgoing))
     }
 
-    pub async fn run(mut self, stop: CancellationToken) -> anyhow::Result<()> {
-        tokio::spawn(async move { stop.run_until_cancelled(self.run_inner()).await })
-            .await?
-            .unwrap_or(Ok(()))?;
-        Ok(())
+    pub async fn run(mut self, stop: CancellationToken) -> anyhow::Result<u64> {
+        tokio::spawn(async move {
+            stop.run_until_cancelled(self.run_inner()).await;
+            Ok(self.total_egress())
+        })
+        .await?
     }
 
     async fn run_inner(&mut self) -> anyhow::Result<()> {
@@ -71,6 +74,7 @@ impl<const BATCH: bool> NetworkAcceptTask<BATCH> {
             let submit = self.submit.clone();
             let network_outgoing = self.network_outgoing.clone();
             let conn = incoming.await?;
+            self.connections.push(conn.clone());
             tokio::spawn(async move {
                 let mut client_id = [0; size_of::<ClientId>()];
                 conn.accept_uni().await?.read_exact(&mut client_id).await?;
@@ -85,6 +89,13 @@ impl<const BATCH: bool> NetworkAcceptTask<BATCH> {
             });
         }
         Ok(())
+    }
+
+    fn total_egress(&self) -> u64 {
+        self.connections
+            .iter()
+            .map(|conn| conn.stats().udp_tx.bytes)
+            .sum()
     }
 
     async fn run_connection_incoming(conn: Connection, submit: SubmitHandle) -> anyhow::Result<()> {

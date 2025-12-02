@@ -113,7 +113,16 @@ impl BigReplicaNodeTask {
     }
 
     pub async fn run(self, stop: CancellationToken) -> anyhow::Result<schema::StoppedReplicaBig> {
-        let ((), (), (), (), (), (), (), archive_metrics) = tokio::try_join!(
+        let (
+            (),
+            reply_egress,
+            consensus_egress,
+            retrieve_egress,
+            checkpoint_egress,
+            (),
+            (),
+            archive_metrics,
+        ) = tokio::try_join!(
             self.network_outgoing.run(stop.clone()),
             self.network_accept.run(stop.clone()),
             self.network_interconnect_consensus.run(stop.clone()),
@@ -129,6 +138,10 @@ impl BigReplicaNodeTask {
             checkpoint_network: archive_metrics.network.1.as_secs_f32(),
             checkpoint_verify: archive_metrics.verify.1.as_secs_f32(),
             checkpoint_update: archive_metrics.update.1.as_secs_f32(),
+
+            replica_egress: reply_egress + consensus_egress,
+            retrieve_egress,
+            checkpoint_egress,
         };
         Ok(stopped)
     }
