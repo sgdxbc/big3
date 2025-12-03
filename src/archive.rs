@@ -189,89 +189,46 @@ impl ArchiveTask {
             }
 
             let batch_size = 40;
-            for start_shard in (0..self.storage_config.num_shards()).step_by(batch_size as _) {
-                // if start_shard >= 50 {
-                //     break;
-                // }
-
-                let mut shards = HashMap::new();
-                for shard in
-                    start_shard..(start_shard + batch_size).min(self.storage_config.num_shards())
-                {
-                    if self.storing_shards.contains(&shard) {
-                        self.scan(&mut iter, &mut shards, shard)?;
-                    }
+            let mut shards = HashMap::new();
+            let mut scan_shard = 0;
+            for _ in 0..batch_size.min(self.storage_config.num_shards()) {
+                if self.storing_shards.contains(&scan_shard) {
+                    self.scan(&mut iter, &mut shards, scan_shard)?;
                 }
+                scan_shard += 1;
+            }
+            let mut shard = 0;
+            for _ in 0..available_parallelism()?.get() - 1 {
+                let data = self.get_shard(&mut shards, shard as u32).await?;
+                self.update(
+                    &tx_stopped,
+                    &mut join_set,
+                    &mut shard_updates,
+                    shard as u32,
+                    data,
+                );
+                shard += 1;
+            }
+            while shard < self.storage_config.num_shards() {
+                let start = Instant::now();
+                join_set.join_next().await.unwrap()??;
+                self.metrics.update += start.elapsed();
 
-                for shard in
-                    start_shard..(start_shard + batch_size).min(self.storage_config.num_shards())
-                {
-                    let data = if let Some(data) = shards.remove(&shard) {
-                        data
-                    } else if let Some(reorder_shard) = self.reorder_push_shards.remove(&shard) {
-                        reorder_shard
-                    } else {
-                        loop {
-                            let start = Instant::now();
-                            let Some(message) = self.channels.rx_message.recv().await else {
-                                return Ok(());
-                            };
-                            self.metrics.network += start.elapsed();
-                            match message {
-                                Message::PushShard(push_shard) => {
-                                    debug!(
-                                        "Received push shard {} for round {} size {}",
-                                        push_shard.shard,
-                                        push_shard.round,
-                                        push_shard.data.len()
-                                    );
-                                    if push_shard.round != self.current_round
-                                        || push_shard.shard < shard
-                                        || shards.contains_key(&push_shard.shard)
-                                    {
-                                        continue;
-                                    }
+                let data = self.get_shard(&mut shards, shard as u32).await?;
+                self.update(
+                    &tx_stopped,
+                    &mut join_set,
+                    &mut shard_updates,
+                    shard as u32,
+                    data,
+                );
+                shard += 1;
 
-                                    let start = Instant::now();
-
-                                    let mut leaves = Vec::new();
-                                    for (key, value) in &push_shard.data {
-                                        let mut context = digest::Context::new(&digest::SHA256);
-                                        context.update(key);
-                                        context.update(value);
-                                        context.update(&(self.current_round - 1).to_le_bytes());
-                                        let hash = context.finish();
-                                        leaves.push(hash.as_ref().try_into().unwrap());
-                                    }
-
-                                    if MerkleTree::new(leaves).root()
-                                        != self.merkle_roots[push_shard.shard as usize]
-                                    {
-                                        anyhow::bail!(
-                                            "Received shard {} with invalid merkle root",
-                                            shard
-                                        );
-                                    }
-                                    self.metrics.verify += start.elapsed();
-
-                                    if push_shard.shard > shard {
-                                        self.reorder_push_shards
-                                            .insert(push_shard.shard, push_shard.data);
-                                        continue;
-                                    }
-
-                                    break push_shard.data;
-                                }
-                            }
-                        }
-                    };
-
-                    while join_set.len() >= available_parallelism()?.get() - 1 {
-                        let start = Instant::now();
-                        join_set.join_next().await.unwrap()??;
-                        self.metrics.update += start.elapsed();
+                if scan_shard < self.storage_config.num_shards() {
+                    if self.storing_shards.contains(&scan_shard) {
+                        self.scan(&mut iter, &mut shards, scan_shard)?;
                     }
-                    self.update(&tx_stopped, &mut join_set, &mut shard_updates, shard, data);
+                    scan_shard += 1;
                 }
             }
             let start = Instant::now();
@@ -283,6 +240,70 @@ impl ArchiveTask {
             self.metrics.round += round_start.elapsed();
             cancel.cancel();
         }
+    }
+
+    async fn get_shard(
+        &mut self,
+        shards: &mut HashMap<u32, Vec<(Vec<u8>, Vec<u8>)>>,
+        shard: u32,
+    ) -> anyhow::Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        let data = if let Some(data) = shards.remove(&shard) {
+            data
+        } else if let Some(reorder_shard) = self.reorder_push_shards.remove(&shard) {
+            reorder_shard
+        } else {
+            loop {
+                let start = Instant::now();
+                let Some(message) = self.channels.rx_message.recv().await else {
+                    unreachable!()
+                };
+                self.metrics.network += start.elapsed();
+                match message {
+                    Message::PushShard(push_shard) => {
+                        debug!(
+                            "Received push shard {} for round {} size {}",
+                            push_shard.shard,
+                            push_shard.round,
+                            push_shard.data.len()
+                        );
+                        if push_shard.round != self.current_round
+                            || push_shard.shard < shard
+                            || self.storing_shards.contains(&push_shard.shard)
+                        {
+                            continue;
+                        }
+
+                        let start = Instant::now();
+
+                        let mut leaves = Vec::new();
+                        for (key, value) in &push_shard.data {
+                            let mut context = digest::Context::new(&digest::SHA256);
+                            context.update(key);
+                            context.update(value);
+                            context.update(&(self.current_round - 1).to_le_bytes());
+                            let hash = context.finish();
+                            leaves.push(hash.as_ref().try_into().unwrap());
+                        }
+
+                        if MerkleTree::new(leaves).root()
+                            != self.merkle_roots[push_shard.shard as usize]
+                        {
+                            anyhow::bail!("Received shard {} with invalid merkle root", shard);
+                        }
+                        self.metrics.verify += start.elapsed();
+
+                        if push_shard.shard > shard {
+                            self.reorder_push_shards
+                                .insert(push_shard.shard, push_shard.data);
+                            continue;
+                        }
+
+                        break push_shard.data;
+                    }
+                }
+            }
+        };
+        Ok(data)
     }
 
     fn update(
@@ -386,7 +407,7 @@ impl ArchiveTask {
                 let mut write_batch = WriteBatch::new();
                 for (i, (key, mut value)) in data.into_iter().enumerate() {
                     value.extend_from_slice(&(i as u32).to_le_bytes());
-                    write_batch.put(&key, &value);
+                    write_batch.put([&shard.to_be_bytes()[..], &key].concat(), &value);
                 }
                 db.write(write_batch)?;
                 let merkle_cf = db.cf_handle("merkle").unwrap();
@@ -429,8 +450,16 @@ impl ArchiveTask {
                 shard,
                 data: data.clone(),
             };
-            self.network_interconnect
-                .send_to_all(Message::PushShard(push_shard));
+            let storing_nodes = self
+                .storage_config
+                .nodes_of_shard(shard)
+                .collect::<HashSet<_>>();
+            self.network_interconnect.send_to_multiple(
+                &(0..self.storage_config.num_nodes - self.storage_config.num_faulty_nodes)
+                    .filter(|n| !storing_nodes.contains(n))
+                    .collect::<Vec<_>>(),
+                Message::PushShard(push_shard),
+            );
         }
         shards.insert(shard, data);
         Ok(())

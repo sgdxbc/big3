@@ -62,6 +62,14 @@ impl NetworkInterconnectHandle {
         let _ = self.txs_outgoing_message[&node_index].send(bytes.into());
     }
 
+    pub fn send_to_multiple<M: Encode>(&self, node_indices: &[NodeIndex], message: M) {
+        let bytes =
+            Bytes::from(bincode::encode_to_vec(&message, bincode::config::standard()).unwrap());
+        for &node_index in node_indices {
+            let _ = self.txs_outgoing_message[&node_index].send(bytes.clone());
+        }
+    }
+
     pub fn send_to_all<M: Encode>(&self, message: M) {
         let bytes =
             Bytes::from(bincode::encode_to_vec(&message, bincode::config::standard()).unwrap());

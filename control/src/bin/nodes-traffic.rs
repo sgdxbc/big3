@@ -25,9 +25,18 @@ async fn main() -> anyhow::Result<()> {
         data: String::new(),
     };
     run.init();
+    run.perform(
+        Sharding {
+            num_shards: 1,
+            num_shard_faulty_nodes: 33,
+        },
+        1,
+        1.24,
+    )
+    .await?;
 
     create_dir_all("data").await?;
-    let mut data_file = File::create("data/nodes-network.csv").await?;
+    let mut data_file = File::create("data/nodes-network-scratch.csv").await?;
     data_file.write_all(run.data.as_bytes()).await?;
     Ok(())
 }
@@ -173,7 +182,7 @@ async fn run_workload(
     println!("start clients");
     start_all(client_instances, control_client.clone()).await?;
 
-    sleep(Duration::from_secs(300)).await;
+    sleep(Duration::from_secs(30)).await;
     println!("scrape measured data");
     scrape_all(client_instances, control_client.clone()).await?;
 
