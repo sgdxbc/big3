@@ -3,7 +3,7 @@ use std::time::Duration;
 use big_control::{
     Cluster, Instance,
     configs::{APP, CACHE_SIZE, NETWORK, NUM_KEYS, SHARDING, STORAGE, STRIPE_INTERVAL, Sharding},
-    load_all, run_endpoints, start_all, wait_all,
+    load_all, run_endpoints, start_all, stop_all, wait_all,
 };
 use big_schema::{Stopped, StoppedReplicaBig, Task};
 use reqwest::Client;
@@ -100,7 +100,9 @@ async fn run_workload(
     start_all(&server_instances, control_client.clone()).await?;
 
     println!("wait servers");
-    let stopped_list = wait_all(&server_instances, control_client.clone()).await?;
+    wait_all(&server_instances, control_client.clone()).await?;
+    println!("stop servers");
+    let stopped_list = stop_all(&server_instances, control_client.clone()).await?;
     let mut stopped_big_list = Vec::new();
     for stopped in stopped_list {
         let Stopped::ReplicaBig(stopped) = stopped else {

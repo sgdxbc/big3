@@ -112,7 +112,11 @@ impl BigReplicaNodeTask {
         }
     }
 
-    pub async fn run(self, stop: CancellationToken) -> anyhow::Result<schema::StoppedReplicaBig> {
+    pub async fn run(
+        self,
+        stop: CancellationToken,
+        wait: CancellationToken,
+    ) -> anyhow::Result<schema::StoppedReplicaBig> {
         let (
             (),
             reply_egress,
@@ -130,7 +134,7 @@ impl BigReplicaNodeTask {
             self.network_interconnect_archive.run(stop.clone()),
             self.consensus.run(stop.clone()),
             self.execute.run(stop.clone()),
-            self.storage.run(stop.clone()),
+            self.storage.run(stop.clone(), wait),
         )?;
         let stopped = schema::StoppedReplicaBig {
             checkpoint: archive_metrics.round.1.as_secs_f32(),

@@ -182,15 +182,15 @@ where
             updates.extend(op_updates.clone());
             state.extend(op_updates);
 
-            if self.reply_flag <= self.num_shard_faulty_nodes {
-                let reply = Reply {
-                    client_seq,
-                    res: bincode::encode_to_vec(res, bincode::config::standard()).unwrap(),
-                    shard_index: self.shard_index,
-                    shard_node_index: self.shard_node_index,
-                };
-                let _ = self.network_outgoing.send_message(client_id, reply);
-            }
+            // if self.reply_flag <= self.num_shard_faulty_nodes {
+            let reply = Reply {
+                client_seq,
+                res: bincode::encode_to_vec(res, bincode::config::standard()).unwrap(),
+                shard_index: self.shard_index,
+                shard_node_index: self.shard_node_index,
+            };
+            let _ = self.network_outgoing.send_message(client_id, reply);
+            // }
             self.reply_flag = (self.reply_flag + 1) % (2 * self.num_shard_faulty_nodes + 1);
         }
         let _ = self.post_handle.tx_post.send(updates);

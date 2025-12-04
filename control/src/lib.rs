@@ -180,18 +180,17 @@ pub async fn stop_all(
 pub async fn wait_all(
     instances: impl IntoIterator<Item = &Instance>,
     control_client: Client,
-) -> anyhow::Result<Vec<Stopped>> {
+) -> anyhow::Result<()> {
     let mut tasks = JoinSet::new();
     for instance in instances {
         let client = control_client.clone();
         let url = format!("http://{}:3000/wait", instance.public_dns);
         tasks.spawn(async move { client.post(url).send().await });
     }
-    let mut results = Vec::new();
     while let Some(result) = tasks.join_next().await {
-        results.push(result??.error_for_status()?.json::<Stopped>().await?);
+        result??.error_for_status()?;
     }
-    Ok(results)
+    Ok(())
 }
 
 pub struct PerformanceMetrics {

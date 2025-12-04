@@ -55,7 +55,7 @@ enum Command {
     Start,
     Scrape(oneshot::Sender<schema::Scrape>),
     Stop(oneshot::Sender<schema::Stopped>),
-    Wait(oneshot::Sender<schema::Stopped>),
+    Wait(oneshot::Sender<()>),
 }
 
 async fn run(mut rx_command: Receiver<Command>, shutdown: CancellationToken) -> anyhow::Result<()> {
@@ -68,7 +68,7 @@ async fn run(mut rx_command: Receiver<Command>, shutdown: CancellationToken) -> 
     match rx_command.recv().await {
         Some(Command::Stop(tx)) => {
             shutdown.cancel();
-            let stopped = task.run(shutdown.clone()).await?;
+            let stopped = task.run(shutdown.clone(), CancellationToken::new()).await?;
             let _ = tx.send(stopped);
             return Ok(());
         }
@@ -76,6 +76,7 @@ async fn run(mut rx_command: Receiver<Command>, shutdown: CancellationToken) -> 
         _ => anyhow::bail!("second command must be start"),
     }
     let scrape_state = task.scrape_state();
+    let wait = CancellationToken::new();
     let watch = async {
         loop {
             match rx_command.recv().await {
@@ -87,13 +88,14 @@ async fn run(mut rx_command: Receiver<Command>, shutdown: CancellationToken) -> 
                     break Ok(tx_stopped);
                 }
                 Some(Command::Wait(tx_stopped)) => {
-                    break Ok(tx_stopped);
+                    wait.cancelled().await;
+                    let _ = tx_stopped.send(());
                 }
                 _ => anyhow::bail!("unexpected command"),
             }
         }
     };
-    let (tx_stopped, stopped) = try_join!(watch, task.run(shutdown.clone()))?;
+    let (tx_stopped, stopped) = try_join!(watch, task.run(shutdown.clone(), wait.clone()))?;
     let _ = tx_stopped.send(stopped);
     Ok(())
 }
@@ -131,5 +133,6 @@ async fn stop(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 async fn wait(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let (tx, rx) = oneshot::channel();
     state.tx_command.send(Command::Wait(tx)).await.unwrap();
-    Json(rx.await.unwrap())
+    rx.await.unwrap();
+    ()
 }

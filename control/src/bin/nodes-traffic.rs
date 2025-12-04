@@ -6,7 +6,7 @@ use big_control::{
         APP, CACHE_SIZE, NETWORK, NUM_KEYS, READ_RATIO, STORAGE, STRIPE_INTERVAL, Sharding,
         dump_all,
     },
-    load_all, run_endpoints, scrape_all, start_all, stop_all,
+    load_all, run_endpoints, scrape_all, start_all, stop_all, wait_all,
 };
 use big_schema::{Stopped, StoppedReplicaBig, Storage, Task, YcsbWorkloadConfig};
 use reqwest::Client;
@@ -25,15 +25,30 @@ async fn main() -> anyhow::Result<()> {
         data: String::new(),
     };
     run.init();
-    run.perform(
-        Sharding {
-            num_shards: 1,
-            num_shard_faulty_nodes: 33,
-        },
-        1,
-        1.24,
-    )
-    .await?;
+    // for f in [3, 8, 13, 23, 33] {
+    for f in [18, 28] {
+        run.perform(
+            Sharding {
+                num_shards: 1,
+                num_shard_faulty_nodes: f,
+            },
+            1000,
+            1.24,
+        )
+        .await?;
+    }
+    // for f in [3, 8, 13, 23, 33] {
+    for f in [18, 28] {
+        run.perform(
+            Sharding {
+                num_shards: 1,
+                num_shard_faulty_nodes: f,
+            },
+            1000,
+            0.99,
+        )
+        .await?;
+    }
 
     create_dir_all("data").await?;
     let mut data_file = File::create("data/nodes-network-scratch.csv").await?;
@@ -49,7 +64,7 @@ struct Run {
 impl Run {
     fn init(&mut self) {
         self.data = String::from("skewness,num_nodes,consensus,fetch,checkpoint,_notes,_ignore\n");
-        writeln!(&mut self.data, ",,,,,,,\"{}\",true", dump_all()).unwrap();
+        writeln!(&mut self.data, ",,,,,\"{}\",true", dump_all()).unwrap();
     }
 
     async fn perform(
@@ -182,12 +197,23 @@ async fn run_workload(
     println!("start clients");
     start_all(client_instances, control_client.clone()).await?;
 
-    sleep(Duration::from_secs(30)).await;
-    println!("scrape measured data");
-    scrape_all(client_instances, control_client.clone()).await?;
+    let mut total_op = 0.;
+    let target_op = 1_000_000.;
+    loop {
+        sleep(Duration::from_secs(1)).await;
+        println!("scrape measured data");
+        let run = scrape_all(client_instances, control_client.clone()).await?;
+        total_op += run.tput;
+        println!("{}/{}", total_op, target_op);
+        if total_op >= target_op {
+            break;
+        }
+    }
 
     println!("stop clients");
     stop_all(client_instances, control_client.clone()).await?;
+    println!("wait servers");
+    wait_all(server_instances, control_client.clone()).await?;
     println!("stop servers");
     let stopped = stop_all(server_instances, control_client.clone()).await?;
     println!("done");

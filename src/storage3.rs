@@ -105,8 +105,10 @@ impl BigStorageConfig {
     }
 
     pub fn nodes_of_shard(&self, shard: u32) -> impl Iterator<Item = NodeIndex> {
+        // let start = shard;
+        let start = shard % (self.num_nodes - self.num_faulty_nodes) as u32;
         (0..)
-            .map(move |i| ((shard + i * (self.num_nodes / 3) as u32) % self.num_nodes as u32) as _)
+            .map(move |i| ((start + i * (self.num_nodes / 3) as u32) % self.num_nodes as u32) as _)
             .take((1 + self.num_secondary_nodes) as _)
     }
 
@@ -274,13 +276,19 @@ impl StorageTask {
         Ok(())
     }
 
-    pub async fn run(self, cancel: CancellationToken) -> anyhow::Result<ArchiveMetrics> {
+    pub async fn run(
+        self,
+        cancel: CancellationToken,
+        wait: CancellationToken,
+    ) -> anyhow::Result<ArchiveMetrics> {
         let mut workers = JoinSet::new();
 
         let archive = {
             let cancel = cancel.clone();
             async {
-                anyhow::Ok(tokio::spawn(async move { self.archive.run(cancel).await }).await??)
+                anyhow::Ok(
+                    tokio::spawn(async move { self.archive.run(cancel, wait).await }).await??,
+                )
             }
         };
         if self.checkpoint {

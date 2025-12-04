@@ -54,13 +54,17 @@ impl Task {
         }
     }
 
-    pub async fn run(self, stop: CancellationToken) -> anyhow::Result<Stopped> {
+    pub async fn run(
+        self,
+        stop: CancellationToken,
+        wait: CancellationToken,
+    ) -> anyhow::Result<Stopped> {
         let stopped = match self {
             Self::Full(task) => {
                 task.run(stop).await?;
                 Stopped::ReplicaFull
             }
-            Self::Big(task) => Stopped::ReplicaBig(task.run(stop).await?),
+            Self::Big(task) => Stopped::ReplicaBig(task.run(stop, wait).await?),
             Self::Client(task) => {
                 task.run(stop).await?;
                 Stopped::Client

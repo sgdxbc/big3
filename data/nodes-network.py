@@ -4,15 +4,18 @@ import numpy as np
 
 
 def plot(ax, df, skewness):
-    # aggregate mean per num_nodes for the three components (no setting)
+    # aggregate mean and std per num_nodes for the three components (no setting)
     plot_df = df.filter(pl.col("skewness") == skewness)
     agg_df = (
-        plot_df.group_by("num_nodes")  # changed: use correct .groupby
+        plot_df.group_by("num_nodes")
         .agg(
             [
-                pl.col("consensus").mean().alias("consensus"),
-                pl.col("fetch").mean().alias("fetch"),
-                pl.col("checkpoint").mean().alias("checkpoint"),
+                pl.col("consensus").mean().alias("consensus_mean"),
+                pl.col("consensus").std().alias("consensus_std"),
+                pl.col("fetch").mean().alias("fetch_mean"),
+                pl.col("fetch").std().alias("fetch_std"),
+                pl.col("checkpoint").mean().alias("checkpoint_mean"),
+                pl.col("checkpoint").std().alias("checkpoint_std"),
             ]
         )
         .sort("num_nodes")
@@ -21,33 +24,33 @@ def plot(ax, df, skewness):
     if agg_df.is_empty():
         return
 
-    x = agg_df["num_nodes"].to_list()
-    y_consensus = agg_df["consensus"].to_list()
-    y_fetch = agg_df["fetch"].to_list()
-    y_checkpoint = agg_df["checkpoint"].to_list()
+    num_nodes = agg_df["num_nodes"].to_list()
+    n = len(num_nodes)
+    indices = np.arange(n)
+    bar_width = 0.25
 
-    component_names = ["consensus", "fetch", "checkpoint"]
-    component_colors = ["#1f77b4", "#ff7f0e", "#2ca02c"]
+    cons_mean = agg_df["consensus_mean"].to_list()
+    cons_std = agg_df["consensus_std"].to_list()
+    fetch_mean = agg_df["fetch_mean"].to_list()
+    fetch_std = agg_df["fetch_std"].to_list()
+    chk_mean = agg_df["checkpoint_mean"].to_list()
+    chk_std = agg_df["checkpoint_std"].to_list()
 
-    ax.stackplot(
-        x,
-        [y_consensus, y_fetch, y_checkpoint],
-        colors=component_colors,
-        alpha=0.6,
-        labels=component_names,
-    )
+    colors = ["#1f77b4", "#ff7f0e", "#2ca02c"]
 
-    # compute cumulative tops for each stacked layer
-    y1 = np.array(y_consensus)
-    y2 = y1 + np.array(y_fetch)
-    y3 = y2 + np.array(y_checkpoint)
+    # grouped bars with error bars
+    pos_cons = indices - bar_width
+    pos_fetch = indices
+    pos_chk = indices + bar_width
 
-    # overlay lines with dot markers at the top of each stacked layer
-    ax.plot(x, y1, color=component_colors[0], marker="o", linestyle="-", linewidth=1, markersize=4, label="_nolegend_")
-    ax.plot(x, y2, color=component_colors[1], marker="o", linestyle="-", linewidth=1, markersize=4, label="_nolegend_")
-    ax.plot(x, y3, color=component_colors[2], marker="o", linestyle="-", linewidth=1, markersize=4, label="_nolegend_")
+    ax.bar(pos_cons, cons_mean, width=bar_width, yerr=cons_std, color=colors[0], capsize=3, label="consensus")
+    ax.bar(pos_fetch, fetch_mean, width=bar_width, yerr=fetch_std, color=colors[1], capsize=3, label="fetch")
+    ax.bar(pos_chk, chk_mean, width=bar_width, yerr=chk_std, color=colors[2], capsize=3, label="checkpoint")
 
-    # legend for components
+    # xticks: show actual num_nodes values
+    ax.set_xticks(indices)
+    ax.set_xticklabels([str(nv) for nv in num_nodes])
+
     ax.legend()
     ax.set_xlabel("Number of Nodes")
     ax.set_ylabel("Egress Traffic (bytes)")

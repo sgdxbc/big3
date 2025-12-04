@@ -153,10 +153,14 @@ impl ArchiveTask {
         );
     }
 
-    pub async fn run(mut self, cancel: CancellationToken) -> anyhow::Result<ArchiveMetrics> {
+    pub async fn run(
+        mut self,
+        cancel: CancellationToken,
+        wait: CancellationToken,
+    ) -> anyhow::Result<ArchiveMetrics> {
         let (tx, mut rx) = channel(1);
         cancel
-            .run_until_cancelled(self.run_inner(tx, cancel.clone()))
+            .run_until_cancelled(self.run_inner(tx, wait))
             .await
             .unwrap_or(Ok(()))?;
         let _ = rx.recv().await;
@@ -191,7 +195,9 @@ impl ArchiveTask {
             let batch_size = 40;
             let mut shards = HashMap::new();
             let mut scan_shard = 0;
-            for _ in 0..batch_size.min(self.storage_config.num_shards()) {
+            // let num_shards = self.storage_config.num_shards();
+            let num_shards = 100;
+            for _ in 0..batch_size.min(num_shards) {
                 if self.storing_shards.contains(&scan_shard) {
                     self.scan(&mut iter, &mut shards, scan_shard)?;
                 }
@@ -209,7 +215,7 @@ impl ArchiveTask {
                 );
                 shard += 1;
             }
-            while shard < self.storage_config.num_shards() {
+            while shard < num_shards {
                 let start = Instant::now();
                 join_set.join_next().await.unwrap()??;
                 self.metrics.update += start.elapsed();
@@ -224,7 +230,7 @@ impl ArchiveTask {
                 );
                 shard += 1;
 
-                if scan_shard < self.storage_config.num_shards() {
+                if scan_shard < num_shards {
                     if self.storing_shards.contains(&scan_shard) {
                         self.scan(&mut iter, &mut shards, scan_shard)?;
                     }
@@ -236,6 +242,24 @@ impl ArchiveTask {
                 res??
             }
             self.metrics.update += start.elapsed();
+
+            // let mut shards = HashMap::new();
+            // for shard in 0..self.storage_config.num_shards() {
+            //     if shard == 10 {
+            //         // info!("Sleeping forever for shard 100");
+            //         // tokio::time::sleep(Duration::from_secs(3600)).await;
+            //         break;
+            //     }
+
+            //     if self.storing_shards.contains(&shard) {
+            //         self.scan(&mut iter, &mut shards, shard)?;
+            //     }
+            //     let data = self.get_shard(&mut shards, shard).await?;
+            //     self.update(&tx_stopped, &mut join_set, &mut shard_updates, shard, data);
+            //     while let Some(res) = join_set.join_next().await {
+            //         res??
+            //     }
+            // }
 
             self.metrics.round += round_start.elapsed();
             cancel.cancel();
