@@ -60,25 +60,31 @@ async fn main() -> anyhow::Result<()> {
         }
 
         (Network::Lan, App::Utxo, Setting::Full) => &[0, 100, 300, 600, 1000, 2000, 4000, 6000][..],
-        (Network::Lan, App::Utxo, Setting::Sharded) => {
-            &[0, 100, 300, 600, 1000, 3000, 6000, 10_000, 12_000][..]
-        }
+        (Network::Lan, App::Utxo, Setting::Sharded) => &[
+            0, 100, 300, 600, 1000, 3000, 6000, 10_000, 12_000, 20_000, 30_000, 40_000,
+        ][..],
         (Network::Lan, App::Utxo, Setting::Big) => {
             &[0, 100, 300, 600, 1000, 2000, 3000, 4000, 5000][..]
         }
 
-        (Network::Wan, App::Ycsb, Setting::Full) => &[0, 10_000, 30_000, 60_000, 100_000, 150_000],
-        (Network::Wan, App::Ycsb, Setting::Sharded) => &[
-            0, 10_000, 30_000, 60_000, 100_000, 200_000, 300_000, 400_000,
+        (Network::Wan, App::Ycsb, Setting::Full) => &[
+            0, 10_000, 30_000, 60_000, 100_000, 130_000, 160_000, 200_000, 300_000,
         ],
-        // (Network::Wan, App::Ycsb, Setting::Big) => &[0, 10_000, 30_000, 60_000, 100_000, 150_000, 200_000],
-        (Network::Wan, App::Ycsb, Setting::Big) => &[300_000],
+        (Network::Wan, App::Ycsb, Setting::Sharded) => &[
+            // 0, 10_000, 30_000, 60_000, 100_000, 200_000, 
+            300_000, 400_000,
+        ],
+        (Network::Wan, App::Ycsb, Setting::Big) => &[
+            0, 10_000, 30_000, 60_000, 100_000, 150_000, 200_000, 300_000,
+        ],
 
         (Network::Wan, App::Utxo, Setting::Full) => &[0, 5_000, 10_000, 20_000, 40_000, 60_000],
         (Network::Wan, App::Utxo, Setting::Sharded) => &[
+            0, 5_000, 10_000, 20_000, 40_000, 60_000, 80_000, 100_000, 150_000, 200_000, 300_000,
+        ],
+        (Network::Wan, App::Utxo, Setting::Big) => &[
             0, 5_000, 10_000, 20_000, 40_000, 60_000, 80_000, 100_000, 150_000,
         ],
-        (Network::Wan, App::Utxo, Setting::Big) => &[0, 5_000, 10_000, 20_000, 40_000, 60_000],
     };
 
     for &num_concurrent in num_concurrent {

@@ -292,6 +292,7 @@ pub struct ShardedUtxoWorkingState {
     start: Instant,
     op: UtxoOp,
     status: ShardedUtxoStatus,
+    latency: Option<std::time::Duration>,
 }
 
 enum ShardedUtxoStatus {
@@ -322,6 +323,8 @@ impl<C: WorkloadContext> UtxoWorkload<C, ShardedUtxoWorkingState> {
                 *success &= shard_success;
                 if pending_shards.is_empty() {
                     self.invoke_txns.remove(&invoke_id);
+                    let latency = working.start.elapsed();
+                    working.latency = Some(latency);
 
                     let command = bincode::encode_to_vec(
                         ShardedUtxoOp::Commit(working.op.clone(), *success),
@@ -352,7 +355,7 @@ impl<C: WorkloadContext> UtxoWorkload<C, ShardedUtxoWorkingState> {
                     self.invoke_txns.remove(&invoke_id);
 
                     if *success {
-                        let latency = working.start.elapsed();
+                        let latency = working.latency.unwrap();
                         {
                             let mut scrape_state = self.scrape_state.lock().unwrap();
                             scrape_state.latency_histogram += latency.as_nanos() as u64;
@@ -394,6 +397,7 @@ impl<C: WorkloadContext> UtxoWorkload<C, ShardedUtxoWorkingState> {
                 start: Instant::now(),
                 op,
                 status: ShardedUtxoStatus::Preparing([shard].into(), true),
+                latency: None,
             },
         );
         self.invoke_txns.insert(invoke_id, txn_id);
