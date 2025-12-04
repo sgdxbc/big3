@@ -65,10 +65,10 @@ impl<C: ClientContext> Client<C> {
             .working_states
             .entry((message.client_seq, message.shard_index))
         else {
-            // warn!(
-            //     "stale reply for client_seq {} (no working state)",
-            //     message.client_seq
-            // );
+            warn!(
+                "stale reply for client_seq {} (no working state)",
+                message.client_seq
+            );
             return;
         };
 
